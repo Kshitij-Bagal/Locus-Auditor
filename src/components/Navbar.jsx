@@ -108,7 +108,7 @@ export default function Navbar({
   return (
     <nav className="bg-slate-900 border-b border-slate-800 sticky top-0 z-40 shadow-xl backdrop-blur-md bg-opacity-95">
       <div className="w-full px-3 sm:px-5 lg:px-6">
-        <div className="flex items-center justify-between h-16 sm:h-[68px] gap-3">
+        <div className="flex items-center justify-between h-16 gap-3">
           
           {/* Brand Logo & Title (Fixed width, clean spacing, never wraps or collides) */}
           <div className="flex items-center space-x-2.5 shrink-0 select-none">
@@ -146,8 +146,8 @@ export default function Navbar({
             </div>
           </div>
 
-          {/* Desktop Navigation Links: Icon on top, Text underneath, Active scoop with excluded text background */}
-          <div className="hidden lg:flex items-center gap-0.5 xl:gap-1.5 flex-1 justify-center min-w-0 px-2 h-full">
+          {/* Desktop Navigation Links: Compact Icons by default, expands text label on hover or active */}
+          <div className="hidden lg:flex items-center gap-1 flex-1 justify-center min-w-0 px-2 py-1">
             {approvedNavItems.map(item => {
               const Icon = item.icon;
               const isActive = activePage === item.id;
@@ -156,40 +156,32 @@ export default function Navbar({
                   key={item.id}
                   onClick={() => handleSelectPage(item.id)}
                   title={item.label}
-                  className={`group relative flex flex-col items-center justify-center h-full px-2 sm:px-2.5 py-1.5 transition-all duration-150 cursor-pointer shrink-0 select-none ${
+                  className={`group relative flex items-center rounded-xl py-1.5 transition-all duration-300 ease-in-out cursor-pointer shrink-0 select-none ${
                     isActive
-                      ? 'text-white'
-                      : 'text-slate-400 hover:text-slate-200'
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30 font-bold px-3'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800/90 px-2.5'
                   }`}
                 >
-                  {/* Top Icon Capsule: Colored background ONLY on icon */}
-                  <div className={`relative p-1.5 rounded-xl transition-all duration-200 ${
+                  <Icon className="w-4 h-4 shrink-0 transition-transform duration-200 group-hover:scale-110" />
+                  
+                  {/* Label: Always visible when active; expands smoothly on hover when inactive */}
+                  <span className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-300 ease-in-out ${
                     isActive
-                      ? 'bg-blue-600 text-white shadow-md shadow-blue-500/30 scale-105'
-                      : 'text-slate-400 group-hover:text-white group-hover:bg-slate-800/80'
-                  }`}>
-                    <Icon className="w-4 h-4 shrink-0" />
-
-                    {/* Alert / Overdue Badge */}
-                    {item.badge && (
-                      <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full font-black text-[9px] bg-red-500 text-white animate-pulse shadow-md shadow-red-500/50">
-                        {item.badge}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Text Underneath: Background is explicitly excluded, active text is highlighted */}
-                  <span className={`text-[10px] tracking-tight whitespace-nowrap mt-1 bg-transparent transition-colors ${
-                    isActive
-                      ? 'font-bold text-blue-400'
-                      : 'font-medium text-slate-400 group-hover:text-slate-200'
+                      ? 'max-w-[140px] opacity-100 ml-2'
+                      : 'max-w-0 opacity-0 group-hover:max-w-[140px] group-hover:opacity-100 group-hover:ml-2'
                   }`}>
                     {item.label}
                   </span>
 
-                  {/* Bottom Scoop Indicator: Anchors active tab to the bottom edge of navbar */}
-                  {isActive && (
-                    <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-blue-500 rounded-t-full shadow-[0_-1px_6px_rgba(59,130,246,0.8)]" />
+                  {/* Overdue / Alert Badge */}
+                  {item.badge && (
+                    <span className={`rounded-full font-black text-[9px] bg-red-500 text-white animate-pulse transition-all ${
+                      isActive 
+                        ? 'ml-1.5 px-1.5 py-0.2'
+                        : 'absolute -top-1 -right-1 px-1.5 py-0.2 shadow-md shadow-red-500/50'
+                    }`}>
+                      {item.badge}
+                    </span>
                   )}
                 </button>
               );
