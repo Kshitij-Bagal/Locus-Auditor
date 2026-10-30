@@ -22,21 +22,37 @@ export default function EmailModal({
   const [copied, setCopied] = useState(false);
   const facility = (task?.facilityCode || 'Ahmedabad').toLowerCase();
   
-  const [feEmail, setFeEmail] = useState(task?.feEmail || `${task?.feCode?.toLowerCase() || 'fe'}@lenskart.in`);
-  const [amEmail, setAmEmail] = useState(`am.${facility}@lenskart.in`);
-  const [rmEmail, setRmEmail] = useState('rm.quality@lenskart.in');
+  // Real resolved emails from FE profile hierarchy
+  const [feEmail, setFeEmail] = useState(
+    task?.feEmail || 
+    (task?.feCode ? `${task.feCode.toLowerCase()}@lenskart.in` : 'fe@lenskart.in')
+  );
+  const [amEmail, setAmEmail] = useState(
+    task?.amEmail || 
+    task?.reporting_manager_email || 
+    `am.${facility}@lenskart.in`
+  );
+  const [rmEmail, setRmEmail] = useState(
+    task?.rmEmail || 
+    task?.regional_manager_email || 
+    'rm.quality@lenskart.in'
+  );
+
+  const amDisplayName = task?.amName || 'Area Manager';
+  const rmDisplayName = task?.rmName || 'Regional Manager';
 
   if (!task) return null;
 
-  const subject = `[FATAL NOTICE] Audit Non-Compliance Strike - Task #${task.taskId} | FE: ${task.feName}`;
+  const subject = `[FATAL NOTICE] Audit Non-Compliance Strike - Task #${task.taskId} | FE: ${task.feName || 'Field Executive'}`;
 
   const violationsText = task.failedReasons && task.failedReasons.length > 0 
     ? task.failedReasons.map((r, i) => `   ${i + 1}. [FAIL] ${r}`).join('\n')
     : `   1. [FAIL] SOP image inspection criteria violated (${task.remarks || 'Non-compliance detected'})`;
 
-  const emailBody = `Dear ${task.feName || 'Field Executive'} (ID: ${task.feId} • Code: ${task.feCode}),
+  const emailBody = `Dear ${task.feName || 'Field Executive'} (ID: ${task.feId || 'N/A'} • Code: ${task.feCode || 'N/A'}),
 
-CC: Area Manager (${amEmail}) & Regional Manager (${rmEmail})
+CC: Area Manager: ${amDisplayName} (${amEmail})
+CC: Regional Manager: ${rmDisplayName} (${rmEmail})
 
 This is an automated formal notification from the Central Quality & Compliance Division regarding your recent Lenskart DLC dispatch visit.
 
@@ -123,40 +139,69 @@ Lenskart DLC Operations`;
         {/* Content Body */}
         <div className="p-5 overflow-y-auto space-y-4 text-xs">
           
-          {/* Recipient inputs */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 bg-slate-950 p-3 rounded-xl border border-slate-800">
+          {/* Recipient inputs with resolved AM/RM names */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-950 p-3.5 rounded-xl border border-slate-800">
             <div>
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
-                1. Field Executive (FE):
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider block">
+                  1. Field Executive (FE):
+                </label>
+                {task?.feCode && (
+                  <span className="text-[10px] text-sky-400 font-mono">[{task.feCode}]</span>
+                )}
+              </div>
               <input
                 type="email"
                 value={feEmail}
                 onChange={(e) => setFeEmail(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
+                placeholder="fe.email@lenskart.in"
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-red-500 font-mono"
               />
+              <span className="text-[10px] text-slate-500 truncate block mt-0.5" title={task?.feName}>
+                {task?.feName || 'Executive'}
+              </span>
             </div>
+
             <div>
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
-                2. Area Manager (AM):
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider block">
+                  2. Area Manager (AM):
+                </label>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-semibold">
+                  CC
+                </span>
+              </div>
               <input
                 type="email"
                 value={amEmail}
                 onChange={(e) => setAmEmail(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
+                placeholder="am.email@lenskart.in"
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-red-500 font-mono"
               />
+              <span className="text-[10px] text-slate-400 font-semibold truncate block mt-0.5" title={amDisplayName}>
+                {amDisplayName}
+              </span>
             </div>
+
             <div>
-              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
-                3. Regional Manager (RM):
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] font-bold text-slate-300 uppercase tracking-wider block">
+                  3. Regional Manager (RM):
+                </label>
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold">
+                  CC
+                </span>
+              </div>
               <input
                 type="email"
                 value={rmEmail}
                 onChange={(e) => setRmEmail(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
+                placeholder="rm.email@lenskart.in"
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-red-500 font-mono"
               />
+              <span className="text-[10px] text-slate-400 font-semibold truncate block mt-0.5" title={rmDisplayName}>
+                {rmDisplayName}
+              </span>
             </div>
           </div>
 

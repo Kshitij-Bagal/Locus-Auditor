@@ -16,6 +16,7 @@ import UserManagement from './components/UserManagement.jsx';
 import FEPortal from './components/FEPortal.jsx';
 import DPlusOneEscalationDashboard from './components/DPlusOneEscalationDashboard.jsx';
 import AccessControlPanel from './components/AccessControlPanel.jsx';
+import ClusterManagerPortal from './components/ClusterManagerPortal.jsx';
 
 import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi } from './api/client.js';
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
@@ -82,11 +83,12 @@ export default function App() {
 
   // Active Page Navigation
   const [activePage, setActivePage] = useState(() => {
-    const role = currentUser?.role;
-    if (role === 'Central Ops') return 'upload';
-    if (role === 'FE') return 'fePortal';
-    if (role === 'Admin' || role === 'AM') return 'replacements';
-    if (role === 'GM' || role === 'BH') return 'rules';
+    const roles = parseRoles(currentUser?.roles || [currentUser?.role || 'Auditor']);
+    if (roles.includes('AM') || roles.includes('RM')) return 'managerPortal';
+    if (roles.includes('Central Ops')) return 'upload';
+    if (roles.includes('FE')) return 'fePortal';
+    if (roles.includes('Admin')) return 'replacements';
+    if (roles.includes('GM') || roles.includes('BH')) return 'rules';
     return 'audits';
   });
 
@@ -249,7 +251,10 @@ export default function App() {
 
     // Route to appropriate first page according to effective page permissions
     const accessible = getUserEffectivePages(enrichedProfile);
-    if (accessible.includes('audits')) {
+    const userRoleList = parseRoles(enrichedProfile.roles || [enrichedProfile.role]);
+    if ((userRoleList.includes('AM') || userRoleList.includes('RM')) && accessible.includes('managerPortal')) {
+      setActivePage('managerPortal');
+    } else if (accessible.includes('audits')) {
       setActivePage('audits');
     } else if (accessible.includes('upload')) {
       setActivePage('upload');
@@ -347,19 +352,71 @@ export default function App() {
       if (!u) return false;
       const tId = String(target.feId || '').trim();
       const tCode = String(target.feCode || '').trim().toLowerCase();
-      const uPersonId = String(u.person_id || '').trim();
+      const uPersonId = String(u.person_id || u.employee_code || '').trim().toLowerCase();
+      const tName = String(target.feName || '').trim().toLowerCase();
+      const uName = String(u.full_name || '').trim().toLowerCase();
+      const tEmail = String(target.feEmail || '').trim().toLowerCase();
+      const uEmail = String(u.email || '').trim().toLowerCase();
+
       return (tId && uPersonId === tId) ||
-             (tCode && (uPersonId.toLowerCase() === tCode || u.email?.toLowerCase().includes(tCode))) ||
-             (target.feEmail && u.email?.toLowerCase() === target.feEmail.toLowerCase());
+             (tCode && (uPersonId === tCode || uEmail.includes(tCode))) ||
+             (tEmail && uEmail === tEmail) ||
+             (tName && (uName === tName || uName.includes(tName) || tName.includes(uName)));
     });
+
+    let resolvedAmEmail = feUser?.reporting_manager_email || target.amEmail;
+    let resolvedAmName = feUser?.reporting_manager_name || target.amName;
+    let resolvedRmEmail = feUser?.regional_manager_email || target.rmEmail;
+    let resolvedRmName = feUser?.regional_manager_name || target.rmName;
+
+    // If AM or RM was linked via UUID foreign key (reporting_manager_id / regional_manager_id)
+    if (!resolvedAmEmail && feUser?.reporting_manager_id) {
+      const amObj = users.find(u => u.id === feUser.reporting_manager_id);
+      if (amObj) {
+        resolvedAmEmail = amObj.email;
+        resolvedAmName = amObj.full_name;
+      }
+    }
+    if (!resolvedRmEmail && feUser?.regional_manager_id) {
+      const rmObj = users.find(u => u.id === feUser.regional_manager_id);
+      if (rmObj) {
+        resolvedRmEmail = rmObj.email;
+        resolvedRmName = rmObj.full_name;
+      }
+    }
+
+    // Fallback: look up by hub / facility code for AM and RM
+    const hub = target.facilityCode || target.teamName || target.city;
+    if (!resolvedAmEmail && hub) {
+      const amObj = users.find(u => {
+        const roles = parseRoles(u.roles || [u.role]);
+        return roles.includes('AM') && (u.facility_code === hub || u.city === hub);
+      });
+      if (amObj) {
+        resolvedAmEmail = amObj.email;
+        resolvedAmName = amObj.full_name;
+      }
+    }
+    if (!resolvedRmEmail) {
+      const rmObj = users.find(u => {
+        const roles = parseRoles(u.roles || [u.role]);
+        return roles.includes('RM');
+      });
+      if (rmObj) {
+        resolvedRmEmail = rmObj.email;
+        resolvedRmName = rmObj.full_name;
+      }
+    }
 
     // Open Tri-Party Email Modal with auto-resolved AM and RM emails
     const updatedTaskForEmail = {
       ...target,
-      feEmail: feUser?.email || target.feEmail,
-      amEmail: feUser?.reporting_manager_email || target.amEmail,
-      rmEmail: feUser?.regional_manager_email || target.rmEmail,
+      feEmail: feUser?.email || target.feEmail || `${(target.feCode || 'fe').toLowerCase()}@lenskart.in`,
       feName: target.feName || feUser?.full_name,
+      amEmail: resolvedAmEmail || 'am.operations@lenskart.in',
+      amName: resolvedAmName || 'Area Manager',
+      rmEmail: resolvedRmEmail || 'rm.quality@lenskart.in',
+      rmName: resolvedRmName || 'Regional Manager',
       failedReasons: auditPayload.failedReasons,
       remarks: auditPayload.remarks,
       criteriaStatus: auditPayload.criteriaStatus,
@@ -1044,6 +1101,17 @@ export default function App() {
               setSearchQuery(feCode);
               setActivePage('audits');
             }}
+          />
+        )}
+
+        {/* PAGE: AM & RM CLUSTER OVERSIGHT PORTAL */}
+        {activePage === 'managerPortal' && (
+          <ClusterManagerPortal
+            tasks={tasks}
+            users={users}
+            currentUser={currentUser}
+            onOpenEmailForTask={(task) => setEmailingTask(task)}
+            onNavigate={setActivePage}
           />
         )}
 

@@ -61,6 +61,13 @@ export const SYSTEM_PAGES = [
     category: 'Field Management'
   },
   {
+    id: 'managerPortal',
+    label: 'Cluster Oversight',
+    fullName: 'AM & RM Cluster Operations Portal',
+    description: 'Monitor FE fatal strikes, task statistics, and compliance for teams under your management',
+    category: 'Field Management'
+  },
+  {
     id: 'fePortal',
     label: 'My Visits',
     fullName: 'Field Executive Self-Service',
@@ -130,13 +137,13 @@ export function parseRoles(raw) {
 // Default page access configuration per role
 export const ROLE_DEFAULT_PAGES = {
   SuperAdmin: SYSTEM_PAGES.map(p => p.id),
-  Admin: ['audits', 'replacements', 'feRegistry', 'escalations'], // City Admin
-  'Central Ops': ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'feRegistry'],
-  GM: ['rules', 'escalations', 'allocation', 'replacements', 'feRegistry'],
-  BH: ['rules', 'escalations', 'allocation', 'replacements', 'feRegistry'],
+  Admin: ['audits', 'replacements', 'feRegistry', 'escalations', 'managerPortal'], // City Admin
+  'Central Ops': ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'feRegistry', 'managerPortal'],
+  GM: ['rules', 'escalations', 'allocation', 'replacements', 'feRegistry', 'managerPortal'],
+  BH: ['rules', 'escalations', 'allocation', 'replacements', 'feRegistry', 'managerPortal'],
   Auditor: ['audits'],
-  AM: ['audits', 'replacements', 'feRegistry'],
-  RM: ['audits', 'replacements', 'feRegistry'],
+  AM: ['managerPortal', 'audits', 'replacements', 'feRegistry'],
+  RM: ['managerPortal', 'audits', 'replacements', 'feRegistry'],
   FE: ['fePortal']
 };
 

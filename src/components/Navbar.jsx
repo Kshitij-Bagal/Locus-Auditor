@@ -14,7 +14,8 @@ import {
   User, 
   Building2,
   AlertTriangle,
-  Key
+  Key,
+  Briefcase
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -75,6 +76,12 @@ export default function Navbar({
       label: 'Field Staff',
       icon: UserCheck,
       allowedRoles: ['Admin', 'AM', 'RM', 'GM', 'BH', 'Central Ops', 'SuperAdmin']
+    },
+    {
+      id: 'managerPortal',
+      label: 'Cluster Oversight',
+      icon: Briefcase,
+      allowedRoles: ['AM', 'RM', 'Admin', 'GM', 'BH', 'Central Ops', 'SuperAdmin']
     },
     {
       id: 'fePortal',
