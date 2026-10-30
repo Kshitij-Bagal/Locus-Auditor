@@ -72,12 +72,6 @@ export default function Navbar({
       allowedRoles: ['Admin', 'AM', 'Central Ops', 'GM', 'BH', 'SuperAdmin']
     },
     {
-      id: 'feRegistry',
-      label: 'Field Staff',
-      icon: UserCheck,
-      allowedRoles: ['Admin', 'AM', 'RM', 'GM', 'BH', 'Central Ops', 'SuperAdmin']
-    },
-    {
       id: 'managerPortal',
       label: 'Cluster Oversight',
       icon: Briefcase,

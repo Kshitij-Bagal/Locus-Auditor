@@ -123,11 +123,11 @@ export default function AccessControlPanel({
     } else if (presetType === 'AUDITOR') {
       newPages = ['audits'];
     } else if (presetType === 'CITY_ADMIN') {
-      newPages = ['audits', 'replacements', 'feRegistry', 'escalations'];
+      newPages = ['audits', 'replacements', 'escalations', 'managerPortal'];
     } else if (presetType === 'CITY_ADMIN_AND_AUDITOR') {
-      newPages = ['audits', 'replacements', 'feRegistry', 'escalations'];
+      newPages = ['audits', 'replacements', 'escalations', 'managerPortal'];
     } else if (presetType === 'CENTRAL_OPS') {
-      newPages = ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'feRegistry'];
+      newPages = ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'managerPortal'];
     } else if (presetType === 'RESET') {
       // Reset to default union for assigned roles
       const roles = parseRoles(user.roles || [user.role]);

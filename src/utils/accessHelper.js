@@ -54,17 +54,10 @@ export const SYSTEM_PAGES = [
     category: 'Asset Management'
   },
   {
-    id: 'feRegistry',
-    label: 'Field Staff',
-    fullName: 'FE Staff Registry & Strikes',
-    description: 'Field executive registry, penalty strikes, and quality performance scorecard',
-    category: 'Field Management'
-  },
-  {
     id: 'managerPortal',
     label: 'Cluster Oversight',
     fullName: 'AM & RM Cluster Operations Portal',
-    description: 'Monitor FE fatal strikes, task statistics, and compliance for teams under your management',
+    description: 'Monitor FE fatal strikes, task statistics, compliance & daily digests for teams under your management',
     category: 'Field Management'
   },
   {
@@ -137,13 +130,13 @@ export function parseRoles(raw) {
 // Default page access configuration per role
 export const ROLE_DEFAULT_PAGES = {
   SuperAdmin: SYSTEM_PAGES.map(p => p.id),
-  Admin: ['audits', 'replacements', 'feRegistry', 'escalations', 'managerPortal'], // City Admin
-  'Central Ops': ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'feRegistry', 'managerPortal'],
-  GM: ['rules', 'escalations', 'allocation', 'replacements', 'feRegistry', 'managerPortal'],
-  BH: ['rules', 'escalations', 'allocation', 'replacements', 'feRegistry', 'managerPortal'],
+  Admin: ['audits', 'replacements', 'escalations', 'managerPortal'], // City Admin
+  'Central Ops': ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'managerPortal'],
+  GM: ['rules', 'escalations', 'allocation', 'replacements', 'managerPortal'],
+  BH: ['rules', 'escalations', 'allocation', 'replacements', 'managerPortal'],
   Auditor: ['audits'],
-  AM: ['managerPortal', 'audits', 'replacements', 'feRegistry'],
-  RM: ['managerPortal', 'audits', 'replacements', 'feRegistry'],
+  AM: ['managerPortal', 'audits', 'replacements'],
+  RM: ['managerPortal', 'audits', 'replacements'],
   FE: ['fePortal']
 };
 
@@ -240,17 +233,24 @@ export function getUserEffectivePages(user) {
   const emailKey = user.email ? String(user.email).trim().toLowerCase() : '';
   const idKey = user.id ? String(user.id).trim().toLowerCase() : '';
 
+  const cleanPages = (pages) => {
+    if (!Array.isArray(pages)) return [];
+    // Auto-migrate any legacy feRegistry reference to managerPortal
+    const migrated = pages.map(p => p === 'feRegistry' ? 'managerPortal' : p);
+    return Array.from(new Set(migrated.filter(p => p !== 'feRegistry')));
+  };
+
   const savedOverride = permMap[emailKey] || permMap[idKey];
   if (Array.isArray(savedOverride) && savedOverride.length > 0) {
-    return savedOverride;
+    return cleanPages(savedOverride);
   }
 
   // Check direct database profile attribute (e.g. profile.page_access)
   if (Array.isArray(user.page_access) && user.page_access.length > 0) {
-    return user.page_access;
+    return cleanPages(user.page_access);
   }
   if (Array.isArray(user.pageAccess) && user.pageAccess.length > 0) {
-    return user.pageAccess;
+    return cleanPages(user.pageAccess);
   }
 
   // Compute union of default pages for all assigned roles
@@ -265,7 +265,7 @@ export function getUserEffectivePages(user) {
     pagesSet.add('audits');
   }
 
-  return Array.from(pagesSet);
+  return cleanPages(Array.from(pagesSet));
 }
 
 // Quick check if a user is authorized to view a specific page

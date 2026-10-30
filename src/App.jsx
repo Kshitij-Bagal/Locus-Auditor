@@ -8,7 +8,6 @@ import TaskTable from './components/TaskTable.jsx';
 import TaskCardGrid from './components/TaskCardGrid.jsx';
 import AuditModal from './components/AuditModal.jsx';
 import EmailModal from './components/EmailModal.jsx';
-import FERegistry from './components/FERegistry.jsx';
 import CentralRuleStudio from './components/CentralRuleStudio.jsx';
 import AutoAllocationRoster from './components/AutoAllocationRoster.jsx';
 import AssetRequisitionDashboard from './components/AssetRequisitionDashboard.jsx';
@@ -1093,17 +1092,6 @@ export default function App() {
           />
         )}
 
-        {/* PAGE 6: FE REGISTRY & QUALITY SCORECARD */}
-        {activePage === 'feRegistry' && (
-          <FERegistry
-            tasks={tasks}
-            onFilterFE={(feCode) => {
-              setSearchQuery(feCode);
-              setActivePage('audits');
-            }}
-          />
-        )}
-
         {/* PAGE: AM & RM CLUSTER OVERSIGHT PORTAL */}
         {activePage === 'managerPortal' && (
           <ClusterManagerPortal
@@ -1112,6 +1100,10 @@ export default function App() {
             currentUser={currentUser}
             onOpenEmailForTask={(task) => setEmailingTask(task)}
             onNavigate={setActivePage}
+            onFilterFE={(feCode) => {
+              setSearchQuery(feCode);
+              setActivePage('audits');
+            }}
           />
         )}
 

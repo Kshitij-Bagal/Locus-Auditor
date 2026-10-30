@@ -31,7 +31,8 @@ export default function ClusterManagerPortal({
   users = [],
   currentUser,
   onOpenEmailForTask,
-  onNavigate
+  onNavigate,
+  onFilterFE
 }) {
   const [activeTab, setActiveTab] = useState('scorecard'); // 'scorecard' | 'fatals' | 'amComparison'
   const [searchQuery, setSearchQuery] = useState('');
@@ -715,6 +716,18 @@ export default function ClusterManagerPortal({
                           {/* Actions */}
                           <td className="py-3.5 px-4 text-right whitespace-nowrap">
                             <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => {
+                                  if (onFilterFE) onFilterFE(fe.name || fe.code);
+                                  else if (onNavigate) onNavigate('audits');
+                                }}
+                                className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1 transition-colors cursor-pointer"
+                                title="Filter customer visits by this FE on Audits Console"
+                              >
+                                <Filter className="w-3 h-3 text-sky-400" />
+                                <span>Visits ({fe.totalTasks})</span>
+                              </button>
+
                               {fe.fatalTasks > 0 && (
                                 <button
                                   onClick={() => {
