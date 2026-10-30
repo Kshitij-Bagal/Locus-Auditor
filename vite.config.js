@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { sendEmailHandler } from './api/send-email.js'
+import { dailyDigestCronHandler } from './api/cron/daily-digest.js'
 
 function emailDevPlugin() {
   return {
@@ -10,6 +11,14 @@ function emailDevPlugin() {
       server.middlewares.use('/api/send-email', async (req, res, next) => {
         try {
           await sendEmailHandler(req, res);
+        } catch (err) {
+          next(err);
+        }
+      });
+
+      server.middlewares.use('/api/cron/daily-digest', async (req, res, next) => {
+        try {
+          await dailyDigestCronHandler(req, res);
         } catch (err) {
           next(err);
         }

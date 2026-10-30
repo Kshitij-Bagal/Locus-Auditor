@@ -1460,3 +1460,134 @@ export const rosterApi = {
     }
   }
 };
+
+// ====================================================================
+// 8. DAILY QUALITY AUDIT DIGEST & ESCALATION REST API
+// ====================================================================
+
+const DIGEST_CACHE_KEY = 'locus_daily_digest_cache_v1';
+
+export const dailyDigestApi = {
+  // Fetch historical daily digests
+  async getDigestLogs({ date, recipientEmail, role } = {}) {
+    if (supabase) {
+      try {
+        let query = supabase
+          .from('daily_digest_logs')
+          .select('*')
+          .order('sent_at', { ascending: false });
+
+        if (date) query = query.eq('digest_date', date);
+        if (recipientEmail) query = query.eq('recipient_email', recipientEmail.toLowerCase().trim());
+        if (role) query = query.eq('recipient_role', role);
+
+        const { data, error } = await query;
+        if (!error && data) {
+          localStorage.setItem(DIGEST_CACHE_KEY, JSON.stringify(data));
+          return data;
+        }
+      } catch (err) {
+        console.warn('Failed to query daily_digest_logs from Supabase:', err.message);
+      }
+    }
+
+    // LocalStorage fallback cache
+    try {
+      const saved = localStorage.getItem(DIGEST_CACHE_KEY);
+      if (saved) {
+        let list = JSON.parse(saved);
+        if (date) list = list.filter(l => l.digest_date === date);
+        if (recipientEmail) list = list.filter(l => l.recipient_email?.toLowerCase() === recipientEmail.toLowerCase());
+        return list;
+      }
+    } catch (e) {}
+
+    return [];
+  },
+
+  // Trigger or run daily digest cron on demand
+  async triggerDigest({ date, force = false, managerEmail, dryRun = false, tasks, users }) {
+    const gatewayConfig = emailApi.getGatewayConfig();
+
+    const response = await fetch('/api/cron/daily-digest', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-requested-by': 'locus-portal'
+      },
+      body: JSON.stringify({
+        date,
+        force,
+        managerEmail,
+        dryRun,
+        tasks,
+        users,
+        credentials: {
+          resendApiKey: gatewayConfig.resendApiKey,
+          smtpHost: gatewayConfig.smtpHost,
+          smtpPort: gatewayConfig.smtpPort,
+          smtpUser: gatewayConfig.smtpUser,
+          smtpPass: gatewayConfig.smtpPass,
+          fromAddress: gatewayConfig.fromAddress
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to execute daily digest cron');
+    }
+    return data;
+  },
+
+  // Manager Acknowledgement (Audit Accountability Trail)
+  async acknowledgeDigest(logId, currentUser) {
+    const timestamp = new Date().toISOString();
+    const ackName = currentUser?.full_name || currentUser?.name || 'Area Manager';
+    const ackId = currentUser?.id || null;
+
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('daily_digest_logs')
+          .update({
+            acknowledged_at: timestamp,
+            acknowledged_by_id: ackId,
+            acknowledged_by_name: ackName,
+            updated_at: timestamp
+          })
+          .eq('id', logId)
+          .select()
+          .single();
+
+        if (!error && data) return { success: true, data };
+      } catch (err) {
+        console.warn('dailyDigestApi.acknowledgeDigest error:', err.message);
+      }
+    }
+
+    // Local fallback update
+    try {
+      const saved = localStorage.getItem(DIGEST_CACHE_KEY);
+      if (saved) {
+        const list = JSON.parse(saved).map(item => {
+          if (item.id === logId) {
+            return {
+              ...item,
+              acknowledged_at: timestamp,
+              acknowledged_by_name: ackName
+            };
+          }
+          return item;
+        });
+        localStorage.setItem(DIGEST_CACHE_KEY, JSON.stringify(list));
+      }
+    } catch (e) {}
+
+    return { 
+      success: true, 
+      acknowledged_at: timestamp,
+      acknowledged_by_name: ackName
+    };
+  }
+};

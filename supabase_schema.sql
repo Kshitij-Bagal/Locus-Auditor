@@ -1182,6 +1182,53 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
 
+-- ====================================================================
+-- 15. DAILY QUALITY AUDIT DIGEST & ESCALATION LOGS
+-- ====================================================================
+CREATE TABLE IF NOT EXISTS public.daily_digest_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    digest_date DATE NOT NULL,
+    recipient_email TEXT NOT NULL,
+    recipient_name TEXT,
+    recipient_role TEXT NOT NULL CHECK (recipient_role IN ('AM', 'RM')),
+    cluster_or_region TEXT NOT NULL,
+    total_audited INT DEFAULT 0,
+    total_passed INT DEFAULT 0,
+    fatal_count INT DEFAULT 0,
+    compliance_rate NUMERIC DEFAULT 0.0,
+    repeat_offenders JSONB DEFAULT '[]'::jsonb, -- [{ feName, feCode, fatalCount7Days, recentFatalDate }]
+    common_failures JSONB DEFAULT '[]'::jsonb,  -- [{ reason, count }]
+    fatal_incidents JSONB DEFAULT '[]'::jsonb,   -- [{ taskId, feName, feCode, reasons, remarks, auditedAt, portalUrl }]
+    sent_status TEXT DEFAULT 'SENT' CHECK (sent_status IN ('SENT', 'FAILED', 'PENDING')),
+    sent_at TIMESTAMPTZ DEFAULT NOW(),
+    error_message TEXT,
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+    acknowledged_by_name TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT daily_digest_unique_day_recipient UNIQUE (digest_date, recipient_email)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_digest_date ON public.daily_digest_logs(digest_date);
+CREATE INDEX IF NOT EXISTS idx_daily_digest_recipient ON public.daily_digest_logs(recipient_email);
+CREATE INDEX IF NOT EXISTS idx_daily_digest_cluster ON public.daily_digest_logs(cluster_or_region);
+CREATE INDEX IF NOT EXISTS idx_daily_digest_role ON public.daily_digest_logs(recipient_role);
+CREATE INDEX IF NOT EXISTS idx_daily_digest_status ON public.daily_digest_logs(sent_status);
+
+-- Enable RLS for daily_digest_logs
+ALTER TABLE public.daily_digest_logs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow authenticated read on daily_digest_logs"
+    ON public.daily_digest_logs FOR SELECT
+    TO authenticated, anon
+    USING (true);
+
+CREATE POLICY "Allow authenticated insert/update on daily_digest_logs"
+    ON public.daily_digest_logs FOR ALL
+    TO authenticated, anon
+    USING (true);
+
 -- 16. RELOAD POSTGREST SCHEMA CACHE (Fixes column & RPC cache immediately)
 NOTIFY pgrst, 'reload schema';
 

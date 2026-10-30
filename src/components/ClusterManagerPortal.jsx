@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parseRoles, displayRoleName } from '../utils/accessHelper.js';
+import DailyDigestManagerView from './DailyDigestManagerView.jsx';
 
 export default function ClusterManagerPortal({
   tasks = [],
@@ -541,6 +542,18 @@ export default function ClusterManagerPortal({
           <span>Fatal Incidents Feed ({scopedFatalTasks.length})</span>
         </button>
 
+        <button
+          onClick={() => setActiveTab('dailyDigest')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+            activeTab === 'dailyDigest'
+              ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20'
+              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          <Mail className="w-4 h-4" />
+          <span>Daily Digest & Escalation</span>
+        </button>
+
         {(isRM || isExecutive) && (
           <button
             onClick={() => setActiveTab('amComparison')}
@@ -902,6 +915,19 @@ export default function ClusterManagerPortal({
             ))}
           </div>
         </div>
+      )}
+
+      {/* TAB 4: DAILY QUALITY AUDIT DIGEST & ESCALATION SYSTEM */}
+      {activeTab === 'dailyDigest' && (
+        <DailyDigestManagerView
+          tasks={tasks}
+          users={users}
+          currentUser={currentUser}
+          scopedFEs={scopedFEs}
+          scopedFatalTasks={scopedFatalTasks}
+          onOpenEmailForTask={onOpenEmailForTask}
+          onNavigate={onNavigate}
+        />
       )}
 
     </div>
