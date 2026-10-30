@@ -19,8 +19,10 @@
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.2",
     "lucide-react": "^1.63.0",
+    "nodemailer": "^10.3.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "resend": "^6.35.0",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.5",
     "xlsx": "^0.18.5"

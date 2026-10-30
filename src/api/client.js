@@ -678,7 +678,89 @@ export const rulesApi = {
 // 5. AUDIT FAILURE EMAIL NOTIFICATION SERVICE (FE, AM, RM)
 // ====================================================================
 
+const EMAIL_CONFIG_KEY = 'locus_email_gateway_config_v1';
+
 export const emailApi = {
+  // Read configured gateway credentials (Resend or SMTP)
+  getGatewayConfig() {
+    try {
+      const saved = localStorage.getItem(EMAIL_CONFIG_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {
+      provider: 'resend', // 'resend' | 'smtp'
+      resendApiKey: '',
+      smtpHost: '',
+      smtpPort: 587,
+      smtpUser: '',
+      smtpPass: '',
+      fromAddress: 'Lenskart Quality Audit <onboarding@resend.dev>'
+    };
+  },
+
+  // Persist updated email gateway credentials
+  saveGatewayConfig(config) {
+    localStorage.setItem(EMAIL_CONFIG_KEY, JSON.stringify(config));
+    return config;
+  },
+
+  // Test live email connectivity
+  async testConnection(targetEmail) {
+    const config = this.getGatewayConfig();
+    return this.sendRealEmail({
+      to: [targetEmail],
+      subject: '[TEST] Lenskart DLC Email Gateway Verification',
+      text: `This is a verification test from Lenskart DLC Quality Audit System.\nProvider: ${config.provider}\nTimestamp: ${new Date().toISOString()}`,
+      html: `
+        <div style="font-family: sans-serif; padding: 20px; background: #0f172a; color: #f8fafc; border-radius: 12px;">
+          <h2 style="color: #38bdf8; margin: 0 0 10px 0;">Email Gateway Active</h2>
+          <p style="color: #94a3b8; font-size: 14px;">Your Lenskart DLC Quality Audit mail gateway is properly configured and successfully delivering live messages.</p>
+          <div style="background: #1e293b; padding: 12px; border-radius: 8px; margin-top: 15px; font-size: 13px;">
+            <strong>Provider:</strong> ${config.provider.toUpperCase()}<br/>
+            <strong>Timestamp:</strong> ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+          </div>
+        </div>
+      `,
+      customCredentials: config
+    });
+  },
+
+  // Direct HTTP dispatch to backend serverless / dev endpoint (/api/send-email)
+  async sendRealEmail({ to, cc, bcc, subject, text, html, customCredentials }) {
+    const config = customCredentials || this.getGatewayConfig();
+    
+    const response = await fetch('/api/send-email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        to,
+        cc,
+        bcc,
+        subject,
+        text,
+        html,
+        provider: config.provider,
+        credentials: {
+          resendApiKey: config.resendApiKey,
+          smtpHost: config.smtpHost,
+          smtpPort: config.smtpPort,
+          smtpUser: config.smtpUser,
+          smtpPass: config.smtpPass,
+          fromAddress: config.fromAddress
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to dispatch email notice');
+    }
+    return data;
+  },
+
+  // Main Audit Failure Notice Dispatch
   async sendAuditFailNotice({
     taskId,
     feEmail,
@@ -691,8 +773,126 @@ export const emailApi = {
     auditorName
   }) {
     const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const toRecipients = [feEmail].filter(Boolean);
+    const ccRecipients = [amEmail, rmEmail].filter(Boolean);
 
-    // 1. Log dispatch in database
+    // Generate structured plain text payload
+    const subject = `[URGENT] Lenskart DLC Audit Failure Notice - Task #${taskId} (${feName || 'Field Executive'})`;
+    const body = `Dear ${feName || 'Field Executive'},
+
+This is an automated formal notification from the Lenskart Home Eye Test / DLC Central Quality Audit System.
+
+Your recent dispatch visit (Task ID: ${taskId}) has been audited and marked with a FATAL NON-COMPLIANCE STRIKE by Central Quality Auditor ${auditorName} on ${timestamp}.
+
+----------------------------------------------------------------------
+SPECIFIC AUDIT FAILURE REASONS IDENTIFIED:
+----------------------------------------------------------------------
+${(failedReasons || []).map((r, i) => `${i + 1}. [FAIL] ${r}`).join('\n')}
+
+${remarks ? `Auditor Remarks: "${remarks}"\n` : ''}
+----------------------------------------------------------------------
+MANDATORY CORRECTIVE ACTIONS & GUIDELINES FOR FUTURE AUDITS:
+----------------------------------------------------------------------
+${(improvementTips || []).map((tip, i) => `${i + 1}. ${tip}`).join('\n')}
+
+CC Recipients:
+- Area Manager (AM): ${amEmail} (Immediate hub coaching & kit inspection required)
+- Regional Manager (RM): ${rmEmail} (Regional compliance escalation record)
+
+Please coordinate with your Area Manager to review standard operating procedures (SOP) before your next dispatch shift.
+
+Central Quality & Compliance Division
+Lenskart DLC Operations`;
+
+    // Generate rich HTML template
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f1f5f9; margin: 0; padding: 20px; color: #1e293b; }
+          .container { max-width: 620px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; }
+          .header { background: linear-gradient(135deg, #b91c1c 0%, #dc2626 100%); color: #ffffff; padding: 24px; text-align: left; }
+          .badge { display: inline-block; background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+          .title { margin: 0; font-size: 20px; font-weight: 800; }
+          .content { padding: 24px; }
+          .section { margin-bottom: 24px; }
+          .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; margin-bottom: 10px; border-bottom: 2px solid #f1f5f9; padding-bottom: 6px; }
+          .fail-item { background: #fef2f2; border-left: 4px solid #ef4444; padding: 10px 14px; border-radius: 4px; margin-bottom: 8px; color: #991b1b; font-weight: 600; font-size: 13px; }
+          .tip-item { background: #f8fafc; border-left: 4px solid #3b82f6; padding: 10px 14px; border-radius: 4px; margin-bottom: 8px; color: #1e293b; font-size: 13px; }
+          .remarks-box { background: #fffbeb; border: 1px dashed #f59e0b; padding: 12px 14px; border-radius: 6px; color: #92400e; font-size: 13px; margin-bottom: 20px; font-style: italic; }
+          .cc-box { background: #f8fafc; border: 1px solid #e2e8f0; padding: 14px; border-radius: 8px; font-size: 12px; color: #475569; }
+          .footer { background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 16px 24px; text-align: center; font-size: 11px; color: #94a3b8; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <span class="badge">FATAL AUDIT STRIKE NOTICE</span>
+            <h1 class="title">Quality Non-Compliance Notice</h1>
+            <p style="margin: 6px 0 0 0; opacity: 0.9; font-size: 13px;">Task #${taskId} • Lenskart Home Eye Test</p>
+          </div>
+          
+          <div class="content">
+            <p style="font-size: 14px; line-height: 1.5;">Dear <strong>${feName || 'Field Executive'}</strong>,</p>
+            <p style="font-size: 13px; color: #475569; line-height: 1.5;">
+              Your recent home eye test dispatch (Task <strong>#${taskId}</strong>) was audited by Central Quality Auditor <strong>${auditorName || 'Central QA'}</strong> on <strong>${timestamp}</strong> and has been issued a <strong>FATAL AUDIT STRIKE</strong>.
+            </p>
+
+            ${remarks ? `
+              <div class="section">
+                <div class="section-title">Auditor Remarks</div>
+                <div class="remarks-box">"${remarks}"</div>
+              </div>
+            ` : ''}
+
+            <div class="section">
+              <div class="section-title">Violations Identified</div>
+              ${(failedReasons || []).map(r => `<div class="fail-item">&#9888; ${r}</div>`).join('')}
+            </div>
+
+            <div class="section">
+              <div class="section-title">Mandatory Action Checklist</div>
+              ${(improvementTips || []).map(tip => `<div class="tip-item">&#10004; ${tip}</div>`).join('')}
+            </div>
+
+            <div class="section">
+              <div class="section-title">Escalation & Supervision Hierarchy</div>
+              <div class="cc-box">
+                <div><strong>Area Manager (AM):</strong> ${amEmail} (Kit inspection & direct coaching required)</div>
+                <div style="margin-top: 6px;"><strong>Regional Manager (RM):</strong> ${rmEmail} (Regional compliance audit record)</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="footer">
+            Central Quality & Compliance Division • Lenskart Solutions Pvt. Ltd.<br/>
+            This is an automated system dispatch generated by Locus Auditor.
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    // Attempt Real Email Dispatch via /api/send-email
+    let liveDispatchResult = null;
+    let liveDispatchError = null;
+
+    try {
+      liveDispatchResult = await this.sendRealEmail({
+        to: toRecipients,
+        cc: ccRecipients,
+        subject,
+        text: body,
+        html
+      });
+    } catch (err) {
+      console.warn('Real email dispatch encountered an issue:', err.message);
+      liveDispatchError = err.message;
+    }
+
+    // Log to Supabase audit_email_logs
     if (supabase) {
       try {
         await supabase.from('audit_email_logs').insert({
@@ -703,51 +903,29 @@ export const emailApi = {
           reasons: failedReasons,
           improvement_tips: improvementTips,
           sent_by: auditorName || 'Central Quality Auditor',
-          status: 'SENT'
+          status: liveDispatchResult ? 'DELIVERED' : 'FAILED',
+          error_message: liveDispatchError,
+          provider_response: liveDispatchResult
         });
       } catch (err) {
         console.warn('Logging email notice to DB failed:', err.message);
       }
     }
 
-    // 2. Generate structured email payload
-    const subject = `[URGENT] Lenskart DLC Audit Failure Notice - Task #${taskId} (${feName})`;
-    const body = `Dear ${feName},
-
-This is an automated notification from the Lenskart Home Eye Test / DLC Central Quality Audit System.
-
-Your recent dispatch visit (Task ID: ${taskId}) has been audited and marked with a FATAL NON-COMPLIANCE STRIKE by Central Quality Auditor ${auditorName} on ${timestamp}.
-
-----------------------------------------------------------------------
-SPECIFIC AUDIT FAILURE REASONS IDENTIFIED:
-----------------------------------------------------------------------
-${failedReasons.map((r, i) => `${i + 1}. [FAIL] ${r}`).join('\n')}
-
-${remarks ? `Auditor Remarks: "${remarks}"\n` : ''}
-----------------------------------------------------------------------
-MANDATORY CORRECTIVE ACTIONS & GUIDELINES FOR FUTURE AUDITS:
-----------------------------------------------------------------------
-${improvementTips.map((tip, i) => `${i + 1}. ${tip}`).join('\n')}
-
-CC Recipients:
-- Area Manager (AM): ${amEmail} (Immediate hub coaching & kit inspection required)
-- Regional Manager (RM): ${rmEmail} (Regional compliance escalation record)
-
-Please coordinate with your Area Manager to review the standard operating procedure (SOP) before your next dispatch shift.
-
-Central Quality & Compliance Division
-Lenskart DLC Operations`;
-
-    // Direct mailto link generator for 1-click fallback dispatch
+    // Fallback mailto link
     const mailtoRecipients = [feEmail, amEmail, rmEmail].filter(Boolean).join(',');
     const mailtoLink = `mailto:${encodeURIComponent(mailtoRecipients)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 
     return {
-      success: true,
+      success: Boolean(liveDispatchResult),
+      liveDelivered: Boolean(liveDispatchResult),
+      deliveryDetails: liveDispatchResult,
+      deliveryError: liveDispatchError,
       taskId,
       recipients: [feEmail, amEmail, rmEmail],
       subject,
       body,
+      html,
       mailtoLink
     };
   }
