@@ -146,8 +146,8 @@ export default function Navbar({
             </div>
           </div>
 
-          {/* Desktop Navigation Links (All pages accessible directly as sleek aesthetic tabs) */}
-          <div className="hidden lg:flex items-center gap-1.5 flex-1 justify-center min-w-0 px-2 overflow-x-auto no-scrollbar py-1">
+          {/* Desktop Navigation Links: Compact Icons by default, expands text label on hover or active */}
+          <div className="hidden lg:flex items-center gap-1 flex-1 justify-center min-w-0 px-2 py-1">
             {approvedNavItems.map(item => {
               const Icon = item.icon;
               const isActive = activePage === item.id;
@@ -155,16 +155,31 @@ export default function Navbar({
                 <button
                   key={item.id}
                   onClick={() => handleSelectPage(item.id)}
-                  className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
+                  title={item.label}
+                  className={`group relative flex items-center rounded-xl py-1.5 transition-all duration-300 ease-in-out cursor-pointer shrink-0 select-none ${
                     isActive
-                      ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30 font-bold scale-[1.02]'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800/80'
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30 font-bold px-3'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800/90 px-2.5'
                   }`}
                 >
-                  <Icon className="w-3.5 h-3.5 shrink-0" />
-                  <span>{item.label}</span>
+                  <Icon className="w-4 h-4 shrink-0 transition-transform duration-200 group-hover:scale-110" />
+                  
+                  {/* Label: Always visible when active; expands smoothly on hover when inactive */}
+                  <span className={`text-xs font-semibold whitespace-nowrap overflow-hidden transition-all duration-300 ease-in-out ${
+                    isActive
+                      ? 'max-w-[140px] opacity-100 ml-2'
+                      : 'max-w-0 opacity-0 group-hover:max-w-[140px] group-hover:opacity-100 group-hover:ml-2'
+                  }`}>
+                    {item.label}
+                  </span>
+
+                  {/* Overdue / Alert Badge */}
                   {item.badge && (
-                    <span className="px-1.5 py-0.2 rounded-full text-[10px] font-black bg-red-500 text-white animate-pulse">
+                    <span className={`rounded-full font-black text-[9px] bg-red-500 text-white animate-pulse transition-all ${
+                      isActive 
+                        ? 'ml-1.5 px-1.5 py-0.2'
+                        : 'absolute -top-1 -right-1 px-1.5 py-0.2 shadow-md shadow-red-500/50'
+                    }`}>
                       {item.badge}
                     </span>
                   )}
