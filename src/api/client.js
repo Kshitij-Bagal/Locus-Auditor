@@ -459,27 +459,36 @@ export const tasksApi = {
     feEmail,
     amEmail,
     rmEmail,
-    improvementTips
+    improvementTips,
+    immediateEmail = false
   }) {
-    // 1. First, send notification email to FE, AM, RM
+    // 1. Single immediate email only if explicitly enabled (default is false to use daily scheduled batch)
     const recipients = [feEmail, amEmail, rmEmail].filter(Boolean);
-    const emailDispatch = await emailApi.sendAuditFailNotice({
-      taskId,
-      feEmail: feEmail || `${taskData?.feCode?.toLowerCase() || 'fe'}@lenskart.in`,
-      amEmail: amEmail || `am.${(taskData?.facilityCode || 'ahmedabad').toLowerCase()}@lenskart.in`,
-      rmEmail: rmEmail || 'rm.west@lenskart.in',
-      feName: taskData?.feName || 'Field Executive',
-      failedReasons: failedReasons || ['SOP criteria non-compliance'],
-      remarks: remarks || '',
-      improvementTips: improvementTips || [
-        'Ensure official Lenskart polo uniform and ID card are visible in selfie',
-        'Deploy telescoping standee on level surface and maintain 6/6 eye-level distance',
-        'Verify both blue and yellow penlights are operational and active'
-      ],
-      auditorName
-    });
+    let emailDispatch = null;
 
-    // 2. Write FATAL status to database
+    if (immediateEmail) {
+      try {
+        emailDispatch = await emailApi.sendAuditFailNotice({
+          taskId,
+          feEmail: feEmail || `${taskData?.feCode?.toLowerCase() || 'fe'}@lenskart.in`,
+          amEmail: amEmail || `am.${(taskData?.facilityCode || 'ahmedabad').toLowerCase()}@lenskart.in`,
+          rmEmail: rmEmail || 'rm.west@lenskart.in',
+          feName: taskData?.feName || 'Field Executive',
+          failedReasons: failedReasons || ['SOP criteria non-compliance'],
+          remarks: remarks || '',
+          improvementTips: improvementTips || [
+            'Ensure official Lenskart polo uniform and ID card are visible in selfie',
+            'Deploy telescoping standee on level surface and maintain 6/6 eye-level distance',
+            'Verify both blue and yellow penlights are operational and active'
+          ],
+          auditorName
+        });
+      } catch (e) {
+        console.warn('Single immediate email dispatch warning:', e.message);
+      }
+    }
+
+    // 2. Write FATAL status to database with email_notified = false (queuing for daily batch)
     if (supabase) {
       await supabase.from('tasks').update({
         audit_status: 'FATAL',
@@ -490,8 +499,9 @@ export const tasksApi = {
         failed_reasons: failedReasons || [],
         criteria_status: criteriaStatus || {},
         replacements: replacements || [],
-        email_sent: true,
-        email_sent_at: new Date().toISOString(),
+        email_notified: immediateEmail ? true : false,
+        email_sent: immediateEmail ? true : false,
+        email_sent_at: immediateEmail ? new Date().toISOString() : null,
         email_recipients: recipients,
         updated_at: new Date().toISOString()
       }).eq('id', taskId);
@@ -514,7 +524,8 @@ export const tasksApi = {
     return { 
       success: true, 
       status: 'FATAL',
-      emailSent: true,
+      emailSent: immediateEmail,
+      emailNotified: immediateEmail,
       recipients,
       emailDispatch
     };
@@ -1589,5 +1600,126 @@ export const dailyDigestApi = {
       acknowledged_at: timestamp,
       acknowledged_by_name: ackName
     };
+  }
+};
+
+// ====================================================================
+// 10. DAILY FE FATAL DISPATCH REST API (FATAL-ONLY AGGREGATION CRON)
+// ====================================================================
+
+const FE_FATAL_LOGS_CACHE_KEY = 'locus_fe_fatal_dispatch_logs_v1';
+
+export const feFatalDigestApi = {
+  // Query pending fatal tasks for a target date
+  async getPendingFatalStrikes(date = null) {
+    if (supabase) {
+      try {
+        let query = supabase
+          .from('tasks')
+          .select('*')
+          .eq('audit_status', 'FATAL');
+        
+        const { data, error } = await query;
+        if (!error && data) {
+          if (!date) return data;
+          return data.filter(t => {
+            const tDate = (t.audited_at || t.dispatch_date || '').slice(0, 10);
+            return tDate === date;
+          });
+        }
+      } catch (e) {
+        console.warn('Failed to query pending fatal strikes from Supabase:', e.message);
+      }
+    }
+    return [];
+  },
+
+  // Query dispatch history logs
+  async getDispatchLogs(date = null) {
+    if (supabase) {
+      try {
+        let query = supabase
+          .from('daily_fe_fatal_dispatch_logs')
+          .select('*')
+          .order('sent_at', { ascending: false });
+        
+        if (date) query = query.eq('digest_date', date);
+        const { data, error } = await query;
+        if (!error && data) {
+          localStorage.setItem(FE_FATAL_LOGS_CACHE_KEY, JSON.stringify(data));
+          return data;
+        }
+      } catch (err) {
+        console.warn('daily_fe_fatal_dispatch_logs table query notice:', err.message);
+      }
+    }
+
+    try {
+      const cached = localStorage.getItem(FE_FATAL_LOGS_CACHE_KEY);
+      if (cached) {
+        let list = JSON.parse(cached);
+        if (date) list = list.filter(l => l.digest_date === date);
+        return list;
+      }
+    } catch (e) {}
+
+    return [];
+  },
+
+  // Trigger or run FE fatal digest cron on demand (or dry run preview)
+  async triggerFeFatalDispatch({ date, force = false, feCode, dryRun = false, tasks, users }) {
+    const gatewayConfig = emailApi.getGatewayConfig();
+
+    const response = await fetch('/api/cron/daily-fe-fatal-digest', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-requested-by': 'locus-portal'
+      },
+      body: JSON.stringify({
+        date,
+        force,
+        feCode,
+        dryRun,
+        tasks,
+        users,
+        credentials: {
+          resendApiKey: gatewayConfig.resendApiKey,
+          smtpHost: gatewayConfig.smtpHost,
+          smtpPort: gatewayConfig.smtpPort,
+          smtpUser: gatewayConfig.smtpUser,
+          smtpPass: gatewayConfig.smtpPass,
+          fromAddress: gatewayConfig.fromAddress
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to execute daily FE fatal digest cron');
+    }
+
+    // Cache logs locally if live dispatch
+    if (!dryRun && data.results) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(FE_FATAL_LOGS_CACHE_KEY) || '[]');
+        const updated = [...data.results.map(r => ({
+          id: `log_${Date.now()}_${r.feCode}`,
+          digest_date: data.digestDate,
+          fe_code: r.feCode,
+          fe_name: r.feName,
+          fe_email: r.feEmail,
+          am_email: r.amEmail,
+          rm_email: r.rmEmail,
+          fatal_count: r.fatalCount,
+          sent_status: r.status,
+          sent_at: new Date().toISOString(),
+          error_message: r.error
+        })), ...cached].slice(0, 50);
+        localStorage.setItem(FE_FATAL_LOGS_CACHE_KEY, JSON.stringify(updated));
+      } catch (e) {}
+    }
+
+    return data;
   }
 };

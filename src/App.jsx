@@ -341,7 +341,7 @@ export default function App() {
     }
   };
 
-  // Auditor Actions: FATAL (Dispatches Email Notice to FE, AM, RM first, then saves to DB)
+  // Auditor Actions: FATAL (Saves directly to DB, records strike & replacements, queues for nightly FE batch notice)
   const handleFatalAudit = async (taskId, auditPayload) => {
     const target = tasks.find(t => t.id === taskId);
     setInspectingTask(null);
@@ -349,12 +349,12 @@ export default function App() {
     // Look up FE in users registry to automatically obtain their direct AM and RM emails
     const feUser = users.find(u => {
       if (!u) return false;
-      const tId = String(target.feId || '').trim();
-      const tCode = String(target.feCode || '').trim().toLowerCase();
+      const tId = String(target?.feId || '').trim();
+      const tCode = String(target?.feCode || '').trim().toLowerCase();
       const uPersonId = String(u.person_id || u.employee_code || '').trim().toLowerCase();
-      const tName = String(target.feName || '').trim().toLowerCase();
+      const tName = String(target?.feName || '').trim().toLowerCase();
       const uName = String(u.full_name || '').trim().toLowerCase();
-      const tEmail = String(target.feEmail || '').trim().toLowerCase();
+      const tEmail = String(target?.feEmail || '').trim().toLowerCase();
       const uEmail = String(u.email || '').trim().toLowerCase();
 
       return (tId && uPersonId === tId) ||
@@ -363,12 +363,12 @@ export default function App() {
              (tName && (uName === tName || uName.includes(tName) || tName.includes(uName)));
     });
 
-    let resolvedAmEmail = feUser?.reporting_manager_email || target.amEmail;
-    let resolvedAmName = feUser?.reporting_manager_name || target.amName;
-    let resolvedRmEmail = feUser?.regional_manager_email || target.rmEmail;
-    let resolvedRmName = feUser?.regional_manager_name || target.rmName;
+    let resolvedAmEmail = feUser?.reporting_manager_email || target?.amEmail;
+    let resolvedAmName = feUser?.reporting_manager_name || target?.amName;
+    let resolvedRmEmail = feUser?.regional_manager_email || target?.rmEmail;
+    let resolvedRmName = feUser?.regional_manager_name || target?.rmName;
 
-    // If AM or RM was linked via UUID foreign key (reporting_manager_id / regional_manager_id)
+    // If AM or RM was linked via UUID foreign key
     if (!resolvedAmEmail && feUser?.reporting_manager_id) {
       const amObj = users.find(u => u.id === feUser.reporting_manager_id);
       if (amObj) {
@@ -385,7 +385,7 @@ export default function App() {
     }
 
     // Fallback: look up by hub / facility code for AM and RM
-    const hub = target.facilityCode || target.teamName || target.city;
+    const hub = target?.facilityCode || target?.teamName || target?.city;
     if (!resolvedAmEmail && hub) {
       const amObj = users.find(u => {
         const roles = parseRoles(u.roles || [u.role]);
@@ -407,22 +407,70 @@ export default function App() {
       }
     }
 
-    // Open Tri-Party Email Modal with auto-resolved AM and RM emails
-    const updatedTaskForEmail = {
-      ...target,
-      feEmail: feUser?.email || target.feEmail || `${(target.feCode || 'fe').toLowerCase()}@lenskart.in`,
-      feName: target.feName || feUser?.full_name,
-      amEmail: resolvedAmEmail || 'am.operations@lenskart.in',
-      amName: resolvedAmName || 'Area Manager',
-      rmEmail: resolvedRmEmail || 'rm.quality@lenskart.in',
-      rmName: resolvedRmName || 'Regional Manager',
-      failedReasons: auditPayload.failedReasons,
-      remarks: auditPayload.remarks,
-      criteriaStatus: auditPayload.criteriaStatus,
-      replacements: auditPayload.replacements
-    };
+    const feEmail = feUser?.email || target?.feEmail || `${(target?.feCode || 'fe').toLowerCase()}@lenskart.in`;
 
-    setEmailingTask(updatedTaskForEmail);
+    try {
+      showToast('Recording FATAL strike & queuing for nightly FE batch notice...', 'info');
+
+      // Save directly with immediateEmail = false (queues for nightly FE batch cron)
+      await tasksApi.failAudit({
+        taskId,
+        taskData: target,
+        failedReasons: auditPayload.failedReasons || ['SOP checklist non-compliance'],
+        remarks: auditPayload.remarks || '',
+        criteriaStatus: auditPayload.criteriaStatus || {},
+        replacements: auditPayload.replacements || [],
+        auditorName: currentUser?.full_name || 'Central Auditor',
+        auditorLocation: currentUser?.facility_code || 'Ahmedabad Hub',
+        feEmail,
+        amEmail: resolvedAmEmail,
+        rmEmail: resolvedRmEmail,
+        immediateEmail: false
+      });
+
+      // Update state
+      setTasks(prev => prev.map(t => {
+        if (t.id === taskId) {
+          return {
+            ...t,
+            auditStatus: 'FATAL',
+            audit_status: 'FATAL',
+            auditedAt: new Date().toISOString(),
+            auditedBy: currentUser?.full_name || 'Auditor',
+            failedReasons: auditPayload.failedReasons || [],
+            remarks: auditPayload.remarks || '',
+            emailSent: false,
+            email_notified: false,
+            replacements: auditPayload.replacements || []
+          };
+        }
+        return t;
+      }));
+
+      // Update replacement orders if any flagged
+      if (auditPayload.replacements && auditPayload.replacements.length > 0) {
+        setReplacements(prev => [
+          ...auditPayload.replacements.map((item, idx) => ({
+            id: `rep_${Date.now()}_${idx}`,
+            taskId,
+            feId: target?.feId,
+            feCode: target?.feCode,
+            feName: target?.feName,
+            facilityCode: target?.facilityCode || 'Ahmedabad',
+            itemName: item.name || item.itemName,
+            itemType: item.type || item.itemType || 'tool',
+            status: 'PENDING_APPROVAL',
+            createdAt: new Date().toISOString()
+          })),
+          ...prev
+        ]);
+      }
+
+      showToast(`Task #${taskId} marked FATAL! Recorded in DB & queued for nightly FE email.`, 'warning');
+    } catch (err) {
+      console.error('Failed to mark fatal audit:', err);
+      showToast(`Failed to record fatal audit: ${err.message}`, 'error');
+    }
   };
 
   // Email Modal Confirm & Dispatch Callback
@@ -1129,10 +1177,11 @@ export default function App() {
           />
         )}
 
-        {/* PAGE 9: GRANULAR ACCESS CONTROL PANEL */}
+        {/* PAGE 9: GRANULAR ACCESS CONTROL PANEL & SUPERADMIN CRON ENGINE */}
         {activePage === 'accessControl' && (
           <AccessControlPanel
             users={users}
+            tasks={tasks}
             currentUser={currentUser}
             onSaveUserPermissions={handleSaveUserPermissions}
             onRefreshUsers={async () => {

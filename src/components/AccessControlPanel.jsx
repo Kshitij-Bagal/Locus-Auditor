@@ -8,18 +8,21 @@ import {
   RotateCw, 
   Save, 
   Sparkles, 
-  Info,
-  Lock,
-  Building2,
-  Sliders,
-  CheckCircle2,
-  FileSpreadsheet,
-  Upload,
-  Cpu,
-  AlertTriangle,
-  ShoppingBag,
-  User,
-  Copy
+  Info, 
+  Lock, 
+  Building2, 
+  Sliders, 
+  CheckCircle2, 
+  FileSpreadsheet, 
+  Upload, 
+  Cpu, 
+  AlertTriangle, 
+  ShoppingBag, 
+  User, 
+  Copy,
+  ShieldAlert,
+  Clock,
+  Mail
 } from 'lucide-react';
 import { 
   SYSTEM_PAGES, 
@@ -30,15 +33,33 @@ import {
   deriveRolesFromPages,
   ROLE_DEFAULT_PAGES 
 } from '../utils/accessHelper.js';
+import SuperAdminCronEngine from './SuperAdminCronEngine.jsx';
 
 export default function AccessControlPanel({
   users = [],
+  tasks = [],
   currentUser,
   onSaveUserPermissions,
   onRefreshUsers
 }) {
+  const [activeAdminTab, setActiveAdminTab] = useState('cronEngine'); // 'cronEngine' | 'permissions'
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRoleFilter, setSelectedRoleFilter] = useState('ALL');
+
+  // Count pending fatal strikes for today
+  const pendingFatalFeCount = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const fatalFEs = new Set();
+    (tasks || []).forEach(t => {
+      const d = (t.auditedAt || t.audited_at || t.dispatchDate || t.dispatch_date || '').slice(0, 10);
+      const status = (t.auditStatus || t.audit_status || '').toUpperCase();
+      if (d === today && status === 'FATAL') {
+        const feKey = t.feCode || t.fe_code || t.feId || t.feName;
+        if (feKey) fatalFEs.add(feKey);
+      }
+    });
+    return fatalFEs.size;
+  }, [tasks]);
   // Local state for modified permissions: map of { [userEmailOrId]: string[] }
   const [customPermissions, setCustomPermissions] = useState(() => {
     const initialMap = {};
@@ -172,36 +193,76 @@ export default function AccessControlPanel({
   return (
     <div className="space-y-6 animate-fade-in max-w-7xl mx-auto">
       
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-slate-800">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 flex items-center gap-1.5">
-              <Key className="w-3.5 h-3.5" />
-              Direct Access Control Panel
+      {/* SuperAdmin Top Navigation Tabs */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-slate-800 pb-3">
+        <button
+          onClick={() => setActiveAdminTab('cronEngine')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+            activeAdminTab === 'cronEngine'
+              ? 'bg-gradient-to-r from-red-600/30 via-red-500/20 to-purple-600/30 text-white border border-red-500/40 shadow-lg shadow-red-950/40'
+              : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          <ShieldAlert className="w-4 h-4 text-red-400" />
+          <span>Daily FE Fatal Dispatch Engine (Schedulable Cron)</span>
+          {pendingFatalFeCount > 0 && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-red-500 text-white animate-pulse">
+              {pendingFatalFeCount} FEs
             </span>
-            <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              Live Page Authorization
-            </span>
-          </div>
-          <h2 className="text-2xl font-black text-white mt-1">
-            Granular User & Role Page Access Matrix
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5 max-w-3xl">
-            Directly configure which pages and consoles are accessible to which staff member. Direct page permissions override role limitations immediately (e.g. enabling City Admin Tool Orders + Auditor queues for multi-role staff).
-          </p>
-        </div>
+          )}
+        </button>
 
-        {onRefreshUsers && (
-          <button
-            onClick={onRefreshUsers}
-            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer self-start md:self-auto"
-          >
-            <RotateCw className="w-3.5 h-3.5 text-sky-400" />
-            <span>Reload Staff</span>
-          </button>
-        )}
+        <button
+          onClick={() => setActiveAdminTab('permissions')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+            activeAdminTab === 'permissions'
+              ? 'bg-purple-600/20 text-purple-300 border border-purple-500/40 shadow-lg'
+              : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          <Key className="w-4 h-4 text-purple-400" />
+          <span>User & Role Page Permissions Matrix</span>
+        </button>
       </div>
+
+      {activeAdminTab === 'cronEngine' ? (
+        <SuperAdminCronEngine
+          tasks={tasks}
+          users={users}
+          currentUser={currentUser}
+        />
+      ) : (
+        <>
+          {/* Header */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-slate-800">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5" />
+                  Direct Access Control Panel
+                </span>
+                <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  Live Page Authorization
+                </span>
+              </div>
+              <h2 className="text-2xl font-black text-white mt-1">
+                Granular User & Role Page Access Matrix
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5 max-w-3xl">
+                Directly configure which pages and consoles are accessible to which staff member. Direct page permissions override role limitations immediately (e.g. enabling City Admin Tool Orders + Auditor queues for multi-role staff).
+              </p>
+            </div>
+
+            {onRefreshUsers && (
+              <button
+                onClick={onRefreshUsers}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer self-start md:self-auto"
+              >
+                <RotateCw className="w-3.5 h-3.5 text-sky-400" />
+                <span>Reload Staff</span>
+              </button>
+            )}
+          </div>
 
       {/* Guide Banner */}
       <div className="p-4 rounded-xl bg-gradient-to-r from-slate-900 via-slate-850 to-slate-900 border border-slate-800 text-xs text-slate-300 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
@@ -418,6 +479,8 @@ export default function AccessControlPanel({
           })
         )}
       </div>
+      </>
+      )}
 
     </div>
   );
