@@ -383,10 +383,10 @@ export function parseRoles(raw) {
  * OPERATIONAL POLICIES:
  * 1. Must have access to the Audits Console ('audits').
  * 2. Dedicated Auditor personnel do not exist currently; all auditing is handled by City Admins.
- * 3. Strictly excludes supervisory, field, and governance roles (AM, RM, GM, BH, FE, SuperAdmin)
- *    and non-City-Admin roles from photo audit allocations.
+ * 3. Supervisory, field, and governance roles (AM, RM, GM, BH, FE) are excluded.
+ * 4. SuperAdmin can be optionally included if acting as City Admin via the `includeSuperAdmin` toggle.
  */
-export function isEligibleForAuditRoster(user) {
+export function isEligibleForAuditRoster(user, { includeSuperAdmin = false } = {}) {
   if (!user || user.is_active === false) return false;
   
   // 1. Must have granted or preset access to the Audits Console
@@ -396,6 +396,12 @@ export function isEligibleForAuditRoster(user) {
 
   const primaryRole = normalizeRoleName(user.role);
   const roles = parseRoles(user.roles || [user.role]);
+
+  // If includeSuperAdmin is enabled and this user is a SuperAdmin, include them in the roster
+  const isSuperAdmin = primaryRole === 'SuperAdmin' || roles.includes('SuperAdmin');
+  if (includeSuperAdmin && isSuperAdmin) {
+    return true;
+  }
 
   // Strictly exclude top-level governance & field roles (they do not perform photo audits)
   const EXCLUDED_ROLES = ['AM', 'RM', 'GM', 'BH', 'FE', 'SuperAdmin'];

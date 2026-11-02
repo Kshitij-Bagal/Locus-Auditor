@@ -259,7 +259,8 @@ Locus_Auditor/
   - **City Admin Audit Pool (Operational Policy)**:
     - In accordance with current operations (no dedicated personnel for pure Auditor role), **City Admins who hold access to the Audits Console** handle all photo quality auditing.
     - Active staff holding `City Admin` / `Admin` roles with audit access are automatically recognized and displayed in the live roster, workload tracking, filter dropdowns, and equal auto-allocation algorithm.
-    - Strictly excludes non-auditing management and field roles (`AM`, `RM`, `GM`, `BH`, `FE`, `SuperAdmin`).
+    - Strictly excludes non-auditing management and field roles (`AM`, `RM`, `GM`, `BH`, `FE`).
+    - **Include SuperAdmin in Distribution Toggle**: SuperAdmin can toggle `[Include SuperAdmin: ON/OFF]` in the Roster header when also working as City Admin performing photo audits, seamlessly pulling SuperAdmin into or out of the workload distribution pool with localStorage persistence.
   - **Daily Attendance & Shift Roster**: Marks shift status (`AVAILABLE`, `ON_LEAVE`, `HALF_DAY`, `TRAINING`) with real-time Supabase persistence.
   - **Auditable-Only Filtering**: Isolates tasks with uploaded photos (`hasImages === true` and `imageCount > 0`). Text-only or cancelled tasks without photos are never allocated.
   - **Equal Load Balancing Algorithm** ([`src/lib/supabase.js`](file:///c:/Users/kshitijbagal/Desktop/Locus_Auditor/src/lib/supabase.js)): Divides pending photo tasks evenly across active roster members with capacity weights (`1.0` for full day, `0.5` for half day).
