@@ -43,23 +43,35 @@ export const authApi = {
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    let authUser = null;
+    const cleanPassword = typeof password === 'string' ? password.trim() : '';
 
-    // 1. Attempt standard password authentication
+    if (!cleanEmail) {
+      throw new Error('Please enter your corporate email address.');
+    }
+    if (!cleanPassword) {
+      throw new Error('Please enter your password.');
+    }
+
+    let authUser = null;
+    let authErrorDetails = null;
+
+    // 1. Attempt standard password authentication against Supabase Auth
     try {
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email: cleanEmail,
-        password
+        password: cleanPassword
       });
 
-      if (!authError && authData?.user) {
+      if (authError) {
+        authErrorDetails = authError;
+      } else if (authData?.user) {
         authUser = authData.user;
       }
     } catch (e) {
-      console.warn('Supabase Auth signIn note:', e.message);
+      authErrorDetails = e;
     }
 
-    // 2. If Auth service has an internal error or user has not yet initialized password via GoTrue:
+    // 2. If Auth service failed or user is not yet initialized in auth.users:
     if (!authUser) {
       // Check if user is registered in public.profiles table
       const { data: profData } = await supabase
@@ -68,50 +80,50 @@ export const authApi = {
         .eq('email', cleanEmail)
         .maybeSingle();
 
-      if (profData) {
-        // Attempt on-demand auth account creation only if user does not already have an auth_user_id
-        if (!profData.auth_user_id) {
-          try {
-            const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
-              email: cleanEmail,
-              password,
-              options: {
-                data: {
-                  full_name: profData.full_name,
-                  role: profData.role,
-                  facility_code: profData.facility_code,
-                  person_id: profData.person_id
-                }
-              }
-            });
-
-            if (!signUpErr && signUpData?.user) {
-              authUser = signUpData.user;
-              await supabase
-                .from('profiles')
-                .update({ auth_user_id: authUser.id })
-                .eq('id', profData.id);
-            }
-          } catch (ex) {
-            console.warn('Supabase Auth signUp note:', ex.message);
-          }
-        }
-
-        // Resilient session fallback: Profile is verified in public.profiles database!
-        if (!authUser) {
-          authUser = {
-            id: profData.auth_user_id || profData.id,
-            email: profData.email,
-            user_metadata: {
-              full_name: profData.full_name,
-              role: profData.role,
-              facility_code: profData.facility_code,
-              person_id: profData.person_id || profData.employee_code || ''
-            }
-          };
-        }
-      } else {
+      if (!profData) {
         throw new Error('User profile not found. Please contact SuperAdmin to register your corporate account.');
+      }
+
+      if (profData.is_active === false) {
+        throw new Error('Your account has been deactivated. Please contact SuperAdmin.');
+      }
+
+      // Attempt on-demand auth account creation only if user does not already have an auth_user_id
+      if (!profData.auth_user_id) {
+        try {
+          const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
+            email: cleanEmail,
+            password: cleanPassword,
+            options: {
+              data: {
+                full_name: profData.full_name,
+                role: profData.role,
+                facility_code: profData.facility_code,
+                person_id: profData.person_id
+              }
+            }
+          });
+
+          if (!signUpErr && signUpData?.user) {
+            authUser = signUpData.user;
+            await supabase
+              .from('profiles')
+              .update({ auth_user_id: authUser.id })
+              .eq('id', profData.id);
+          }
+        } catch (ex) {
+          console.warn('Supabase Auth on-demand signUp note:', ex.message);
+        }
+      }
+
+      // STRICT AUTHENTICATION GUARD: If credentials did not match, REJECT immediately!
+      // Never bypass password verification for registered profiles.
+      if (!authUser) {
+        throw new Error(
+          authErrorDetails?.message === 'Invalid login credentials'
+            ? 'Invalid email or password. Please use your designated staff password.'
+            : (authErrorDetails?.message || 'Invalid email or password. Please check your credentials.')
+        );
       }
     }
 
