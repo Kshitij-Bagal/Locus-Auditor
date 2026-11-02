@@ -14,7 +14,8 @@ import {
   Building2,
   AlertTriangle,
   Key,
-  Briefcase
+  Briefcase,
+  Scale
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -26,6 +27,14 @@ export default function Navbar({
   overdueCount = 0
 }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [, setPresetRev] = useState(0);
+
+  // Re-evaluate navigation bar dynamically whenever presets are updated
+  React.useEffect(() => {
+    const handlePresetsUpdate = () => setPresetRev(r => r + 1);
+    window.addEventListener('locus_presets_updated', handlePresetsUpdate);
+    return () => window.removeEventListener('locus_presets_updated', handlePresetsUpdate);
+  }, []);
 
   // Multi-Role Support: Extract and normalize all roles assigned to this user
   const userRoles = parseRoles(currentUser?.roles || [currentUser?.role || 'Auditor']);
@@ -92,6 +101,12 @@ export default function Navbar({
       label: 'Access Control',
       icon: Key,
       allowedRoles: ['SuperAdmin']
+    },
+    {
+      id: 'fatalObjection',
+      label: 'Fatal objection',
+      icon: Scale,
+      allowedRoles: ['SuperAdmin', 'GM']
     }
   ];
 

@@ -1,0 +1,508 @@
+================================================================================
+LOCUS AUDITOR: LENSKART HOME TRY-ON (HTO) QUALITY AUDIT & COMPLIANCE PLATFORM
+COMPLETE PROJECT ARCHITECTURE, LOGIC REFERENCE & GEMINI CHAT HANDOVER GUIDE
+================================================================================
+Generated for: Kshitij Bagal (kshitijbagal@gmail.com)
+Repository: https://github.com/Kshitij-Bagal/Locus-Auditor
+Live Production URL: https://locus-auditor.vercel.app
+Tech Stack: React 19, Vite 8, Tailwind CSS v4, Node.js Serverless, Supabase PostgreSQL, Resend/SMTP
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS:
+--------------------------------------------------------------------------------
+1. PROJECT MISSION & OPERATIONAL CONTEXT
+2. END-TO-END SYSTEM PIPELINE & DATA FLOW
+3. COMPLETE FILE STRUCTURE & RESPONSIBILITIES
+4. IN-DEPTH IMPLEMENTATION SPECIFICATIONS:
+   - Feature 1: Streamlined Photo Auditing Flow (Zero Email Modal Interruption)
+   - Feature 2: Fatal-Only FE-Level Aggregated Warning Email Engine
+   - Feature 3: SuperAdmin Schedulable Cron Engine (UI, Preview, Dry-Run, History)
+   - Feature 4: Daily Manager Quality Digest & Escalation System (AM & RM)
+   - Feature 5: Cluster Oversight & Manager Operations Portal (Scorecards, XLSX)
+   - Feature 6: D+1 SLA Breach Escalation Engine (Accurate 24h Countdown to BH & GM)
+   - Feature 7: Smart Workload Balancing & Shift Roster Auto-Allocation
+   - Feature 8: City Admin POS Defective Tool Requisition Pipeline
+   - Feature 9: Central SOP Rules Studio (Two-Tier GM/BH Governance)
+   - Feature 10: Granular RBAC & User Page Access Override Matrix
+   - Feature 11: Compact Expand-on-Hover Responsive Navigation Bar
+5. DATABASE SCHEMA (SUPABASE POSTGRESQL TABLES & COLUMNS)
+6. SCHEDULED CRON JOBS & SERVERLESS APIS (VERCEL CRON & VITE MIDDLEWARE)
+7. ENVIRONMENT VARIABLES & CREDENTIALS
+8. CURRENT STATUS, KNOWN EDGE CASES & PENDING ROADMAP (WHATSAPP, ETC.)
+9. READY-TO-USE PROMPTS FOR GOOGLE GEMINI CHAT
+
+================================================================================
+1. PROJECT MISSION & OPERATIONAL CONTEXT
+================================================================================
+Lenskart provides Home Try-On (HTO / DLC) optical services across pan-India regional hubs.
+Field Executives (FEs / Optometrists / Refractionists) travel to customer residences equipped with:
+- Clinical diagnostic tools (Trial frame, lenses, JCC, blue/yellow ophthalmic torches)
+- Near-vision test cards & telescoping distance vision standees
+- Frame trays with optical frames & sunglasses
+- Official Lenskart uniform polo with visible employee photo ID card
+
+During each visit, the FE uploads mandatory compliance photos into the Locus dispatch mobile app:
+1. Customer verification selfie with OTP
+2. Diagnostic equipment tray laid out flat
+3. Telescoping standee deployed at seated eye level (never taped to walls)
+4. Active blue & yellow penlights operational test
+5. Uniform & badge compliance
+
+"Locus Auditor" is the central enterprise web application that ingests Locus appointment spreadsheets, auto-allocates photo inspection tasks to active auditors, allows fast pass/fatal reviews, escalates SLA breaches to leadership, and aggregates daily performance into corporate warning emails.
+
+================================================================================
+2. END-TO-END SYSTEM PIPELINE & DATA FLOW
+================================================================================
+[Step 1: Dispatch Spreadsheet Upload]
+  - Uploaded in Upload Tasks (`UploadPage.jsx`) via SheetJS (`.xlsx` / `.csv`).
+  - Tasks parsed and automatically inspected for image attachments (`has_images = true`).
+
+[Step 2: Auditor Roster & Workload Auto-Allocation]
+  - Handled in `AutoAllocationRoster.jsx`.
+  - Shift attendance checked (`AVAILABLE`, `ON_LEAVE`, `HALF_DAY`, `TRAINING`).
+  - Auditable tasks (those with photos) distributed equally across available auditors.
+  - Tasks without photos are separated so auditors only spend time reviewing real images.
+
+[Step 3: Systematic Photo Auditing]
+  - Handled in `AuditModal.jsx` / `App.jsx`.
+  - Auditor reviews uploaded images against SOP criteria.
+  - PASS: Task saved as `PASSED` in Supabase.
+  - FATAL: Task saved immediately via `tasksApi.failAudit`:
+      • `audit_status = 'FATAL'`
+      • `email_notified = false` (QUEUED for daily batch, NO popup interrupts the auditor!)
+      • Defective equipment flagged into `replacement_orders` table.
+
+[Step 4: Real-Time D+1 SLA Tracker]
+  - Handled in `DPlusOneEscalationDashboard.jsx`.
+  - Calculates a 24-hour countdown strictly from the upload/allocation timestamp (`task.created_at` or `task.allocated_at`), preventing false SLA alerts from historical dates.
+  - Overdue audits escalated to Business Head (BH) & General Manager (GM) (dynamically resolved from database users).
+
+[Step 5: Automated Nightly Cron Job 1 - Manager Daily Digest (20:00 IST)]
+  - Route: `/api/cron/daily-digest` (declared in `vercel.json`: `0 20 * * *`).
+  - High-level KPI digest for Area Managers (Hub/Cluster level) and Regional Managers (Territory level).
+  - Identifies 7-day rolling repeat offenders (FEs with >= 2 fatal strikes in 7 days).
+  - AMs/RMs can view digests in-app and click "Acknowledge & Sign-Off".
+
+[Step 6: Automated Nightly Cron Job 2 - Fatal-Only FE Warning Engine (20:30 IST)]
+  - Route: `/api/cron/daily-fe-fatal-digest` (declared in `vercel.json`: `30 20 * * *`).
+  - Aggregates today's fatal audits at the FE level.
+  - STRICT FILTER: Only FEs with >= 1 Fatal strike receive an email (FEs with 0 fatals receive NO email, preserving 95%+ email quota!).
+  - Routing: TO: FE, CC: direct Area Manager, CC: Regional Manager.
+  - Instructs FE to reply-all with written explanations before their next shift.
+  - Updates Supabase: `email_notified = true`, `email_sent = true`, `email_sent_at = NOW()`.
+
+================================================================================
+3. COMPLETE FILE STRUCTURE & RESPONSIBILITIES
+================================================================================
+Locus_Auditor/
+├── api/
+│   ├── cron/
+│   │   ├── daily-digest.js           -> Manager KPI Digest Cron handler (20:00 IST)
+│   │   └── daily-fe-fatal-digest.js  -> Fatal-Only FE Warning Notice Cron handler (20:30 IST)
+│   └── send-email.js                 -> Universal email dispatch endpoint (Resend / SMTP)
+│
+├── src/
+│   ├── api/
+│   │   └── client.js                 -> REST client for Supabase, tasks, users, rules, crons
+│   │
+│   ├── components/
+│   │   ├── AccessControlPanel.jsx    -> SuperAdmin access control & Cron Engine host
+│   │   ├── SuperAdminCronEngine.jsx  -> FE Fatal Cron UI (preview, dry-run, live trigger, logs)
+│   │   ├── ClusterManagerPortal.jsx  -> AM/RM Oversight, FE scorecards, XLSX export, benchmarks
+│   │   ├── DailyDigestManagerView.jsx-> Manager in-app digest viewer & sign-off accountability
+│   │   ├── DPlusOneEscalationDashboard.jsx -> 24h SLA breach tracker (escalated to BH/GM)
+│   │   ├── AutoAllocationRoster.jsx  -> Shift roster & equal photo-audit auto-allocator
+│   │   ├── AssetRequisitionDashboard.jsx -> City Admin POS broken tool orders & logistics
+│   │   ├── CentralRuleStudio.jsx     -> SOP rules governance (GM draft -> BH approve/publish)
+│   │   ├── AuditModal.jsx            -> Photo inspection modal with checklist & criteria
+│   │   ├── EmailGatewaySettingsModal.jsx -> In-app Resend / SMTP credentials drawer
+│   │   ├── Navbar.jsx                -> Sleek collapsible icon nav with hover expand
+│   │   └── FilterBar.jsx             -> Quick filter toolbar for audits console
+│   │
+│   ├── utils/
+│   │   ├── dailyDigestHelper.js      -> Aggregation algorithms & HTML/text email templates
+│   │   ├── accessHelper.js           -> RBAC normalization & granular page override resolver
+│   │   └── excelParser.js            -> SheetJS parser & XLSX report generator
+│   │
+│   ├── data/
+│   │   └── centralRules.js           -> Default SOP criteria list & failure descriptions
+│   │
+│   ├── App.jsx                       -> Main application state, routing, audit handlers
+│   ├── index.css                     -> Tailwind CSS v4 styling & dark theme tokens
+│   └── main.jsx                      -> React entry point
+│
+├── vercel.json                       -> Vercel deployment config & crons (20:00 & 20:30 IST)
+├── vite.config.js                    -> Vite build plugins, Tailwind v4, dev server middlewares
+├── package.json                      -> Dependencies (@supabase/supabase-js, resend, nodemailer, xlsx, lucide-react)
+└── supabase_schema.sql               -> PostgreSQL schema, tables, views, RLS & seed data
+
+================================================================================
+4. IN-DEPTH IMPLEMENTATION SPECIFICATIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+Feature 1: Streamlined Photo Auditing Flow (Zero Email Modal Interruption)
+--------------------------------------------------------------------------------
+- File: `src/App.jsx` (`handleFatalAudit`) & `src/api/client.js` (`tasksApi.failAudit`)
+- Auditor action: Auditor opens a visit with photos, reviews checklist.
+- When clicking "FAIL (FATAL)":
+  1. Calls `tasksApi.failAudit({ taskId, taskData, failedReasons, remarks, criteriaStatus, replacements, immediateEmail: false })`.
+  2. Saves directly to Supabase `tasks` table with `audit_status = 'FATAL'` and `email_notified = false`.
+  3. Registers any broken items in `replacement_orders`.
+  4. Immediately advances to the next task in the review queue with a clean toast notice.
+  5. ZERO popup modals or email drafts to slow down the auditor!
+
+--------------------------------------------------------------------------------
+Feature 2: Fatal-Only FE-Level Aggregated Warning Email Engine
+--------------------------------------------------------------------------------
+- Helper File: `src/utils/dailyDigestHelper.js` (`aggregateFeFatalDigests`)
+- Endpoint File: `api/cron/daily-fe-fatal-digest.js`
+- Core Rules:
+  1. Only FEs with fatalCount >= 1 are returned. FEs with 0 fatals receive NO email.
+  2. Resolves direct Area Manager (AM) via `reporting_manager_email`, `reporting_manager_id`, or hub match.
+  3. Resolves Regional Manager (RM) via `regional_manager_email`, `regional_manager_id`, or regional pool.
+  4. Tri-Party Corporate Thread Routing:
+     - TO: Field Executive (`feEmail`)
+     - CC: Area Manager (`amEmail`)
+     - CC: Regional Manager (`rmEmail`)
+  5. HTML Template Features:
+     - Prominent Red Non-Compliance Strike Notice header.
+     - Summary pills: Total Audited, Total Passed, Total Fatal Strikes.
+     - Specific failure cards with failure reasons, auditor remarks, and deep-link to inspect photos.
+     - Mandatory Supervisory Action Block:
+       • FE must reply-all with written explanation before next shift.
+       • AM must perform physical diagnostic kit inspection before next dispatch.
+       • RM records strike in compliance registry (>= 2 strikes triggers suspension).
+  6. Updates Supabase tasks: `email_notified = true`, `email_sent = true`, `email_sent_at = NOW()`.
+
+--------------------------------------------------------------------------------
+Feature 3: SuperAdmin Schedulable Cron Engine
+--------------------------------------------------------------------------------
+- File: `src/components/SuperAdminCronEngine.jsx` (embedded in `AccessControlPanel.jsx`)
+- Accessible via SuperAdmin access tab "Daily FE Fatal Dispatch Engine (Schedulable Cron)".
+- Capabilities:
+  - Live Cron Status indicator (Scheduled at 20:30 IST daily).
+  - Real-time Queue of today's affected FEs with strike counts, failure reasons, and resolved AM/RM.
+  - Live Email Preview modal: inspects generated HTML before sending.
+  - Dry-Run Simulation: verifies aggregation and recipient mapping without sending real mail.
+  - "Dispatch Fatal Warnings to FEs Now" on-demand trigger with force re-dispatch toggle.
+  - Historical Dispatch Ledger showing delivery timestamp, status (`SENT`, `DRY_RUN`, `FAILED`), and IDs.
+
+--------------------------------------------------------------------------------
+Feature 4: Daily Manager Quality Digest & Escalation System (AM & RM)
+--------------------------------------------------------------------------------
+- Helper File: `src/utils/dailyDigestHelper.js` (`aggregateDailyDigest`)
+- Endpoint File: `api/cron/daily-digest.js`
+- Scheduled: Every evening at 20:00 IST (8:00 PM) via Vercel Cron.
+- Computes high-level KPI metrics segmented by Cluster/City (for AMs) and Territory/Region (for RMs).
+- Rolling 7-Day Repeat Offenders: automatically flags FEs who accumulated >= 2 fatal marks in past 7 days.
+- In-App Manager View (`DailyDigestManagerView.jsx`): allows managers to review history and click "Acknowledge & Sign-Off" to record audit accountability logs in Supabase.
+
+--------------------------------------------------------------------------------
+Feature 5: Cluster Oversight & Manager Operations Portal
+--------------------------------------------------------------------------------
+- File: `src/components/ClusterManagerPortal.jsx` (replaces legacy Field Staff page).
+- AM Mode: Scoped directly to Field Executives reporting to that AM.
+- RM Mode: Scoped to all AM clusters across the region.
+- Executive Mode (SuperAdmin/BH/GM): Switchable cluster picker across India.
+- FE Scorecards: Total visits, pass rate %, fatal strikes, tool replacement counts.
+- 1-Click Visits Filter: Jumps into Audits Console filtered by that FE.
+- 1-Click XLSX Export: Generates professional multi-sheet Excel reports.
+- Live Fatal Feed & AM Hub Benchmarking charts.
+
+--------------------------------------------------------------------------------
+Feature 6: D+1 SLA Breach Escalation Engine
+--------------------------------------------------------------------------------
+- File: `src/components/DPlusOneEscalationDashboard.jsx`
+- Accurately tracks 24-hour audit SLA from task upload/allocation timestamp (`task.created_at` / `task.allocated_at`).
+- Overdue audits escalated to Business Head (BH) and General Manager (GM) (dynamically resolved from database users).
+- One-click bulk reassignment to active auditors on shift.
+
+--------------------------------------------------------------------------------
+Feature 7: Smart Workload Balancing & Shift Roster Auto-Allocation
+--------------------------------------------------------------------------------
+- File: `src/components/AutoAllocationRoster.jsx`
+- Auditor Pool includes dedicated Auditors, City Admins, and Central Ops who carry audit duties.
+- Visual role badges rendered in live roster table (`City Admin`, `Central Ops`, `Auditor`).
+- Auditor attendance management (`AVAILABLE`, `ON_LEAVE`, `HALF_DAY`, `TRAINING`).
+- Equal load balancing: divides auditable tasks (tasks containing image links) equally among available staff based on shift capacity weighting.
+
+--------------------------------------------------------------------------------
+Feature 8: City Admin POS Defective Tool Requisition Pipeline
+--------------------------------------------------------------------------------
+- File: `src/components/AssetRequisitionDashboard.jsx`
+- Requisitions automatically spawned when auditors flag broken tools during photo audit.
+- Workflow: `FLAGGED_BY_AUDITOR` -> `ORDERED_ON_POS` -> `DISBURSED_TO_FE`.
+
+--------------------------------------------------------------------------------
+Feature 9: Central SOP Rules Studio (Two-Tier GM/BH Governance)
+--------------------------------------------------------------------------------
+- File: `src/components/CentralRuleStudio.jsx`
+- General Manager (GM): Proposes and drafts new checklist items, failure triggers, and coaching notes.
+- Business Head (BH): Reviews proposed rules and clicks "Approve & Publish SOP" to make them binding.
+
+--------------------------------------------------------------------------------
+Feature 10: Granular RBAC & User Page Access Override Matrix
+--------------------------------------------------------------------------------
+- Files: `src/utils/accessHelper.js` & `src/components/AccessControlPanel.jsx`
+- Direct page permissions override default role limits.
+- E.g. an Auditor granted "Tool Orders" and "Cluster Oversight" automatically gains City Admin & AM capabilities.
+- Persisted in Supabase `profiles.page_access` and synced to `localStorage`.
+
+--------------------------------------------------------------------------------
+Feature 11: Compact Expand-on-Hover Responsive Navigation Bar
+--------------------------------------------------------------------------------
+- File: `src/components/Navbar.jsx`
+- Replaced wide overflowing text tabs with sleek icon buttons (`w-9 h-9`).
+- Hovering over any icon smoothly expands its label (`300ms` transition).
+- Active tab remains permanently expanded with solid blue branding.
+- Reduced navbar width from ~1,200px to ~430px, eliminating header wrapping.
+
+--------------------------------------------------------------------------------
+Feature 12: Vim-Style Speedrun Auditing Hotkeys & Blanket Fatal Modal
+--------------------------------------------------------------------------------
+- File: `src/components/AuditModal.jsx`
+- Input field guarding: Keybindings strictly ignored inside `<input>`, `<textarea>`, `<select>`.
+- Zone Switches:
+  - `[i]`: Focus Photo Inspection carousel
+  - `[v]`: Focus SOP Checkpoints / Verdict Section
+  - `[c]`: Focus Fatal Criteria Checklist
+  - `[o]`: Focus POS Tool Orders Section
+- Image Navigation:
+  - `[1]`, `[2]`, `[3]`, `[4]`, `[5]`: Instant jump to photo (1: Selfie, 2: Tray, 3: Standee, 4: Torches, 5: Badge)
+  - `[ArrowLeft]` / `[ArrowRight]`: Cycle through carousel
+- Item Traversal & Toggles:
+  - `[ArrowUp]` / `[ArrowDown]` / `[j]` / `[k]`: Move highlighted selection up/down inside active zone
+  - `[Space]` or `[Enter]`: Toggle highlighted checkpoint or criteria checkbox
+- Submissions & Advancements:
+  - `[p]`: Instantly marks audit as PASSED and auto-advances to the next queued task
+  - `[f]`: Opens the Blanket Fatal Modal overlay
+- Blanket Fatal Modal:
+  - Top 3 objective auditor reasons:
+    1. All images missing / blank / black
+    2. All images heavily blurred / unreadable
+    3. Duplicate / recycled images detected
+  - Press `[1]`, `[2]`, or `[3]` (or `[ArrowUp]` / `[ArrowDown]` + `[Enter]`): Immediately marks task FATAL with selected reason, records `email_notified = false`, closes modal, and auto-advances to next pending task.
+  - `[Escape]`: Cancels and returns to regular audit screen.
+
+--------------------------------------------------------------------------------
+Feature 13: Fatal Objection & Dispute Meet System (Google Calendar / Meet)
+--------------------------------------------------------------------------------
+- Files: `src/components/FatalObjectionHub.jsx`, `src/components/DisputeObjectionModal.jsx`, `src/utils/calendarHelper.js`
+- 24-Hour Dispute Window:
+  - Contestation button active on FE Portal (`My Visits`) and AM/RM Cluster Oversight for exactly 24h from `audited_at`.
+  - Dynamic countdown badge: "X hours left to dispute". After 24h, the button disables permanently.
+- Role Authority:
+  - Field Executives (FE): Can submit written objection with category and counter-proof; cannot schedule meetings.
+  - Area Managers (AM) & Regional Managers (RM): Exclusive authority to schedule Google Meet reviews.
+  - Meet generation: Generates Google Meet URL and opens Google Calendar invite pre-filled with FE, AM, RM, and Assigned Auditor emails.
+- Fatal Objection Hub:
+  - Accessible to SuperAdmin, GM, and Senior QA auditors via granted access.
+  - Real-time queue filtered by status (`PENDING_REVIEW`, `MEET_SCHEDULED`, `RESOLVED_UPHELD`, `RESOLVED_OVERTURNED`).
+  - Actions:
+    - `[Re-Audit Task]`: Opens task in `AuditModal` with Senior Re-Audit Mode banner. Overturning marks `audit_status = 'PASSED'`, zeroes strike, and logs resolution.
+    - `[Uphold Strike]`: Finalizes fatal strike with senior auditor remarks.
+    - `[Join Meet]`: Direct link button to join the scheduled Google Meet.
+
+--------------------------------------------------------------------------------
+Feature 14: Exact Role Presets & Granted Page Access Separation
+--------------------------------------------------------------------------------
+- Files: `src/utils/accessHelper.js` & `src/components/AccessControlPanel.jsx`
+- Users hold standard base roles whose permissions come from `ROLE_PRESETS[profile.role]`.
+- Exact presets:
+  - SuperAdmin: ['Audits', 'Upload Task', 'Roster & Workload', 'D + 1 Escalations', 'Quality Rules', 'Tool Orders', 'Cluster Oversight', 'User Accounts', 'Access Control', 'Fatal objection']
+  - City Admin: ['Audits', 'Tool Orders']
+  - Auditor: ['Audits']
+  - AM: ['Tool Orders', 'Cluster Oversight']
+  - RM: ['Tool Orders', 'Cluster Oversight']
+  - Central Ops: ['Audits', 'Upload Task', 'Tool Orders', 'Cluster Oversight']
+  - GM: ['Audits', 'Upload Task', 'Roster & Workload', 'D + 1 Escalations', 'Quality Rules', 'Tool Orders', 'Cluster Oversight', 'Fatal objection']
+  - BH: ['Audits', 'Roster & Workload', 'D + 1 Escalations', 'Quality Rules', 'Cluster Oversight']
+  - FE: ['My Visits']
+- Permission Check:
+  - `hasAccess(profile, pageName)` checks `ROLE_PRESETS[profile.role]` OR `(profile.granted_page_access || [])`.
+- Admins can toggle individual granted pages on any user profile independently of their default role.
+
+===============================================================================
+5. DATABASE SCHEMA (SUPABASE POSTGRESQL TABLES & COLUMNS)
+================================================================================
+
+TABLE: tasks
+- `id` (TEXT, PK): Task / Appointment ID (e.g. '1355459969')
+- `task_id` (TEXT): Secondary reference
+- `fe_id` (TEXT): FE Employee ID
+- `fe_code` (TEXT): FE Employee Code (e.g. 'FE_102609')
+- `fe_name` (TEXT): FE Full Name
+- `fe_email` (TEXT): FE Corporate Email
+- `facility_code` (TEXT): Hub / City (e.g. 'Ahmedabad')
+- `dispute_status` (TEXT): 'NONE', 'PENDING_REVIEW', 'MEET_SCHEDULED', 'RESOLVED_UPHELD', 'RESOLVED_OVERTURNED'
+- `dispute_category` (TEXT): Category of objection raised
+- `dispute_reason` (TEXT): Reason / justification for dispute
+- `dispute_raised_by_role` (TEXT): Submitter role (FE, AM, RM, SuperAdmin)
+- `dispute_raised_by_name` (TEXT): Name of user who submitted objection
+- `dispute_raised_at` (TIMESTAMPTZ): Submission timestamp
+- `dispute_meet_url` (TEXT): Google Meet link for dispute review
+- `dispute_meet_time` (TIMESTAMPTZ): Scheduled time for meet
+- `dispute_meet_requested_by` (TEXT): Staff who scheduled the meet
+- `dispute_resolved_at` (TIMESTAMPTZ): Resolution timestamp
+- `dispute_resolved_by_name` (TEXT): Name of Senior QA / GM who resolved objection
+- `dispute_resolution_remarks` (TEXT): Explanatory resolution remarks
+- `dispute_proof_url` (TEXT): URL to uploaded counter-evidence photo/doc
+- `zone` (TEXT): Dispatch Zone
+- `customer_name` (TEXT): Customer Name
+- `customer_phone` (TEXT): Customer Phone
+- `customer_otp` (TEXT): OTP PIN
+- `dispatch_date` (DATE): Scheduled Date
+- `images` (TEXT[]): Uploaded SOP Photos
+- `has_images` (BOOLEAN): True if photos present
+- `assigned_auditor_id` (TEXT): Auditor ID
+- `assigned_auditor_name` (TEXT): Auditor Name
+- `allocated_at` (TIMESTAMP): Allocation time
+- `audit_status` (TEXT): 'PENDING' | 'PASSED' | 'FATAL'
+- `audited_at` (TIMESTAMP): Audit completion time
+- `audited_by_name` (TEXT): Auditor Name
+- `auditor_remarks` (TEXT): Audit comments
+- `failed_reasons` (TEXT[]): Violated SOP checklist items
+- `criteria_status` (JSONB): Granular checkpoint map
+- `replacements` (JSONB): Flagged tool objects
+- `email_notified` (BOOLEAN): True once included in nightly FE batch warning
+- `email_sent` (BOOLEAN): Email dispatch status
+- `email_sent_at` (TIMESTAMP): Dispatch timestamp
+- `email_recipients` (TEXT[]): [feEmail, amEmail, rmEmail]
+
+TABLE: profiles
+- `id` (UUID, PK): Auth user ID
+- `email` (TEXT, UNIQUE): Corporate email
+- `full_name` (TEXT): Staff Name
+- `role` (TEXT): Primary role ('SuperAdmin', 'Auditor', 'AM', 'RM', etc.)
+- `roles` (TEXT[]): Multi-role array
+- `facility_code` (TEXT): Primary Hub
+- `reporting_manager_email` (TEXT): Direct AM Email
+- `reporting_manager_name` (TEXT): Direct AM Name
+- `reporting_manager_id` (UUID): Direct AM foreign key
+- `regional_manager_email` (TEXT): RM Email
+- `regional_manager_name` (TEXT): RM Name
+- `regional_manager_id` (UUID): RM foreign key
+- `page_access` (TEXT[]): Direct page overrides
+
+TABLE: daily_fe_fatal_dispatch_logs
+- `id` (BIGSERIAL, PK): Log ID
+- `digest_date` (DATE): Audit Date
+- `fe_code` (TEXT): FE Code
+- `fe_name` (TEXT): FE Name
+- `fe_email` (TEXT): FE Email (TO)
+- `am_email` (TEXT): AM Email (CC)
+- `rm_email` (TEXT): RM Email (CC)
+- `hub` (TEXT): Facility / Hub
+- `fatal_count` (INTEGER): Number of fatal strikes today
+- `task_ids` (TEXT[]): List of fatal task IDs
+- `sent_status` (TEXT): 'SENT' | 'DRY_RUN' | 'FAILED'
+- `error_message` (TEXT): Error message if failed
+- `sent_at` (TIMESTAMP): Dispatch timestamp
+
+TABLE: daily_digest_logs
+- `id` (BIGSERIAL, PK): Log ID
+- `digest_date` (DATE): Target Date
+- `recipient_email` (TEXT): AM or RM Email
+- `recipient_role` (TEXT): 'AM' | 'RM'
+- `cluster_or_region` (TEXT): Hub or Region Name
+- `total_audited` (INTEGER): Total audits
+- `fatal_count` (INTEGER): Total fatals
+- `compliance_rate` (NUMERIC): Pass rate %
+- `sent_status` (TEXT): 'SENT' | 'FAILED'
+- `sent_at` (TIMESTAMP): Dispatch timestamp
+- `acknowledged_at` (TIMESTAMP): Sign-off timestamp
+- `acknowledged_by_name` (TEXT): Sign-off manager name
+
+================================================================================
+6. SCHEDULED CRON JOBS & SERVERLESS APIS (VERCEL CRON & VITE)
+================================================================================
+
+1. `/api/cron/daily-digest` (20:00 IST / 8:00 PM)
+   - Schedule in vercel.json: `0 20 * * *`
+   - Manager Quality Digest for AMs & RMs.
+   - Computes cluster compliance, flags 7-day repeat offenders (>= 2 fatals).
+
+2. `/api/cron/daily-fe-fatal-digest` (20:30 IST / 8:30 PM)
+   - Schedule in vercel.json: `30 20 * * *`
+   - Fatal-Only FE-level Consolidated Warning Emails.
+   - Strictly 1 email per FE with >= 1 strike (0 fatals = no email).
+   - TO: FE, CC: direct AM & RM.
+   - Updates `tasks.email_notified = true`.
+
+3. `/api/send-email`
+   - Universal transactional email sender supporting both Resend API and Nodemailer SMTP.
+
+================================================================================
+7. ENVIRONMENT VARIABLES & CREDENTIALS
+================================================================================
+```ini
+# Supabase Database
+VITE_SUPABASE_URL=https://qaxzlidehuekecsrztsy.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
+SUPABASE_SERVICE_ROLE_KEY=optional_service_role_key
+
+# Cron Job Authorization Token
+CRON_SECRET=your_secure_cron_secret_token
+
+# Outgoing Email Gateway (Option A: Resend API)
+RESEND_API_KEY=re_your_api_key_here
+EMAIL_FROM=Lenskart Quality Audit <alerts@lenskart.in>
+
+# Outgoing Email Gateway (Option B: SMTP / Google Workspace / SES)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=audits@lenskart.in
+SMTP_PASS=your_app_specific_password
+
+# Public Web App URL for Deep-Links in Warning Emails
+APP_URL=https://locus-auditor.vercel.app
+NEXT_PUBLIC_APP_URL=https://locus-auditor.vercel.app
+VITE_APP_URL=https://locus-auditor.vercel.app
+```
+
+================================================================================
+8. CURRENT STATUS, KNOWN EDGE CASES & PENDING ROADMAP
+================================================================================
+- Production Build: Verified with `npm.cmd run build` (0 errors).
+- Git Author: Configured to `kshitijbagal@gmail.com`.
+- GitHub Sync: Pushed to `https://github.com/Kshitij-Bagal/Locus-Auditor.git` (main).
+
+Items temporarily deferred or planned for future sessions:
+1. WhatsApp Business API Text Dispatch:
+   - User decided to pause WhatsApp text messages for now until templates and provider are finalized.
+   - When ready: Can hook into `api/cron/daily-fe-fatal-digest.js` to dispatch SMS/WhatsApp summaries alongside emails.
+2. FE Strike Dispute Workflow:
+   - Allow FEs to submit counter-photos/explanations through their `fePortal` ('My Visits') for secondary QA review.
+3. Automated Shift Suspension:
+   - Automatically update an FE's status to `SUSPENDED` in `profiles` and alert the AM if the FE incurs 3 strikes in 7 days.
+
+================================================================================
+9. READY-TO-USE PROMPTS FOR GOOGLE GEMINI CHAT
+================================================================================
+
+When you are away from this computer and chatting with Google Gemini, start your conversation by copying and pasting the header below:
+
+--- GEMINI CHAT STARTER PROMPT ---
+"I am developing an enterprise React 19 + Supabase web application called 'Locus Auditor' for Lenskart DLC / Home Try-On Quality Auditing.
+Repository: https://github.com/Kshitij-Bagal/Locus-Auditor
+Deployed at: https://locus-auditor.vercel.app
+
+Here is the complete project context, architecture, file map, and database schema from my chat.txt file:
+[PASTE SECTIONS FROM THIS CHAT.TXT FILE]
+
+Now, please help me with the following task:
+<Describe your new feature or bug fix here>"
+-----------------------------------
+
+Sample Prompt 1: Adding WhatsApp Integration
+"Based on the FE Fatal aggregation logic in `api/cron/daily-fe-fatal-digest.js` and `src/utils/dailyDigestHelper.js`, write the integration code for sending a WhatsApp message via Twilio or Gupshup to the FE's phone number with their day's pass/fatal summary."
+
+Sample Prompt 2: Adding FE Re-Audit Dispute Workflow
+"I want to allow Field Executives to click 'Dispute Fatal Strike' in `fePortal` (`My Visits`), upload counter-photos, and queue the task for Senior Auditor review. Show me the required Supabase columns, client API methods, and UI changes."
+
+Sample Prompt 3: Automatic Shift Suspension Trigger
+"In `aggregateFeFatalDigests` and `SuperAdminCronEngine.jsx`, I want to flag FEs who reach 3 fatal strikes in rolling 7 days as HIGH RISK / SUSPENDED and automatically notify the Regional Manager. How should I implement this logic?"
+================================================================================
+END OF CHAT.TXT REFERENCE GUIDE
+================================================================================

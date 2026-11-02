@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { runAutoAllocationAlgorithm } from '../lib/supabase.js';
 import { rosterApi, tasksApi } from '../api/client.js';
+import { parseRoles, hasAccess, displayRoleName, isEligibleForAuditRoster } from '../utils/accessHelper.js';
 
 export default function AutoAllocationRoster({
   tasks = [],
@@ -33,15 +34,11 @@ export default function AutoAllocationRoster({
 }) {
   const allocateCallback = onAutoAllocate || onTasksAllocated;
 
-  // Filter real auditors from active users list
+  // Filter real auditors from active users list:
+  // Dedicated Auditors, City Admins, and Central Ops who carry photo audit responsibilities
+  // (Strictly excludes AM, RM, GM, BH, FE, SuperAdmin)
   const actualAuditorsFromUsers = useMemo(() => {
-    return (users || []).filter(u => {
-      if (u.is_active === false) return false;
-      const roleMatch = u.role === 'Auditor';
-      const rolesMatch = Array.isArray(u.roles) && u.roles.includes('Auditor');
-      const emailMatch = u.email && u.email.toLowerCase().includes('auditor');
-      return roleMatch || rolesMatch || emailMatch;
-    });
+    return (users || []).filter(isEligibleForAuditRoster);
   }, [users]);
 
   // Auditor team roster state
@@ -56,7 +53,7 @@ export default function AutoAllocationRoster({
     let isMounted = true;
 
     async function initRoster() {
-      // 1. Initial mapping from actual users
+      // 1. Initial mapping from actual users (including City Admins and Central Ops)
       let baseRoster = actualAuditorsFromUsers.map(u => ({
         id: u.id,
         auth_user_id: u.auth_user_id || u.id,
@@ -64,22 +61,10 @@ export default function AutoAllocationRoster({
         email: u.email,
         hub: u.facility_code || u.city || 'Ahmedabad',
         employeeCode: u.employee_code || u.person_id || '',
+        role: u.role || 'Auditor',
+        roles: parseRoles(u.roles || [u.role]),
         shiftStatus: 'AVAILABLE'
       }));
-
-      // Fallback: If no users currently tagged as Auditor, provide Pooja Verma corporate seed
-      if (baseRoster.length === 0) {
-        baseRoster = [
-          { 
-            id: 'usr_auditor_pooja', 
-            full_name: 'Pooja Verma', 
-            email: 'auditor.pooja@lenskart.in', 
-            hub: 'Ahmedabad Hub', 
-            employeeCode: 'AUD001',
-            shiftStatus: 'AVAILABLE' 
-          }
-        ];
-      }
 
       // 2. Fetch today's persistent shifts from Supabase auditor_roster
       try {
@@ -365,7 +350,7 @@ export default function AutoAllocationRoster({
             Equal Task Distribution & Auditor Allocations
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Divides 100% of pending tasks with photos equally among actual registered auditors in Supabase. Each auditor will only see their own allocated queue.
+            Divides 100% of pending tasks with photos equally among active auditors, City Admins, and Central Ops on shift in Supabase. Each member only sees their allocated queue.
           </p>
         </div>
 
@@ -508,8 +493,17 @@ export default function AutoAllocationRoster({
                       {(auditor.full_name || 'AU').split(' ').map(n => n[0]).join('').slice(0, 2)}
                     </div>
                     <div>
-                      <div className="font-bold text-white text-xs flex items-center gap-2">
+                      <div className="font-bold text-white text-xs flex items-center gap-2 flex-wrap">
                         <span>{auditor.full_name}</span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded font-bold font-mono ${
+                          auditor.role === 'City Admin' || auditor.role === 'Admin'
+                            ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                            : auditor.role === 'Central Ops'
+                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                            : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                        }`}>
+                          {displayRoleName(auditor.role) || 'Auditor'}
+                        </span>
                         {auditor.employeeCode && (
                           <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-sky-400 font-mono">
                             {auditor.employeeCode}

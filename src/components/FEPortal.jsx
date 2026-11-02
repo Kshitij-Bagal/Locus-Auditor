@@ -13,15 +13,22 @@ import {
   Calendar,
   Sparkles,
   Info,
-  Check
+  Check,
+  Video,
+  ExternalLink,
+  XCircle
 } from 'lucide-react';
+import DisputeObjectionModal from './DisputeObjectionModal.jsx';
+import { getDisputeWindowStatus } from '../utils/calendarHelper.js';
 
 export default function FEPortal({ 
   currentFE, 
   tasks, 
-  onLogout 
+  onLogout,
+  onRaiseDispute
 }) {
   const [selectedTaskForDetails, setSelectedTaskForDetails] = useState(null);
+  const [disputeTask, setDisputeTask] = useState(null);
 
   // Filter tasks belonging exclusively to this FE
   const myTasks = tasks.filter(t => {
@@ -214,11 +221,87 @@ export default function FEPortal({
                     <span>Official warning notice was sent to your email <strong>{task.feEmail}</strong>. Please reply with explanation within 24 hours.</span>
                   </div>
                 )}
+
+                {/* Dispute & Objection Status Bar */}
+                {(() => {
+                  const windowStatus = getDisputeWindowStatus(task.auditedAt);
+                  const disputeStatus = task.disputeStatus || task.dispute_status || 'NONE';
+
+                  return (
+                    <div className="pt-2.5 mt-2.5 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`px-2 py-0.5 rounded text-[11px] font-bold border ${windowStatus.badgeClass}`}>
+                          {windowStatus.badgeText}
+                        </span>
+
+                        {disputeStatus === 'PENDING_REVIEW' && (
+                          <span className="text-[11px] font-bold text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-amber-400" />
+                            Objection Under Review
+                          </span>
+                        )}
+
+                        {disputeStatus === 'MEET_SCHEDULED' && (
+                          <a
+                            href={task.disputeMeetUrl || task.dispute_meet_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 border border-amber-400 px-2.5 py-0.5 rounded flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
+                          >
+                            <Video className="w-3.5 h-3.5" />
+                            <span>📅 Google Meet Scheduled</span>
+                            <ExternalLink className="w-3 h-3 ml-0.5" />
+                          </a>
+                        )}
+
+                        {disputeStatus === 'RESOLVED_OVERTURNED' && (
+                          <span className="text-[11px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            Strike Overturned (Passed)
+                          </span>
+                        )}
+
+                        {disputeStatus === 'RESOLVED_UPHELD' && (
+                          <span className="text-[11px] font-bold text-red-400 bg-red-500/10 border border-red-500/30 px-2 py-0.5 rounded flex items-center gap-1">
+                            <XCircle className="w-3 h-3" />
+                            Strike Upheld (Final)
+                          </span>
+                        )}
+                      </div>
+
+                      {disputeStatus === 'NONE' && (
+                        <button
+                          onClick={() => setDisputeTask(task)}
+                          disabled={!windowStatus.canDispute}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${
+                            windowStatus.canDispute
+                              ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-md cursor-pointer'
+                              : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                          }`}
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          <span>{windowStatus.canDispute ? 'Raise Objection' : 'Dispute Window Expired'}</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* Dispute Modal */}
+      {disputeTask && (
+        <DisputeObjectionModal
+          task={disputeTask}
+          currentUser={currentFE}
+          isOpen={Boolean(disputeTask)}
+          onClose={() => setDisputeTask(null)}
+          onSubmitDispute={onRaiseDispute}
+        />
+      )}
 
       {/* Equipment Replacement & Consumable Orders for this FE */}
       <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-5 shadow-lg">

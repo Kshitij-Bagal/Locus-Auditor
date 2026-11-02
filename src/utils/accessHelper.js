@@ -1,12 +1,12 @@
 /**
- * Access Control & Page Permissions Helper for Locus Auditor
+ * Access Control & Permission Architecture for Locus Auditor
  * 
  * Provides:
- * 1. Role normalization (e.g. 'City Admin' -> 'Admin', multi-role string parsing)
- * 2. Granular page definitions
- * 3. Role-to-page default mappings
- * 4. User-specific page permission resolution (direct overrides)
- * 5. Persistent local storage sync
+ * 1. Exact Default Role Presets for all corporate roles.
+ * 2. Editable Live Role Presets synced with LocalStorage and Supabase.
+ * 3. Separation of default role presets vs granted page access (overrides).
+ * 4. hasAccess(profile, pageName) evaluation using live dynamic presets.
+ * 5. Bidirectional mapping between page IDs and human-readable page names.
  */
 
 // All standard pages available in the Locus Auditor system
@@ -20,7 +20,7 @@ export const SYSTEM_PAGES = [
   },
   {
     id: 'upload',
-    label: 'Upload Tasks',
+    label: 'Upload Task',
     fullName: 'Daily Task Ingestion',
     description: 'Upload daily Locus dispatch spreadsheet with routes and customer OTPs',
     category: 'Operations'
@@ -34,9 +34,9 @@ export const SYSTEM_PAGES = [
   },
   {
     id: 'escalations',
-    label: 'D+1 Escalations',
+    label: 'D + 1 Escalations',
     fullName: 'D+1 SLA Breach Escalations',
-    description: 'Overdue audit monitoring escalated to Sunil Kumar (BH) & Rajesh Sharma (GM)',
+    description: 'Overdue audit monitoring escalated to Business Head (BH) & General Manager (GM)',
     category: 'Governance'
   },
   {
@@ -80,15 +80,138 @@ export const SYSTEM_PAGES = [
     fullName: 'Granular Page Access Panel',
     description: 'Configure and override exact page permissions per user and role',
     category: 'Administration'
+  },
+  {
+    id: 'fatalObjection',
+    label: 'Fatal objection',
+    fullName: 'Fatal Objection & Dispute Meet Hub',
+    description: 'Senior Auditor review for contested strikes, dispute meets, and re-auditing',
+    category: 'Governance'
   }
 ];
 
-// Normalize role names (e.g. handles 'City Admin' -> 'Admin')
+// Mapping between Page ID and Human-Readable Page Label
+export const PAGE_ID_TO_LABEL = {
+  audits: 'Audits',
+  upload: 'Upload Task',
+  allocation: 'Roster & Workload',
+  escalations: 'D + 1 Escalations',
+  rules: 'Quality Rules',
+  replacements: 'Tool Orders',
+  managerPortal: 'Cluster Oversight',
+  fePortal: 'My Visits',
+  users: 'User Accounts',
+  accessControl: 'Access Control',
+  fatalObjection: 'Fatal objection'
+};
+
+export const PAGE_LABEL_TO_ID = {
+  'Audits': 'audits',
+  'Upload Task': 'upload',
+  'Upload Tasks': 'upload',
+  'Roster & Workload': 'allocation',
+  'D + 1 Escalations': 'escalations',
+  'D+1 Escalations': 'escalations',
+  'Quality Rules': 'rules',
+  'Tool Orders': 'replacements',
+  'Cluster Oversight': 'managerPortal',
+  'My Visits': 'fePortal',
+  'User Accounts': 'users',
+  'Access Control': 'accessControl',
+  'Fatal objection': 'fatalObjection',
+  'Fatal Objection': 'fatalObjection'
+};
+
+// 9 Standard Corporate Roles represented in the system
+export const ALL_ROLES = [
+  'SuperAdmin',
+  'City Admin',
+  'Auditor',
+  'AM',
+  'RM',
+  'Central Ops',
+  'GM',
+  'BH',
+  'FE'
+];
+
+// ====================================================================
+// EXACT DEFAULT ROLE PRESETS (Baseline Defaults)
+// ====================================================================
+export const DEFAULT_ROLE_PRESETS = {
+  SuperAdmin: [
+    'Audits',
+    'Upload Task',
+    'Roster & Workload',
+    'D + 1 Escalations',
+    'Quality Rules',
+    'Tool Orders',
+    'Cluster Oversight',
+    'User Accounts',
+    'Access Control',
+    'Fatal objection'
+  ],
+  'City Admin': [
+    'Audits',
+    'Tool Orders'
+  ],
+  Admin: [ // alias for City Admin
+    'Audits',
+    'Tool Orders'
+  ],
+  Auditor: [
+    'Audits'
+  ],
+  AM: [
+    'Tool Orders',
+    'Cluster Oversight'
+  ],
+  RM: [
+    'Tool Orders',
+    'Cluster Oversight'
+  ],
+  'Central Ops': [
+    'Audits',
+    'Upload Task',
+    'Tool Orders',
+    'Cluster Oversight'
+  ],
+  GM: [
+    'Audits',
+    'Upload Task',
+    'Roster & Workload',
+    'D + 1 Escalations',
+    'Quality Rules',
+    'Tool Orders',
+    'Cluster Oversight',
+    'Fatal objection'
+  ],
+  BH: [
+    'Audits',
+    'Roster & Workload',
+    'D + 1 Escalations',
+    'Quality Rules',
+    'Cluster Oversight'
+  ],
+  FE: [
+    'My Visits'
+  ]
+};
+
+// Storage Key for Live Editable Role Presets
+export const CUSTOM_ROLE_PRESETS_KEY = 'locus_custom_role_presets_v4';
+
+// In-memory cache for live role presets
+let inMemoryLiveRolePresets = null;
+
+/**
+ * Normalizes role names into canonical keys
+ */
 export function normalizeRoleName(rawRole) {
   if (!rawRole || typeof rawRole !== 'string') return 'Auditor';
   const clean = rawRole.trim().toLowerCase();
   
-  if (clean === 'admin' || clean === 'city admin' || clean === 'cityadmin') return 'Admin';
+  if (clean === 'admin' || clean === 'city admin' || clean === 'cityadmin') return 'City Admin';
   if (clean === 'superadmin' || clean === 'super admin' || clean === 'super_admin') return 'SuperAdmin';
   if (clean === 'central ops' || clean === 'centralops' || clean === 'ops' || clean === 'central_ops') return 'Central Ops';
   if (clean === 'auditor') return 'Auditor';
@@ -101,10 +224,137 @@ export function normalizeRoleName(rawRole) {
   return rawRole.trim();
 }
 
+/**
+ * Retrieve the current live role presets (from memory, localStorage, or fallback to default).
+ * Automatically ensures canonical formatting (human labels) and alias sync.
+ */
+export function getLiveRolePresets() {
+  if (inMemoryLiveRolePresets) {
+    return inMemoryLiveRolePresets;
+  }
+
+  try {
+    const saved = localStorage.getItem(CUSTOM_ROLE_PRESETS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object') {
+        // Deep merge with DEFAULT_ROLE_PRESETS to ensure all roles and keys exist
+        const merged = { ...DEFAULT_ROLE_PRESETS };
+        Object.entries(parsed).forEach(([role, pages]) => {
+          if (Array.isArray(pages)) {
+            // Normalize page items to canonical labels
+            merged[role] = pages.map(p => PAGE_ID_TO_LABEL[p] || p);
+          }
+        });
+        // Keep Admin aliased to City Admin
+        if (merged['City Admin']) {
+          merged['Admin'] = [...merged['City Admin']];
+        }
+        inMemoryLiveRolePresets = merged;
+        return inMemoryLiveRolePresets;
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to parse custom role presets from storage:', e);
+  }
+
+  // Fallback to clone of defaults
+  inMemoryLiveRolePresets = JSON.parse(JSON.stringify(DEFAULT_ROLE_PRESETS));
+  return inMemoryLiveRolePresets;
+}
+
+/**
+ * Persist updated live role presets to memory and localStorage,
+ * and broadcast an event across the window.
+ */
+export function setLiveRolePresets(newPresets) {
+  if (!newPresets || typeof newPresets !== 'object') return false;
+
+  const clean = { ...DEFAULT_ROLE_PRESETS };
+  Object.entries(newPresets).forEach(([role, pages]) => {
+    if (Array.isArray(pages)) {
+      clean[role] = pages.map(p => PAGE_ID_TO_LABEL[p] || p);
+    }
+  });
+
+  // Ensure Admin alias mirrors City Admin
+  if (clean['City Admin']) {
+    clean['Admin'] = [...clean['City Admin']];
+  }
+
+  inMemoryLiveRolePresets = clean;
+
+  try {
+    localStorage.setItem(CUSTOM_ROLE_PRESETS_KEY, JSON.stringify(clean));
+  } catch (e) {
+    console.warn('Failed to save custom role presets to localStorage:', e);
+  }
+
+  // Broadcast change for immediate UI re-evaluation
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('locus_presets_updated', { detail: clean }));
+    } catch (e) {}
+  }
+
+  return clean;
+}
+
+/**
+ * Reset all role presets back to original system defaults
+ */
+export function resetRolePresetsToDefault() {
+  try {
+    localStorage.removeItem(CUSTOM_ROLE_PRESETS_KEY);
+  } catch (e) {}
+  inMemoryLiveRolePresets = JSON.parse(JSON.stringify(DEFAULT_ROLE_PRESETS));
+
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('locus_presets_updated', { detail: inMemoryLiveRolePresets }));
+    } catch (e) {}
+  }
+
+  return inMemoryLiveRolePresets;
+}
+
+/**
+ * Dynamic Proxy export for ROLE_PRESETS so existing references in components
+ * automatically evaluate against the live editable presets.
+ */
+export const ROLE_PRESETS = new Proxy({}, {
+  get(target, prop) {
+    const live = getLiveRolePresets();
+    if (typeof prop === 'string') {
+      const direct = live[prop];
+      if (direct) return direct;
+      const normalized = normalizeRoleName(prop);
+      if (live[normalized]) return live[normalized];
+    }
+    return live[prop] || [];
+  },
+  has(target, prop) {
+    const live = getLiveRolePresets();
+    return prop in live || (typeof prop === 'string' && normalizeRoleName(prop) in live);
+  },
+  ownKeys() {
+    const live = getLiveRolePresets();
+    return Reflect.ownKeys(live);
+  },
+  getOwnPropertyDescriptor(target, prop) {
+    const live = getLiveRolePresets();
+    return {
+      value: live[prop] || (typeof prop === 'string' ? live[normalizeRoleName(prop)] : undefined),
+      enumerable: true,
+      configurable: true
+    };
+  }
+});
+
 // Display friendly name for badges
 export function displayRoleName(role) {
   const norm = normalizeRoleName(role);
-  if (norm === 'Admin') return 'City Admin';
+  if (norm === 'City Admin' || norm === 'Admin') return 'City Admin';
   if (norm === 'BH') return 'Business Head';
   if (norm === 'GM') return 'General Manager';
   if (norm === 'AM') return 'Area Manager';
@@ -127,60 +377,43 @@ export function parseRoles(raw) {
   return ['Auditor'];
 }
 
-// Default page access configuration per role
-export const ROLE_DEFAULT_PAGES = {
-  SuperAdmin: SYSTEM_PAGES.map(p => p.id),
-  Admin: ['audits', 'replacements', 'escalations', 'managerPortal'], // City Admin
-  'Central Ops': ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'managerPortal'],
-  GM: ['rules', 'escalations', 'allocation', 'replacements', 'managerPortal'],
-  BH: ['rules', 'escalations', 'allocation', 'replacements', 'managerPortal'],
-  Auditor: ['audits'],
-  AM: ['managerPortal', 'audits', 'replacements'],
-  RM: ['managerPortal', 'audits', 'replacements'],
-  FE: ['fePortal']
-};
-
-// Automatically derive database roles from granted page IDs
-export function deriveRolesFromPages(pageIds = []) {
-  if (!Array.isArray(pageIds) || pageIds.length === 0) return ['Auditor'];
-
-  const roleSet = new Set();
+/**
+ * Determines whether a user is an actual auditor eligible for the daily audit roster
+ * and workload allocation.
+ * 
+ * STRICT RULES:
+ * - Dedicated Auditors, City Admins, and Central Ops perform audits -> TRUE
+ * - Supervisory, Field & Governance roles (AM, RM, GM, BH, FE, SuperAdmin) DO NOT perform audits -> FALSE
+ */
+export function isEligibleForAuditRoster(user) {
+  if (!user || user.is_active === false) return false;
   
-  if (pageIds.includes('users') || pageIds.includes('accessControl')) {
-    roleSet.add('SuperAdmin');
+  const primaryRole = normalizeRoleName(user.role);
+  
+  // Strictly excluded management, field, and governance roles (they will NEVER do photo audits)
+  const EXCLUDED_ROLES = ['AM', 'RM', 'GM', 'BH', 'FE', 'SuperAdmin'];
+  if (EXCLUDED_ROLES.includes(primaryRole)) {
+    return false;
   }
-  if (pageIds.includes('replacements')) {
-    roleSet.add('Admin'); // City Admin
+  
+  // Explicitly allowed audit-performing roles
+  const AUDITOR_ROLES = ['Auditor', 'City Admin', 'Admin', 'Central Ops'];
+  if (AUDITOR_ROLES.includes(primaryRole)) {
+    return true;
   }
-  if (pageIds.includes('upload') || pageIds.includes('allocation')) {
-    roleSet.add('Central Ops');
-  }
-  if (pageIds.includes('rules')) {
-    roleSet.add('GM');
-  }
-  if (pageIds.includes('escalations') && !pageIds.includes('replacements') && !pageIds.includes('upload')) {
-    roleSet.add('BH');
-  }
-  if (pageIds.includes('audits')) {
-    roleSet.add('Auditor');
-  }
-  if (pageIds.includes('fePortal')) {
-    roleSet.add('FE');
-  }
-
-  if (roleSet.size === 0) {
-    roleSet.add('Auditor');
-  }
-
-  // Prioritize primary role order: SuperAdmin > Admin > Central Ops > GM > BH > Auditor > FE
-  const priority = ['SuperAdmin', 'Admin', 'Central Ops', 'GM', 'BH', 'Auditor', 'AM', 'RM', 'FE'];
-  return Array.from(roleSet).sort((a, b) => priority.indexOf(a) - priority.indexOf(b));
+  
+  // Multi-role validation
+  const roles = parseRoles(user.roles || []);
+  const hasAuditorRole = roles.some(r => AUDITOR_ROLES.includes(r));
+  const hasExcludedRole = roles.some(r => EXCLUDED_ROLES.includes(r));
+  
+  return hasAuditorRole && !hasExcludedRole;
 }
 
-// Storage key for user page overrides
-export const USER_PERMISSIONS_STORAGE_KEY = 'locus_user_page_permissions_v2';
+// Local storage cache key for user granted pages
+export const USER_PERMISSIONS_STORAGE_KEY = 'locus_user_granted_access_v3';
 
-// Load all saved custom user page overrides
+// Load saved granted permissions map from localStorage
 export function getSavedPermissionsMap() {
   try {
     const saved = localStorage.getItem(USER_PERMISSIONS_STORAGE_KEY);
@@ -190,87 +423,134 @@ export function getSavedPermissionsMap() {
   }
 }
 
-// Save custom page permissions for a specific user (supports email and/or id)
-export function saveUserPagePermissions(userEmailOrId, pageIds, secondaryKey = null) {
+// Save granted page permissions for a specific user
+export function saveUserPagePermissions(userEmailOrId, grantedPages = [], secondaryKey = null) {
   try {
     const map = getSavedPermissionsMap();
+    const cleanList = Array.isArray(grantedPages) ? grantedPages : [];
     if (userEmailOrId) {
-      const key1 = String(userEmailOrId).trim().toLowerCase();
-      map[key1] = Array.isArray(pageIds) ? pageIds : [];
+      const k1 = String(userEmailOrId).trim().toLowerCase();
+      map[k1] = cleanList;
     }
     if (secondaryKey) {
-      const key2 = String(secondaryKey).trim().toLowerCase();
-      map[key2] = Array.isArray(pageIds) ? pageIds : [];
+      const k2 = String(secondaryKey).trim().toLowerCase();
+      map[k2] = cleanList;
     }
     localStorage.setItem(USER_PERMISSIONS_STORAGE_KEY, JSON.stringify(map));
     return true;
   } catch (e) {
-    console.warn('Failed to save user permissions:', e);
+    console.warn('Failed to save user granted permissions:', e);
     return false;
   }
 }
 
 /**
- * Resolves the effective accessible pages for a given user.
+ * Core Permission Check: hasAccess(profile, pageName)
  * 
- * Priority:
- * 1. SuperAdmin: Full access to all pages.
- * 2. Explicit direct user override (from database profile.page_access or localStorage map).
- * 3. Union of default pages for all roles assigned to the user.
+ * User has access if pageName is in live ROLE_PRESETS[profile.role] OR in profile.granted_page_access.
+ * Supports pageName as either human-readable label (e.g. 'Fatal objection') or page ID (e.g. 'fatalObjection').
  */
-export function getUserEffectivePages(user) {
-  if (!user) return [];
+export function hasAccess(profile, pageName) {
+  if (!profile || !pageName) return false;
 
-  const roles = parseRoles(user.roles || [user.role]);
-  const isSuperAdmin = roles.includes('SuperAdmin') || user.role === 'SuperAdmin';
+  const targetLabel = PAGE_ID_TO_LABEL[pageName] || pageName;
+  const targetId = PAGE_LABEL_TO_ID[pageName] || pageName;
 
-  if (isSuperAdmin) {
-    return SYSTEM_PAGES.map(p => p.id);
+  // SuperAdmin has global bypass
+  const primaryRole = normalizeRoleName(profile.role);
+  if (primaryRole === 'SuperAdmin') return true;
+  if (Array.isArray(profile.roles) && profile.roles.some(r => normalizeRoleName(r) === 'SuperAdmin')) {
+    return true;
   }
 
-  // Check direct overrides from localStorage
+  // 1. Check Live Role Presets for primary role and multi-roles
+  const livePresets = getLiveRolePresets();
+  const rolesToCheck = parseRoles(profile.roles || [profile.role]);
+  for (const r of rolesToCheck) {
+    const preset = livePresets[r] || livePresets[normalizeRoleName(r)] || [];
+    if (preset.includes(targetLabel) || preset.includes(targetId)) {
+      return true;
+    }
+  }
+
+  // 2. Check profile.granted_page_access (or legacy page_access)
+  const granted = profile.granted_page_access || profile.grantedPageAccess || profile.page_access || profile.pageAccess || [];
+  if (Array.isArray(granted)) {
+    if (granted.includes(targetLabel) || granted.includes(targetId)) {
+      return true;
+    }
+  }
+
+  // 3. Check persistent localStorage cache for granted pages
   const permMap = getSavedPermissionsMap();
-  const emailKey = user.email ? String(user.email).trim().toLowerCase() : '';
-  const idKey = user.id ? String(user.id).trim().toLowerCase() : '';
-
-  const cleanPages = (pages) => {
-    if (!Array.isArray(pages)) return [];
-    // Auto-migrate any legacy feRegistry reference to managerPortal
-    const migrated = pages.map(p => p === 'feRegistry' ? 'managerPortal' : p);
-    return Array.from(new Set(migrated.filter(p => p !== 'feRegistry')));
-  };
-
-  const savedOverride = permMap[emailKey] || permMap[idKey];
-  if (Array.isArray(savedOverride) && savedOverride.length > 0) {
-    return cleanPages(savedOverride);
+  const emailKey = profile.email ? String(profile.email).trim().toLowerCase() : '';
+  const idKey = profile.id ? String(profile.id).trim().toLowerCase() : '';
+  const cachedGranted = permMap[emailKey] || permMap[idKey];
+  if (Array.isArray(cachedGranted)) {
+    if (cachedGranted.includes(targetLabel) || cachedGranted.includes(targetId)) {
+      return true;
+    }
   }
 
-  // Check direct database profile attribute (e.g. profile.page_access)
-  if (Array.isArray(user.page_access) && user.page_access.length > 0) {
-    return cleanPages(user.page_access);
-  }
-  if (Array.isArray(user.pageAccess) && user.pageAccess.length > 0) {
-    return cleanPages(user.pageAccess);
-  }
-
-  // Compute union of default pages for all assigned roles
-  const pagesSet = new Set();
-  roles.forEach(r => {
-    const defaults = ROLE_DEFAULT_PAGES[r] || [];
-    defaults.forEach(p => pagesSet.add(p));
-  });
-
-  // Fallback to Auditor page if empty
-  if (pagesSet.size === 0) {
-    pagesSet.add('audits');
-  }
-
-  return cleanPages(Array.from(pagesSet));
+  return false;
 }
 
-// Quick check if a user is authorized to view a specific page
+// Backward compatibility alias for hasAccess
 export function hasPageAccess(user, pageId) {
-  if (!user || !pageId) return false;
-  const effectivePages = getUserEffectivePages(user);
-  return effectivePages.includes(pageId);
+  return hasAccess(user, pageId);
+}
+
+/**
+ * Resolves the effective accessible page IDs for a given user.
+ */
+export function getUserEffectivePages(profile) {
+  if (!profile) return [];
+  return SYSTEM_PAGES
+    .filter(page => hasAccess(profile, page.id))
+    .map(page => page.id);
+}
+
+/**
+ * Returns the granted pages specifically (excluding pages already included in live role preset).
+ */
+export function getUserGrantedPages(profile) {
+  if (!profile) return [];
+  const livePresets = getLiveRolePresets();
+  const rolesToCheck = parseRoles(profile.roles || [profile.role]);
+  const rolePresetPages = new Set();
+  rolesToCheck.forEach(r => {
+    const preset = livePresets[r] || livePresets[normalizeRoleName(r)] || [];
+    preset.forEach(p => {
+      rolePresetPages.add(p);
+      if (PAGE_LABEL_TO_ID[p]) rolePresetPages.add(PAGE_LABEL_TO_ID[p]);
+    });
+  });
+
+  const rawGranted = profile.granted_page_access || profile.grantedPageAccess || profile.page_access || profile.pageAccess || [];
+  const permMap = getSavedPermissionsMap();
+  const emailKey = profile.email ? String(profile.email).trim().toLowerCase() : '';
+  const idKey = profile.id ? String(profile.id).trim().toLowerCase() : '';
+  const cached = permMap[emailKey] || permMap[idKey] || [];
+
+  const combined = Array.from(new Set([...(Array.isArray(rawGranted) ? rawGranted : []), ...(Array.isArray(cached) ? cached : [])]));
+  
+  // Return page IDs that are NOT in role preset
+  return combined
+    .map(p => PAGE_LABEL_TO_ID[p] || p)
+    .filter(p => !rolePresetPages.has(p) && !rolePresetPages.has(PAGE_ID_TO_LABEL[p]));
+}
+
+// Helper: derive primary roles from page sets (if needed for profile seeding)
+export function deriveRolesFromPages(pageIds = []) {
+  if (!Array.isArray(pageIds) || pageIds.length === 0) return ['Auditor'];
+  const roleSet = new Set();
+  if (pageIds.includes('users') || pageIds.includes('accessControl')) roleSet.add('SuperAdmin');
+  if (pageIds.includes('replacements')) roleSet.add('City Admin');
+  if (pageIds.includes('upload') || pageIds.includes('allocation')) roleSet.add('Central Ops');
+  if (pageIds.includes('rules') || pageIds.includes('fatalObjection')) roleSet.add('GM');
+  if (pageIds.includes('escalations')) roleSet.add('BH');
+  if (pageIds.includes('audits')) roleSet.add('Auditor');
+  if (pageIds.includes('fePortal')) roleSet.add('FE');
+  if (roleSet.size === 0) roleSet.add('Auditor');
+  return Array.from(roleSet);
 }

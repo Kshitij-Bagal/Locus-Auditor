@@ -90,7 +90,7 @@ export default function TaskCardGrid({
                   isOverdue ? (
                     <div className="text-right">
                       <span 
-                        title={`SLA Breached (+${sla.hoursOverdue}h): Escalated to Sunil Kumar (BH) & Rajesh Sharma (GM)`}
+                        title={`SLA Breached (+${sla.hoursOverdue}h): Escalated to Business Head (BH) & General Manager (GM)`}
                         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-black bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse"
                       >
                         <AlertTriangle className="w-3 h-3 text-red-400" />

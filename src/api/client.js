@@ -36,20 +36,10 @@ const supabase = isConfigured
 // ====================================================================
 
 export const authApi = {
-  // Sign in with Email and Password
+  // Sign in with Email and Password (Strictly authenticates actual registered users from Supabase)
   async signIn(email, password) {
     if (!supabase) {
-      // Local fallback for testing before Supabase project has auth users
-      return {
-        user: { email, id: 'usr_local' },
-        profile: {
-          id: 'usr_local',
-          email,
-          full_name: email.split('@')[0],
-          role: email.includes('admin') ? 'SuperAdmin' : email.includes('bh') ? 'BH' : email.includes('gm') ? 'GM' : email.includes('ops') ? 'Central Ops' : 'Auditor',
-          facility_code: 'Ahmedabad'
-        }
-      };
+      throw new Error('Supabase client is not configured. Please verify your environment configuration.');
     }
 
     const cleanEmail = email.trim().toLowerCase();
@@ -69,7 +59,7 @@ export const authApi = {
       console.warn('Supabase Auth signIn note:', e.message);
     }
 
-    // 2. If Auth service has an internal error (e.g. GoTrue scan error) or user has not yet signed in:
+    // 2. If Auth service has an internal error or user has not yet initialized password via GoTrue:
     if (!authUser) {
       // Check if user is registered in public.profiles table
       const { data: profData } = await supabase
@@ -121,31 +111,7 @@ export const authApi = {
           };
         }
       } else {
-        // Corporate master admin & demo preset fallback if database is wiped or during clean slate
-        const preset = [
-          { email: 'kshitijbagal@lenskart.com', role: 'SuperAdmin', name: 'Kshitij Bagal', hub: 'All Hubs' },
-          { email: 'superadmin@lenskart.in', role: 'SuperAdmin', name: 'Kshitij Bagal', hub: 'All Hubs' },
-          { email: 'auditor.pooja@lenskart.in', role: 'Auditor', name: 'Pooja Verma', hub: 'Ahmedabad' },
-          { email: 'ops.central@lenskart.in', role: 'Central Ops', name: 'Rohan Mehta', hub: 'National' },
-          { email: 'admin.ahmedabad@lenskart.in', role: 'Admin', name: 'Abhay Pandey', hub: 'Ahmedabad' },
-          { email: 'gm.quality@lenskart.in', role: 'GM', name: 'Rajesh Sharma', hub: 'National' },
-          { email: 'bh.lenskart@lenskart.in', role: 'BH', name: 'Sunil Kumar', hub: 'National' }
-        ].find(p => p.email.toLowerCase() === cleanEmail);
-
-        if (preset) {
-          authUser = {
-            id: `usr_${preset.role.toLowerCase()}`,
-            email: preset.email,
-            user_metadata: {
-              full_name: preset.name,
-              role: preset.role,
-              facility_code: preset.hub,
-              person_id: 'EMP001'
-            }
-          };
-        } else {
-          throw new Error('Invalid login credentials. User not found in system.');
-        }
+        throw new Error('User profile not found. Please contact SuperAdmin to register your corporate account.');
       }
     }
 
@@ -161,24 +127,17 @@ export const authApi = {
       if (profData) {
         profile = { ...profData };
       } else {
-        profile = {
-          id: authUser.id,
-          email: authUser.email,
-          full_name: authUser.user_metadata?.full_name || authUser.email.split('@')[0],
-          role: authUser.user_metadata?.role || 'Auditor',
-          roles: authUser.user_metadata?.roles || [authUser.user_metadata?.role || 'Auditor'],
-          facility_code: authUser.user_metadata?.facility_code || 'Ahmedabad',
-          person_id: authUser.user_metadata?.person_id || ''
-        };
+        throw new Error('User profile record not found in system database.');
       }
 
       // Enrich profile with cached page permissions & derived multi-roles
       const permMap = getSavedPermissionsMap();
       const userKey = cleanEmail;
       const idKey = profile.id ? String(profile.id).toLowerCase() : '';
-      const savedPages = permMap[userKey] || permMap[idKey] || profile.page_access;
+      const savedPages = permMap[userKey] || permMap[idKey] || profile.granted_page_access || profile.page_access;
 
       if (Array.isArray(savedPages) && savedPages.length > 0) {
+        profile.granted_page_access = profile.granted_page_access || savedPages;
         profile.page_access = savedPages;
         profile.pageAccess = savedPages;
         const derived = deriveRolesFromPages(savedPages);
@@ -224,9 +183,10 @@ export const authApi = {
       const permMap = getSavedPermissionsMap();
       const userKey = session.user.email.toLowerCase();
       const idKey = String(baseProfile.id || session.user.id).toLowerCase();
-      const savedPages = permMap[userKey] || permMap[idKey] || baseProfile.page_access;
+      const savedPages = permMap[userKey] || permMap[idKey] || baseProfile.granted_page_access || baseProfile.page_access;
 
       if (Array.isArray(savedPages) && savedPages.length > 0) {
+        baseProfile.granted_page_access = baseProfile.granted_page_access || savedPages;
         baseProfile.page_access = savedPages;
         baseProfile.pageAccess = savedPages;
         const derived = deriveRolesFromPages(savedPages);
@@ -357,19 +317,36 @@ export const tasksApi = {
     }
   },
 
-  // Get tasks from database
+  // Get all tasks from database (handles Supabase PostgREST default 1,000-row limit via automated range pagination)
   async getTasks() {
     if (!supabase) return null;
     try {
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*')
-        .order('created_at', { ascending: false });
+      let allRows = [];
+      let from = 0;
+      const pageSize = 1000;
+      let hasMore = true;
 
-      if (error) throw error;
-      if (!data) return [];
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from('tasks')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .range(from, from + pageSize - 1);
 
-      return data.map(row => ({
+        if (error) throw error;
+        if (!data || data.length === 0) {
+          hasMore = false;
+        } else {
+          allRows = allRows.concat(data);
+          if (data.length < pageSize) {
+            hasMore = false;
+          } else {
+            from += pageSize;
+          }
+        }
+      }
+
+      return allRows.map(row => ({
         id: row.id,
         taskId: row.task_id,
         teamName: row.team_name,
@@ -404,7 +381,20 @@ export const tasksApi = {
         emailSent: Boolean(row.email_sent),
         emailSentAt: row.email_sent_at,
         criteriaStatus: row.criteria_status || {},
-        replacements: Array.isArray(row.replacements) ? row.replacements : []
+        replacements: Array.isArray(row.replacements) ? row.replacements : [],
+        disputeStatus: row.dispute_status || 'NONE',
+        disputeCategory: row.dispute_category || null,
+        disputeReason: row.dispute_reason || null,
+        disputeRaisedByRole: row.dispute_raised_by_role || null,
+        disputeRaisedByName: row.dispute_raised_by_name || null,
+        disputeRaisedAt: row.dispute_raised_at || null,
+        disputeMeetUrl: row.dispute_meet_url || null,
+        disputeMeetTime: row.dispute_meet_time || null,
+        disputeMeetRequestedBy: row.dispute_meet_requested_by || null,
+        disputeResolvedAt: row.dispute_resolved_at || null,
+        disputeResolvedByName: row.dispute_resolved_by_name || null,
+        disputeResolutionRemarks: row.dispute_resolution_remarks || null,
+        disputeProofUrl: row.dispute_proof_url || null
       }));
     } catch (e) {
       console.warn('tasksApi.getTasks error:', e.message);
@@ -529,6 +519,95 @@ export const tasksApi = {
       recipients,
       emailDispatch
     };
+  },
+
+  // Raise Fatal Objection / Dispute (FE or AM/RM)
+  async raiseDispute({ taskId, category, reason, proofUrl, raisedByRole, raisedByName, scheduleMeet, meetUrl, meetTime }) {
+    const isMeet = Boolean(scheduleMeet && meetUrl);
+    const updates = {
+      dispute_status: isMeet ? 'MEET_SCHEDULED' : 'PENDING_REVIEW',
+      dispute_category: category,
+      dispute_reason: reason,
+      dispute_proof_url: proofUrl || null,
+      dispute_raised_by_role: raisedByRole || 'FE',
+      dispute_raised_by_name: raisedByName || 'Staff',
+      dispute_raised_at: new Date().toISOString(),
+      dispute_meet_url: isMeet ? meetUrl : null,
+      dispute_meet_time: isMeet ? meetTime : null,
+      dispute_meet_requested_by: isMeet ? raisedByName : null,
+      updated_at: new Date().toISOString()
+    };
+
+    if (supabase) {
+      const { error } = await supabase
+        .from('tasks')
+        .update(updates)
+        .eq('id', taskId);
+
+      if (error) {
+        console.warn('tasksApi.raiseDispute DB error:', error.message);
+        throw error;
+      }
+    }
+
+    return { 
+      success: true, 
+      status: updates.dispute_status, 
+      updates 
+    };
+  },
+
+  // Senior Auditor / GM overturns dispute (marks PASSED, zeros strike)
+  async overturnDispute(taskId, { resolvedByName, remarks } = {}) {
+    const updates = {
+      audit_status: 'PASSED',
+      failed_reasons: [],
+      dispute_status: 'RESOLVED_OVERTURNED',
+      dispute_resolved_at: new Date().toISOString(),
+      dispute_resolved_by_name: resolvedByName || 'Senior Auditor',
+      dispute_resolution_remarks: remarks || 'Strike overturned by senior auditor/GM.',
+      auditor_remarks: remarks ? `[Overturned Strike]: ${remarks}` : 'Passed upon dispute re-audit',
+      updated_at: new Date().toISOString()
+    };
+
+    if (supabase) {
+      const { error } = await supabase
+        .from('tasks')
+        .update(updates)
+        .eq('id', taskId);
+
+      if (error) {
+        console.warn('tasksApi.overturnDispute DB error:', error.message);
+        throw error;
+      }
+    }
+
+    return { success: true, updates };
+  },
+
+  // Senior Auditor / GM upholds fatal strike
+  async upholdDispute(taskId, { resolvedByName, remarks } = {}) {
+    const updates = {
+      dispute_status: 'RESOLVED_UPHELD',
+      dispute_resolved_at: new Date().toISOString(),
+      dispute_resolved_by_name: resolvedByName || 'Senior Auditor',
+      dispute_resolution_remarks: remarks || 'Fatal strike upheld after objection review.',
+      updated_at: new Date().toISOString()
+    };
+
+    if (supabase) {
+      const { error } = await supabase
+        .from('tasks')
+        .update(updates)
+        .eq('id', taskId);
+
+      if (error) {
+        console.warn('tasksApi.upholdDispute DB error:', error.message);
+        throw error;
+      }
+    }
+
+    return { success: true, updates };
   }
 };
 
@@ -951,21 +1030,39 @@ export const usersApi = {
   async getUsers() {
     if (!supabase) return [];
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .order('created_at', { ascending: false });
+      let allProfiles = [];
+      let from = 0;
+      const pageSize = 1000;
+      let hasMore = true;
 
-      if (error) {
-        console.warn('Error fetching profiles from Supabase:', error.message);
-        return [];
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .range(from, from + pageSize - 1);
+
+        if (error) {
+          console.warn('Error fetching profiles from Supabase:', error.message);
+          break;
+        }
+        if (!data || data.length === 0) {
+          hasMore = false;
+        } else {
+          allProfiles = allProfiles.concat(data);
+          if (data.length < pageSize) {
+            hasMore = false;
+          } else {
+            from += pageSize;
+          }
+        }
       }
 
       const permMap = getSavedPermissionsMap();
-      return (data || []).map(u => {
+      return allProfiles.map(u => {
         const emailKey = u.email ? String(u.email).trim().toLowerCase() : '';
         const idKey = u.id ? String(u.id).trim().toLowerCase() : '';
-        const savedPages = permMap[emailKey] || permMap[idKey] || u.page_access;
+        const savedPages = permMap[emailKey] || permMap[idKey] || u.granted_page_access || u.page_access;
 
         if (Array.isArray(savedPages) && savedPages.length > 0) {
           const derived = deriveRolesFromPages(savedPages);
@@ -975,6 +1072,7 @@ export const usersApi = {
             ...u,
             role: u.role || combinedRoles[0] || 'Auditor',
             roles: combinedRoles,
+            granted_page_access: u.granted_page_access || savedPages,
             page_access: savedPages,
             pageAccess: savedPages
           };
@@ -982,6 +1080,7 @@ export const usersApi = {
 
         return {
           ...u,
+          granted_page_access: u.granted_page_access || [],
           roles: parseRoles(u.roles || [u.role])
         };
       });
@@ -1355,6 +1454,8 @@ export const usersApi = {
       const rolePayload = {
         role: primaryRole,
         roles: derivedRoles,
+        granted_page_access: pageIds,
+        page_access: pageIds,
         updated_at: new Date().toISOString()
       };
 
@@ -1723,3 +1824,76 @@ export const feFatalDigestApi = {
     return data;
   }
 };
+
+// ====================================================================
+// 8. SYSTEM SETTINGS & LIVE ROLE PRESETS REST API
+// ====================================================================
+
+export const settingsApi = {
+  // Fetch system setting by key (e.g., 'role_presets')
+  async getSetting(key, defaultValue = null) {
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('system_settings')
+          .select('*')
+          .eq('key', key)
+          .maybeSingle();
+
+        if (!error && data?.value) {
+          try {
+            localStorage.setItem(`locus_setting_${key}`, JSON.stringify(data.value));
+          } catch (e) {}
+          return data.value;
+        }
+      } catch (err) {
+        console.warn('system_settings getSetting note:', err.message);
+      }
+    }
+
+    try {
+      const cached = localStorage.getItem(`locus_setting_${key}`);
+      if (cached) return JSON.parse(cached);
+    } catch (e) {}
+
+    return defaultValue;
+  },
+
+  // Set system setting by key (persists to Supabase and local cache)
+  async setSetting(key, value, updatedBy = null) {
+    try {
+      localStorage.setItem(`locus_setting_${key}`, JSON.stringify(value));
+    } catch (e) {}
+
+    if (supabase) {
+      try {
+        const payload = {
+          key,
+          value,
+          updated_at: new Date().toISOString(),
+          updated_by: updatedBy || 'SuperAdmin'
+        };
+        const { error } = await supabase
+          .from('system_settings')
+          .upsert(payload, { onConflict: 'key' });
+
+        if (error) {
+          console.warn('Supabase system_settings upsert error:', error.message);
+        }
+      } catch (err) {
+        console.warn('system_settings setSetting note:', err.message);
+      }
+    }
+    return value;
+  },
+
+  // Specialized helpers for Role Presets
+  async getRolePresets() {
+    return this.getSetting('role_presets', null);
+  },
+
+  async saveRolePresets(presets, updatedBy) {
+    return this.setSetting('role_presets', presets, updatedBy);
+  }
+};
+

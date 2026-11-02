@@ -203,7 +203,7 @@ export default function UserManagement({
       {
         "employee_code": "GM001",
         "facility_code": "All",
-        "name": "Rajesh Sharma",
+        "name": "General Manager",
         "role": "GM",
         "mobile": "9876543213",
         "email": "gm.quality@lenskart.in",
@@ -216,7 +216,7 @@ export default function UserManagement({
       {
         "employee_code": "BH001",
         "facility_code": "All",
-        "name": "Sunil Kumar",
+        "name": "Business Head",
         "role": "BH",
         "mobile": "9876543214",
         "email": "bh.lenskart@lenskart.in",

@@ -5,8 +5,8 @@
  * Day D dispatches allocated to auditors must be audited within the same day.
  * Any audit allocated on Day D that remains PENDING into D+1 (>24 hours)
  * is an SLA breach and is automatically escalated to:
- * - Sunil Kumar (Business Head - Home Visits)
- * - Rajesh Sharma (General Manager - Quality & Compliance)
+ * - Business Head (BH)
+ * - General Manager (GM)
  */
 
 /**
@@ -107,7 +107,7 @@ export function getTaskSLAStatus(task, referenceTime = new Date()) {
       hoursOverdue: effectiveHours,
       daysOverdue: Math.max(1, Math.floor(effectiveHours / 24)),
       slaLabel: `D+1 Overdue (+${effectiveHours}h)`,
-      escalatedTo: 'BH (Sunil Kumar) & GM (Rajesh Sharma)',
+      escalatedTo: 'Business Head (BH) & General Manager (GM)',
       auditorName: task.assignedAuditorName || 'Unknown Auditor',
       auditorId: task.assignedAuditorId || null
     };

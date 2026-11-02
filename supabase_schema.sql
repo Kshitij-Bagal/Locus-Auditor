@@ -1172,13 +1172,6 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO anon, authenticated, service_
 DO $$ BEGIN
     PERFORM public.register_single_lenskart_user('superadmin@lenskart.in', 'Kshitij Bagal', 'SuperAdmin', 'All Hubs', 'All', 'National', 'EMP001');
     PERFORM public.register_single_lenskart_user('kshitijbagal@lenskart.com', 'Kshitij Bagal', 'SuperAdmin', 'All Hubs', 'All', 'National', 'EMP000');
-    PERFORM public.register_single_lenskart_user('auditor.pooja@lenskart.in', 'Pooja Verma', 'Auditor', 'Ahmedabad Hub', 'Ahmedabad', 'Ahmedabad_Zone1', 'AUD001');
-    PERFORM public.register_single_lenskart_user('ops.central@lenskart.in', 'Rohan Mehta', 'Central Ops', 'All', 'All', 'National', 'OPS001');
-    PERFORM public.register_single_lenskart_user('admin.ahmedabad@lenskart.in', 'Abhay Pandey', 'Admin', 'Ahmedabad Hub', 'Ahmedabad', 'Ahmedabad_Zone1', 'AM001');
-    PERFORM public.register_single_lenskart_user('gm.quality@lenskart.in', 'Rajesh Sharma', 'GM', 'All', 'All', 'National', 'GM001');
-    PERFORM public.register_single_lenskart_user('bh.lenskart@lenskart.in', 'Sunil Kumar', 'BH', 'All', 'All', 'National', 'BH001');
-    PERFORM public.register_single_lenskart_user('rm.west@lenskart.in', 'Sanjay Verma', 'RM', 'All', 'All', 'West', 'RM001');
-    PERFORM public.register_single_lenskart_user('fe.aman@lenskart.in', 'Mohammed Aman Shaikh', 'FE', 'Ahmedabad Hub', 'Ahmedabad', 'Ahmedabad_Zone1', '227563', '9876543215', 'Abhay Pandey', 'Sanjay Verma');
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
 
@@ -1229,7 +1222,55 @@ CREATE POLICY "Allow authenticated insert/update on daily_digest_logs"
     TO authenticated, anon
     USING (true);
 
--- 16. RELOAD POSTGREST SCHEMA CACHE (Fixes column & RPC cache immediately)
+-- ====================================================================
+-- 16. FATAL OBJECTION, DISPUTE MEETS & GRANULAR ACCESS OVERRIDES
+-- ====================================================================
+
+-- Add granted_page_access to profiles
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS granted_page_access TEXT[] DEFAULT '{}';
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS page_access TEXT[] DEFAULT '{}';
+
+-- Add Dispute & Contestation fields to tasks
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_status TEXT DEFAULT 'NONE' CHECK (dispute_status IN ('NONE', 'PENDING_REVIEW', 'MEET_SCHEDULED', 'RESOLVED_UPHELD', 'RESOLVED_OVERTURNED'));
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_category TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_reason TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_raised_by_role TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_raised_by_name TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_raised_at TIMESTAMPTZ;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_meet_url TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_meet_time TIMESTAMPTZ;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_meet_requested_by TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_resolved_at TIMESTAMPTZ;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_resolved_by_name TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_resolution_remarks TEXT;
+ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS dispute_proof_url TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_dispute_status ON public.tasks(dispute_status);
+CREATE INDEX IF NOT EXISTS idx_tasks_dispute_raised_at ON public.tasks(dispute_raised_at);
+
+-- ====================================================================
+-- 17. SYSTEM SETTINGS & LIVE ROLE PRESETS MATRIX
+-- ====================================================================
+CREATE TABLE IF NOT EXISTS public.system_settings (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_by TEXT
+);
+
+ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public select on system_settings"
+    ON public.system_settings FOR SELECT
+    TO authenticated, anon
+    USING (true);
+
+CREATE POLICY "Allow authenticated upsert on system_settings"
+    ON public.system_settings FOR ALL
+    TO authenticated, anon
+    USING (true);
+
+-- 18. RELOAD POSTGREST SCHEMA CACHE (Fixes column & RPC cache immediately)
 NOTIFY pgrst, 'reload schema';
 
 -- Verification notification

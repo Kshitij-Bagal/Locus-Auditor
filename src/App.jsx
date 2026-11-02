@@ -16,8 +16,9 @@ import FEPortal from './components/FEPortal.jsx';
 import DPlusOneEscalationDashboard from './components/DPlusOneEscalationDashboard.jsx';
 import AccessControlPanel from './components/AccessControlPanel.jsx';
 import ClusterManagerPortal from './components/ClusterManagerPortal.jsx';
+import FatalObjectionHub from './components/FatalObjectionHub.jsx';
 
-import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi } from './api/client.js';
+import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi, settingsApi } from './api/client.js';
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
 import { exportAuditReport } from './utils/excelParser.js';
 import { getTaskSLAStatus, filterDPlusOneOverdueTasks } from './utils/slaHelper.js';
@@ -28,7 +29,9 @@ import {
   deriveRolesFromPages, 
   getUserEffectivePages, 
   getSavedPermissionsMap, 
-  saveUserPagePermissions 
+  saveUserPagePermissions,
+  isEligibleForAuditRoster,
+  setLiveRolePresets
 } from './utils/accessHelper.js';
 
 import { 
@@ -48,6 +51,7 @@ import {
 
 const AUTH_USER_KEY = 'locus_auth_user_v4';
 const TASKS_CACHE_KEY = 'locus_tasks_cache_v4';
+const USERS_CACHE_KEY = 'locus_users_cache_v4';
 
 export default function App() {
   // Current Authenticated User (Supabase Auth Email + Password)
@@ -106,16 +110,17 @@ export default function App() {
   // Centrally Governed Rules (GM & BH)
   const [rules, setRules] = useState(INITIAL_CENTRAL_RULES);
 
-  // Users List (SuperAdmin)
-  const [users, setUsers] = useState([
-    { id: 'usr_1', full_name: 'Kshitij Bagal', email: 'superadmin@lenskart.in', role: 'SuperAdmin', facility_code: 'All', person_id: 'EMP001', is_active: true },
-    { id: 'usr_2', full_name: 'Sunil Kumar (Business Head)', email: 'bh.lenskart@lenskart.in', role: 'BH', facility_code: 'All', person_id: 'EMP002', is_active: true },
-    { id: 'usr_3', full_name: 'Rajesh Sharma (General Manager)', email: 'gm.quality@lenskart.in', role: 'GM', facility_code: 'All', person_id: 'EMP003', is_active: true },
-    { id: 'usr_4', full_name: 'Abhay Pandey (City Admin)', email: 'admin.ahmedabad@lenskart.in', role: 'Admin', facility_code: 'Ahmedabad', person_id: 'EMP004', is_active: true },
-    { id: 'usr_5', full_name: 'Rohan Mehta (Central Ops)', email: 'ops.central@lenskart.in', role: 'Central Ops', facility_code: 'All', person_id: 'EMP005', is_active: true },
-    { id: 'usr_6', full_name: 'Pooja Verma (Auditor)', email: 'auditor.pooja@lenskart.in', role: 'Auditor', facility_code: 'Ahmedabad', person_id: 'AUD001', is_active: true },
-    { id: 'usr_7', full_name: 'Mohammed Aman Shaikh', email: 'fe.aman@lenskart.in', role: 'FE', facility_code: 'Ahmedabad', person_id: '227563', is_active: true }
-  ]);
+  // Users List: Fetched directly from Supabase database (No dummy presets)
+  const [users, setUsers] = useState(() => {
+    try {
+      const saved = localStorage.getItem(USERS_CACHE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return [];
+  });
 
   // UI & Filter States
   const [viewMode, setViewMode] = useState('table');
@@ -131,6 +136,7 @@ export default function App() {
   const [inspectingTask, setInspectingTask] = useState(null);
   const [emailingTask, setEmailingTask] = useState(null);
   const [toast, setToast] = useState(null);
+  const [isReAuditMode, setIsReAuditMode] = useState(false);
 
   // Auditor and Supervisor Role Detection (handles multi-role strings & arrays)
   const userRoles = useMemo(() => {
@@ -157,12 +163,11 @@ export default function App() {
       userRoles.includes('GM');
   }, [isSuperAdmin, userRoles]);
 
-  // Actual real auditors list from users (supports multi-role parsing)
+  // Actual real auditors list from users:
+  // Dedicated Auditors, City Admins, and Central Ops who carry photo audit responsibilities
+  // (Strictly excludes supervisory and governance roles: AM, RM, GM, BH, FE, SuperAdmin)
   const realAuditors = useMemo(() => {
-    return (users || []).filter(u => 
-      u.is_active !== false && 
-      (parseRoles(u.roles || [u.role]).includes('Auditor') || (u.email && u.email.toLowerCase().includes('auditor')))
-    );
+    return (users || []).filter(isEligibleForAuditRoster);
   }, [users]);
 
   // Sync session on mount
@@ -186,10 +191,23 @@ export default function App() {
         setRules(dbRules);
       }
 
-      // 4. Fetch user profiles from Supabase database
+      // 4. Fetch actual user profiles from Supabase database (No dummy presets)
       const dbUsers = await usersApi.getUsers();
-      if (dbUsers && dbUsers.length > 0) {
+      if (dbUsers && Array.isArray(dbUsers)) {
         setUsers(dbUsers);
+        try {
+          localStorage.setItem(USERS_CACHE_KEY, JSON.stringify(dbUsers));
+        } catch (e) {}
+      }
+
+      // 5. Fetch live Role Presets from Supabase (system_settings)
+      try {
+        const cloudPresets = await settingsApi.getRolePresets();
+        if (cloudPresets && typeof cloudPresets === 'object') {
+          setLiveRolePresets(cloudPresets);
+        }
+      } catch (e) {
+        console.warn('Live role presets initialization note:', e);
       }
     }
     loadData();
@@ -204,8 +222,9 @@ export default function App() {
         localStorage.removeItem(AUTH_USER_KEY);
       }
       localStorage.setItem(TASKS_CACHE_KEY, JSON.stringify(tasks));
+      localStorage.setItem(USERS_CACHE_KEY, JSON.stringify(users));
     } catch (e) {}
-  }, [currentUser, tasks]);
+  }, [currentUser, tasks, users]);
 
   // Security & UX guard: ONLY redirect if user is STRICTLY GM or BH without Auditor or SuperAdmin privilege
   useEffect(() => {
@@ -530,6 +549,118 @@ export default function App() {
     }
   };
 
+  // Fatal Objection / Dispute Handlers
+  const handleRaiseDispute = async (disputeData) => {
+    try {
+      const { taskId, ...rest } = disputeData;
+      showToast('Recording dispute in database...', 'info');
+      const res = await tasksApi.raiseDispute({ taskId, ...rest });
+
+      setTasks(prev => prev.map(t => {
+        if (t.id === taskId || t.taskId === taskId) {
+          return {
+            ...t,
+            disputeStatus: res.status,
+            disputeCategory: disputeData.category,
+            disputeReason: disputeData.reason,
+            disputeProofUrl: disputeData.proofUrl,
+            disputeRaisedByRole: disputeData.raisedByRole,
+            disputeRaisedByName: disputeData.raisedByName,
+            disputeRaisedAt: new Date().toISOString(),
+            disputeMeetUrl: disputeData.meetUrl || null,
+            disputeMeetTime: disputeData.meetTime || null,
+            disputeMeetRequestedBy: disputeData.scheduleMeet ? disputeData.raisedByName : null
+          };
+        }
+        return t;
+      }));
+
+      showToast(
+        disputeData.scheduleMeet 
+          ? 'Dispute submitted & Google Meet scheduled!' 
+          : 'Dispute submitted successfully for Senior QA review!', 
+        'success'
+      );
+    } catch (err) {
+      console.error('Error raising dispute:', err);
+      showToast(`Failed to submit dispute: ${err.message}`, 'error');
+    }
+  };
+
+  const handleOverturnDispute = async (taskId, remarks) => {
+    try {
+      showToast('Overturning strike and setting audit status to PASSED...', 'info');
+      await tasksApi.overturnDispute(taskId, {
+        resolvedByName: currentUser?.full_name || 'Senior QA Auditor',
+        remarks
+      });
+
+      setTasks(prev => prev.map(t => {
+        if (t.id === taskId || t.taskId === taskId) {
+          return {
+            ...t,
+            auditStatus: 'PASSED',
+            failedReasons: [],
+            disputeStatus: 'RESOLVED_OVERTURNED',
+            disputeResolvedAt: new Date().toISOString(),
+            disputeResolvedByName: currentUser?.full_name || 'Senior QA Auditor',
+            disputeResolutionRemarks: remarks || 'Strike overturned by senior auditor/GM.',
+            remarks: remarks ? `[Overturned Strike]: ${remarks}` : 'Passed upon dispute re-audit'
+          };
+        }
+        return t;
+      }));
+
+      if (inspectingTask && (inspectingTask.id === taskId || inspectingTask.taskId === taskId)) {
+        setInspectingTask(null);
+        setIsReAuditMode(false);
+      }
+
+      showToast(`Task #${taskId} dispute OVERTURNED! Fatal strike zeroed.`, 'success');
+    } catch (err) {
+      console.error('Error overturning dispute:', err);
+      showToast(`Failed to overturn dispute: ${err.message}`, 'error');
+    }
+  };
+
+  const handleUpholdDispute = async (taskId, remarks) => {
+    try {
+      showToast('Upholding fatal strike with senior remarks...', 'info');
+      await tasksApi.upholdDispute(taskId, {
+        resolvedByName: currentUser?.full_name || 'Senior QA Auditor',
+        remarks
+      });
+
+      setTasks(prev => prev.map(t => {
+        if (t.id === taskId || t.taskId === taskId) {
+          return {
+            ...t,
+            disputeStatus: 'RESOLVED_UPHELD',
+            disputeResolvedAt: new Date().toISOString(),
+            disputeResolvedByName: currentUser?.full_name || 'Senior QA Auditor',
+            disputeResolutionRemarks: remarks || 'Fatal strike upheld after objection review.'
+          };
+        }
+        return t;
+      }));
+
+      if (inspectingTask && (inspectingTask.id === taskId || inspectingTask.taskId === taskId)) {
+        setInspectingTask(null);
+        setIsReAuditMode(false);
+      }
+
+      showToast(`Task #${taskId} fatal strike UPHELD.`, 'warning');
+    } catch (err) {
+      console.error('Error upholding dispute:', err);
+      showToast(`Failed to uphold dispute: ${err.message}`, 'error');
+    }
+  };
+
+  const handleReAuditTask = (task) => {
+    setIsReAuditMode(true);
+    setInspectingTask(task);
+  };
+
   // Rule Studio Actions (GM Draft -> BH Publish)
   const handleSaveRuleDraft = async (ruleId, draftData) => {
     await rulesApi.saveDraft(ruleId, draftData, currentUser);
@@ -706,7 +837,17 @@ export default function App() {
 
   // Formal SLA Escalation Notice
   const handleSendEscalationNotice = (auditorName) => {
-    showToast(`Escalation warning sent to ${auditorName}. CC: Sunil Kumar (BH) & Rajesh Sharma (GM).`, 'success');
+    const bhUsers = (users || []).filter(u => {
+      const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+      return roles.some(r => r === 'BH' || r === 'Business Head');
+    });
+    const gmUsers = (users || []).filter(u => {
+      const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+      return roles.some(r => r === 'GM' || r === 'General Manager');
+    });
+    const bhText = bhUsers.length > 0 ? `${bhUsers.map(u => u.full_name || u.name).join(', ')} (BH)` : 'Business Head (BH)';
+    const gmText = gmUsers.length > 0 ? `${gmUsers.map(u => u.full_name || u.name).join(', ')} (GM)` : 'General Manager (GM)';
+    showToast(`Escalation warning sent to ${auditorName}. CC: ${bhText} & ${gmText}.`, 'success');
   };
 
   // Direct Page Access Control: Save granular page permissions per user
@@ -975,7 +1116,7 @@ export default function App() {
                       ⚠️ URGENT SLA NOTICE: {myOverdueTasks.length} D+1 Overdue Task(s) in Your Queue
                     </div>
                     <p className="text-red-300/90 text-xs mt-0.5">
-                      These audits have exceeded the 24-hour limit and are actively escalated to <strong>Sunil Kumar (BH)</strong> & <strong>Rajesh Sharma (GM)</strong>. Please audit them immediately.
+                      These audits have exceeded the 24-hour limit and are actively escalated to <strong>Business Head (BH)</strong> & <strong>General Manager (GM)</strong>. Please audit them immediately.
                     </p>
                   </div>
                 </div>
@@ -1112,6 +1253,7 @@ export default function App() {
             tasks={tasks}
             auditors={realAuditors}
             currentUser={currentUser}
+            users={users}
             onAuditTask={(task) => setInspectingTask(task)}
             onReassignTask={handleReassignTask}
             onSendEscalationNotice={handleSendEscalationNotice}
@@ -1148,6 +1290,7 @@ export default function App() {
             currentUser={currentUser}
             onOpenEmailForTask={(task) => setEmailingTask(task)}
             onNavigate={setActivePage}
+            onRaiseDispute={handleRaiseDispute}
             onFilterFE={(feCode) => {
               setSearchQuery(feCode);
               setActivePage('audits');
@@ -1161,6 +1304,7 @@ export default function App() {
             currentFE={currentUser}
             tasks={tasks}
             onLogout={handleLogout}
+            onRaiseDispute={handleRaiseDispute}
           />
         )}
 
@@ -1191,15 +1335,36 @@ export default function App() {
           />
         )}
 
+        {/* PAGE 10: FATAL OBJECTION & DISPUTE MEET HUB */}
+        {activePage === 'fatalObjection' && (
+          <FatalObjectionHub
+            tasks={tasks}
+            currentUser={currentUser}
+            onReAuditTask={handleReAuditTask}
+            onOverturnDispute={handleOverturnDispute}
+            onUpholdDispute={handleUpholdDispute}
+            onRefresh={async () => {
+              const fresh = await tasksApi.getTasks();
+              if (fresh) setTasks(fresh);
+            }}
+          />
+        )}
+
       </main>
 
       {/* SYSTEMATIC AUDIT & IMAGE INSPECTION MODAL */}
       {inspectingTask && (
         <AuditModal
           task={inspectingTask}
-          onClose={() => setInspectingTask(null)}
+          onClose={() => {
+            setInspectingTask(null);
+            setIsReAuditMode(false);
+          }}
           onPassAudit={handlePassAudit}
           onFatalAudit={handleFatalAudit}
+          isReAudit={isReAuditMode}
+          onOverturnAudit={handleOverturnDispute}
+          onUpholdAudit={handleUpholdDispute}
           onNextTask={() => {
             const idx = filteredTasks.findIndex(t => t.id === inspectingTask.id);
             if (idx >= 0 && idx < filteredTasks.length - 1) {

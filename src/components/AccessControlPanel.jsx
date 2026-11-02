@@ -26,14 +26,19 @@ import {
 } from 'lucide-react';
 import { 
   SYSTEM_PAGES, 
+  ROLE_PRESETS,
   parseRoles, 
   displayRoleName, 
+  normalizeRoleName,
+  hasAccess,
   getUserEffectivePages, 
+  getUserGrantedPages,
   saveUserPagePermissions,
-  deriveRolesFromPages,
-  ROLE_DEFAULT_PAGES 
+  PAGE_ID_TO_LABEL,
+  PAGE_LABEL_TO_ID
 } from '../utils/accessHelper.js';
 import SuperAdminCronEngine from './SuperAdminCronEngine.jsx';
+import RolePresetsMatrix from './RolePresetsMatrix.jsx';
 
 export default function AccessControlPanel({
   users = [],
@@ -42,7 +47,7 @@ export default function AccessControlPanel({
   onSaveUserPermissions,
   onRefreshUsers
 }) {
-  const [activeAdminTab, setActiveAdminTab] = useState('cronEngine'); // 'cronEngine' | 'permissions'
+  const [activeAdminTab, setActiveAdminTab] = useState('rolePresets'); // 'rolePresets' | 'permissions' | 'cronEngine'
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRoleFilter, setSelectedRoleFilter] = useState('ALL');
 
@@ -60,25 +65,25 @@ export default function AccessControlPanel({
     });
     return fatalFEs.size;
   }, [tasks]);
-  // Local state for modified permissions: map of { [userEmailOrId]: string[] }
-  const [customPermissions, setCustomPermissions] = useState(() => {
+
+  // Local state for modified granted permissions: map of { [userEmailOrId]: string[] } (granted page IDs)
+  const [grantedPermissions, setGrantedPermissions] = useState(() => {
     const initialMap = {};
     users.forEach(u => {
-      const key = u.email ? u.email.toLowerCase() : u.id;
-      initialMap[key] = getUserEffectivePages(u);
+      const key = (u.email || u.id).toLowerCase();
+      initialMap[key] = getUserGrantedPages(u);
     });
     return initialMap;
   });
 
-  // Synchronize customPermissions whenever users prop updates from Supabase
+  // Synchronize grantedPermissions whenever users prop updates from Supabase
   useEffect(() => {
-    setCustomPermissions(prev => {
+    setGrantedPermissions(prev => {
       const updated = { ...prev };
       users.forEach(u => {
         const key = (u.email || u.id).toLowerCase();
-        // If not touched yet in this session, keep in sync with user's effective pages
         if (!updated[key]) {
-          updated[key] = getUserEffectivePages(u);
+          updated[key] = getUserGrantedPages(u);
         }
       });
       return updated;
@@ -90,7 +95,7 @@ export default function AccessControlPanel({
   const [sqlCopied, setSqlCopied] = useState(false);
 
   const handleCopySql = () => {
-    navigator.clipboard.writeText('ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS page_access TEXT[];');
+    navigator.clipboard.writeText('ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS granted_page_access TEXT[]; ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS page_access TEXT[];');
     setSqlCopied(true);
     setTimeout(() => setSqlCopied(false), 2500);
   };
@@ -116,67 +121,55 @@ export default function AccessControlPanel({
     });
   }, [users, searchQuery, selectedRoleFilter]);
 
-  // Toggle single page for user
-  const handleTogglePage = (user, pageId) => {
+  // Toggle granted page for user independently of role preset
+  const handleToggleGrantedPage = (user, pageId) => {
     const key = (user.email || user.id).toLowerCase();
-    const currentPages = customPermissions[key] || getUserEffectivePages(user);
+    const currentGranted = grantedPermissions[key] || getUserGrantedPages(user);
 
-    let updatedPages;
-    if (currentPages.includes(pageId)) {
-      updatedPages = currentPages.filter(p => p !== pageId);
+    let updatedGranted;
+    if (currentGranted.includes(pageId)) {
+      updatedGranted = currentGranted.filter(p => p !== pageId);
     } else {
-      updatedPages = [...currentPages, pageId];
+      updatedGranted = [...currentGranted, pageId];
     }
 
-    setCustomPermissions(prev => ({
+    setGrantedPermissions(prev => ({
       ...prev,
-      [key]: updatedPages
+      [key]: updatedGranted
     }));
   };
 
-  // Apply quick preset to user
+  // Quick preset actions
   const handleApplyPreset = (user, presetType) => {
     const key = (user.email || user.id).toLowerCase();
-    let newPages = [];
+    let newGranted = [];
 
     if (presetType === 'ALL') {
-      newPages = SYSTEM_PAGES.map(p => p.id);
-    } else if (presetType === 'AUDITOR') {
-      newPages = ['audits'];
-    } else if (presetType === 'CITY_ADMIN') {
-      newPages = ['audits', 'replacements', 'escalations', 'managerPortal'];
-    } else if (presetType === 'CITY_ADMIN_AND_AUDITOR') {
-      newPages = ['audits', 'replacements', 'escalations', 'managerPortal'];
-    } else if (presetType === 'CENTRAL_OPS') {
-      newPages = ['audits', 'upload', 'allocation', 'escalations', 'replacements', 'managerPortal'];
-    } else if (presetType === 'RESET') {
-      // Reset to default union for assigned roles
-      const roles = parseRoles(user.roles || [user.role]);
-      const set = new Set();
-      roles.forEach(r => (ROLE_DEFAULT_PAGES[r] || []).forEach(p => set.add(p)));
-      newPages = Array.from(set);
+      newGranted = SYSTEM_PAGES.map(p => p.id);
+    } else if (presetType === 'CLEAR_OVERRIDES') {
+      newGranted = [];
+    } else if (presetType === 'DISPUTE_SENIOR_AUDITOR') {
+      newGranted = ['fatalObjection'];
     }
 
-    setCustomPermissions(prev => ({
+    setGrantedPermissions(prev => ({
       ...prev,
-      [key]: newPages
+      [key]: newGranted
     }));
   };
 
-  // Save permissions for single user
+  // Save granted permissions for single user
   const handleSavePermissions = async (user) => {
     const key = (user.email || user.id).toLowerCase();
-    const pagesToSave = customPermissions[key] || getUserEffectivePages(user);
+    const grantedToSave = grantedPermissions[key] || getUserGrantedPages(user);
 
     setSavingUser(user.id);
     try {
-      // 1. Save to local storage cache for BOTH email and id
-      if (user.email) saveUserPagePermissions(user.email, pagesToSave);
-      if (user.id) saveUserPagePermissions(user.id, pagesToSave);
+      if (user.email) saveUserPagePermissions(user.email, grantedToSave);
+      if (user.id) saveUserPagePermissions(user.id, grantedToSave);
 
-      // 2. Call parent to update state and sync to Supabase (updating roles & profiles)
       if (onSaveUserPermissions) {
-        await onSaveUserPermissions(user.id, user.email, pagesToSave);
+        await onSaveUserPermissions(user.id, user.email, grantedToSave);
       }
 
       setSavedSuccessMap(prev => ({ ...prev, [user.id]: true }));
@@ -184,7 +177,7 @@ export default function AccessControlPanel({
         setSavedSuccessMap(prev => ({ ...prev, [user.id]: false }));
       }, 3000);
     } catch (err) {
-      alert(`Failed to save permissions: ${err.message}`);
+      alert(`Failed to save granted permissions: ${err.message}`);
     } finally {
       setSavingUser(null);
     }
@@ -195,6 +188,30 @@ export default function AccessControlPanel({
       
       {/* SuperAdmin Top Navigation Tabs */}
       <div className="flex flex-wrap items-center gap-3 border-b border-slate-800 pb-3">
+        <button
+          onClick={() => setActiveAdminTab('rolePresets')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+            activeAdminTab === 'rolePresets'
+              ? 'bg-gradient-to-r from-indigo-600/30 via-purple-600/20 to-teal-600/30 text-white border border-indigo-500/50 shadow-lg shadow-indigo-950/40'
+              : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          <Sliders className="w-4 h-4 text-indigo-400" />
+          <span>Role-Wise Default Presets Matrix (Editable)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveAdminTab('permissions')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+            activeAdminTab === 'permissions'
+              ? 'bg-purple-600/20 text-purple-300 border border-purple-500/40 shadow-lg'
+              : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          <Key className="w-4 h-4 text-purple-400" />
+          <span>User Individual Access & Overrides</span>
+        </button>
+
         <button
           onClick={() => setActiveAdminTab('cronEngine')}
           className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
@@ -211,21 +228,14 @@ export default function AccessControlPanel({
             </span>
           )}
         </button>
-
-        <button
-          onClick={() => setActiveAdminTab('permissions')}
-          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
-            activeAdminTab === 'permissions'
-              ? 'bg-purple-600/20 text-purple-300 border border-purple-500/40 shadow-lg'
-              : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800'
-          }`}
-        >
-          <Key className="w-4 h-4 text-purple-400" />
-          <span>User & Role Page Permissions Matrix</span>
-        </button>
       </div>
 
-      {activeAdminTab === 'cronEngine' ? (
+      {activeAdminTab === 'rolePresets' ? (
+        <RolePresetsMatrix
+          users={users}
+          currentUser={currentUser}
+        />
+      ) : activeAdminTab === 'cronEngine' ? (
         <SuperAdminCronEngine
           tasks={tasks}
           users={users}
@@ -331,10 +341,23 @@ export default function AccessControlPanel({
         ) : (
           filteredUsers.map(user => {
             const key = (user.email || user.id).toLowerCase();
-            const effectivePages = customPermissions[key] || getUserEffectivePages(user);
             const userRoles = parseRoles(user.roles || [user.role]);
-            const derivedRoles = deriveRolesFromPages(effectivePages);
-            const isSuperAdmin = userRoles.includes('SuperAdmin') || user.role === 'SuperAdmin';
+            const primaryRole = normalizeRoleName(user.role);
+            const isSuperAdmin = userRoles.includes('SuperAdmin') || primaryRole === 'SuperAdmin';
+            
+            // 1. Role Preset Pages (automatically included by base role)
+            const rolePresetPages = new Set();
+            userRoles.forEach(r => {
+              const preset = ROLE_PRESETS[r] || ROLE_PRESETS[normalizeRoleName(r)] || [];
+              preset.forEach(p => {
+                rolePresetPages.add(p);
+                const id = PAGE_LABEL_TO_ID[p];
+                if (id) rolePresetPages.add(id);
+              });
+            });
+
+            // 2. Granted Pages (individual admin overrides)
+            const userGrantedList = grantedPermissions[key] || getUserGrantedPages(user);
             const isSaving = savingUser === user.id;
             const isSaved = savedSuccessMap[user.id];
 
@@ -360,7 +383,7 @@ export default function AccessControlPanel({
                             <span 
                               key={r}
                               className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                r === 'Admin' ? 'bg-sky-500/20 text-sky-300 border-sky-500/30' :
+                                r === 'City Admin' || r === 'Admin' ? 'bg-sky-500/20 text-sky-300 border-sky-500/30' :
                                 r === 'Auditor' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' :
                                 r === 'SuperAdmin' ? 'bg-purple-500/20 text-purple-300 border-purple-500/30' :
                                 r === 'BH' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' :
@@ -384,8 +407,8 @@ export default function AccessControlPanel({
                           </>
                         )}
                         <span>•</span>
-                        <span className="text-[11px] text-purple-300 font-semibold flex items-center gap-1">
-                          Syncing Roles: {derivedRoles.map(r => `[${displayRoleName(r)}]`).join(' ')}
+                        <span className="text-[11px] text-purple-300 font-semibold">
+                          Preset: {Array.from(rolePresetPages).filter(p => !PAGE_ID_TO_LABEL[p]).join(', ') || 'Standard'}
                         </span>
                       </div>
                     </div>
@@ -393,27 +416,27 @@ export default function AccessControlPanel({
 
                   {/* Preset Buttons & Save Action */}
                   <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
-                    <span className="text-[11px] text-slate-500 font-medium mr-1">Presets:</span>
+                    <span className="text-[11px] text-slate-500 font-medium mr-1">Overrides:</span>
                     <button
-                      onClick={() => handleApplyPreset(user, 'AUDITOR')}
+                      onClick={() => handleApplyPreset(user, 'CLEAR_OVERRIDES')}
                       className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 transition-colors"
-                      title="Grant Audits page only"
+                      title="Reset to role preset only"
                     >
-                      Auditor Only
+                      Reset to Preset
                     </button>
                     <button
-                      onClick={() => handleApplyPreset(user, 'CITY_ADMIN_AND_AUDITOR')}
-                      className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-sky-950/40 hover:bg-sky-900/60 text-sky-300 border border-sky-500/30 transition-colors"
-                      title="Grant City Admin Tool Orders + Audits Console"
+                      onClick={() => handleApplyPreset(user, 'DISPUTE_SENIOR_AUDITOR')}
+                      className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-red-950/40 hover:bg-red-900/60 text-red-300 border border-red-500/30 transition-colors"
+                      title="Grant Fatal objection hub for Senior Auditors"
                     >
-                      City Admin + Auditor
+                      + Fatal Objection Hub
                     </button>
                     <button
                       onClick={() => handleApplyPreset(user, 'ALL')}
                       className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-purple-950/40 hover:bg-purple-900/60 text-purple-300 border border-purple-500/30 transition-colors"
                       title="Grant All Pages"
                     >
-                      Full Access
+                      Grant All
                     </button>
                     <button
                       onClick={() => handleSavePermissions(user)}
@@ -439,7 +462,7 @@ export default function AccessControlPanel({
                 {/* Granular Pages Checkboxes Grid */}
                 <div className="space-y-2">
                   <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
-                    <span>Authorized Workspaces & Consoles ({effectivePages.length} active):</span>
+                    <span>Page Access Configuration ({userGrantedList.length} custom granted):</span>
                     {isSuperAdmin && (
                       <span className="text-purple-400 font-semibold normal-case text-xs">
                         👑 SuperAdmin holds full administrative override
@@ -447,27 +470,45 @@ export default function AccessControlPanel({
                     )}
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
                     {SYSTEM_PAGES.map(page => {
-                      const isChecked = effectivePages.includes(page.id);
+                      const isInPreset = rolePresetPages.has(page.label) || rolePresetPages.has(page.id);
+                      const isGranted = userGrantedList.includes(page.id) || userGrantedList.includes(page.label);
+                      const isEffective = isSuperAdmin || isInPreset || isGranted;
+
                       return (
                         <label
                           key={page.id}
-                          className={`p-2.5 rounded-xl border text-xs font-medium flex items-center gap-2 cursor-pointer transition-all select-none ${
-                            isChecked
-                              ? 'bg-blue-600/15 border-blue-500/40 text-white font-semibold'
+                          className={`p-2.5 rounded-xl border text-xs font-medium flex flex-col justify-between gap-1.5 cursor-pointer transition-all select-none ${
+                            isInPreset
+                              ? 'bg-emerald-950/20 border-emerald-500/40 text-emerald-200'
+                              : isGranted
+                              ? 'bg-purple-950/30 border-purple-500/50 text-purple-200 font-semibold shadow-sm'
                               : 'bg-slate-850/50 border-slate-800 text-slate-400 hover:bg-slate-850 hover:text-slate-300'
                           }`}
                         >
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => handleTogglePage(user, page.id)}
-                            className="rounded border-slate-700 text-blue-600 focus:ring-0 focus:ring-offset-0 bg-slate-900 cursor-pointer"
-                          />
-                          <span className="truncate" title={page.description}>
+                          <div className="flex items-center justify-between gap-1.5">
+                            <input
+                              type="checkbox"
+                              checked={isEffective}
+                              disabled={isInPreset || isSuperAdmin}
+                              onChange={() => handleToggleGrantedPage(user, page.id)}
+                              className="rounded border-slate-700 text-blue-600 focus:ring-0 focus:ring-offset-0 bg-slate-900 cursor-pointer disabled:opacity-70"
+                            />
+                            {isInPreset ? (
+                              <span className="text-[9px] uppercase font-bold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                Role Preset
+                              </span>
+                            ) : isGranted ? (
+                              <span className="text-[9px] uppercase font-bold px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                + Granted
+                              </span>
+                            ) : null}
+                          </div>
+                          
+                          <div className="truncate font-semibold mt-1" title={page.description}>
                             {page.label}
-                          </span>
+                          </div>
                         </label>
                       );
                     })}

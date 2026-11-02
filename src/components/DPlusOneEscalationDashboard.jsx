@@ -27,7 +27,8 @@ export default function DPlusOneEscalationDashboard({
   currentUser,
   onAuditTask,
   onReassignTask,
-  onSendEscalationNotice
+  onSendEscalationNotice,
+  users = []
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAuditorFilter, setSelectedAuditorFilter] = useState('ALL');
@@ -36,6 +37,29 @@ export default function DPlusOneEscalationDashboard({
   const [selectedNewAuditor, setSelectedNewAuditor] = useState('');
   const [isReassigning, setIsReassigning] = useState(false);
   const [escalationNoticeSent, setEscalationNoticeSent] = useState({});
+
+  // Resolve actual Business Head and General Manager from database users registry
+  const bhUsers = useMemo(() => {
+    return (users || []).filter(u => {
+      const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+      return roles.some(r => r === 'BH' || r === 'Business Head');
+    });
+  }, [users]);
+
+  const gmUsers = useMemo(() => {
+    return (users || []).filter(u => {
+      const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+      return roles.some(r => r === 'GM' || r === 'General Manager');
+    });
+  }, [users]);
+
+  const bhDisplay = bhUsers.length > 0 
+    ? bhUsers.map(u => u.full_name || u.name).join(', ') 
+    : 'Business Head';
+
+  const gmDisplay = gmUsers.length > 0 
+    ? gmUsers.map(u => u.full_name || u.name).join(', ') 
+    : 'General Manager';
 
   // 1. Extract all D+1 overdue tasks
   const overdueTasks = useMemo(() => {
@@ -144,7 +168,7 @@ export default function DPlusOneEscalationDashboard({
             </h2>
             <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
               Day D dispatches that remain unaudited past 24 hours into D+1 are flagged as compliance breaches. 
-              These tasks are reported directly to <strong>Sunil Kumar (Business Head)</strong> and <strong>Rajesh Sharma (General Manager)</strong>.
+              These tasks are reported directly to <strong>{bhDisplay} (BH)</strong> and <strong>{gmDisplay} (GM)</strong>.
             </p>
           </div>
 
@@ -152,8 +176,25 @@ export default function DPlusOneEscalationDashboard({
             <div className="text-[11px] text-slate-400 font-medium uppercase tracking-wide">
               Direct Governance
             </div>
-            <div className="text-xs font-bold text-white mt-0.5">Sunil Kumar (BH)</div>
-            <div className="text-xs font-bold text-white">Rajesh Sharma (GM)</div>
+            {bhUsers.length > 0 ? (
+              bhUsers.map(u => (
+                <div key={u.id || u.email} className="text-xs font-bold text-white mt-0.5">
+                  {u.full_name || u.name} (BH)
+                </div>
+              ))
+            ) : (
+              <div className="text-xs font-bold text-slate-300 mt-0.5">Business Head (BH)</div>
+            )}
+
+            {gmUsers.length > 0 ? (
+              gmUsers.map(u => (
+                <div key={u.id || u.email} className="text-xs font-bold text-white">
+                  {u.full_name || u.name} (GM)
+                </div>
+              ))
+            ) : (
+              <div className="text-xs font-bold text-slate-300">General Manager (GM)</div>
+            )}
           </div>
         </div>
       </div>

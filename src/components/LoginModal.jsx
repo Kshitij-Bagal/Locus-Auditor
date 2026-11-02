@@ -12,21 +12,11 @@ import {
   Users
 } from 'lucide-react';
 
-const PRESET_USERS = [
-  { role: 'SuperAdmin', name: 'Kshitij Bagal', email: 'superadmin@lenskart.in', facilityCode: 'All', personId: 'EMP001' },
-  { role: 'BH', name: 'Sunil Kumar (Business Head)', email: 'bh.lenskart@lenskart.in', facilityCode: 'All', personId: 'EMP002' },
-  { role: 'GM', name: 'Rajesh Sharma (General Manager)', email: 'gm.quality@lenskart.in', facilityCode: 'All', personId: 'EMP003' },
-  { role: 'Admin', name: 'Abhay Pandey (City Admin)', email: 'admin.ahmedabad@lenskart.in', facilityCode: 'Ahmedabad', personId: 'EMP004' },
-  { role: 'Central Ops', name: 'Rohan Mehta (Central Ops)', email: 'ops.central@lenskart.in', facilityCode: 'All', personId: 'EMP005' },
-  { role: 'Auditor', name: 'Pooja Verma (Auditor)', email: 'auditor.pooja@lenskart.in', facilityCode: 'Ahmedabad', personId: 'AUD001' },
-  { role: 'FE', name: 'Mohammed Aman Shaikh', email: 'fe.aman@lenskart.in', facilityCode: 'Ahmedabad', personId: '227563', feCode: 'LKH3149' },
-  { role: 'FE', name: 'Rai Balvant Bimlesh', email: 'fe.balvant@lenskart.in', facilityCode: 'Ahmedabad', personId: '213812', feCode: 'LKH2976' }
-];
-
 export default function LoginModal({
   isOpen,
   onClose,
-  tasks,
+  tasks = [],
+  users = [],
   onLoginRole,
   onLoginAsFE,
   currentUserRole
@@ -178,38 +168,50 @@ export default function LoginModal({
           ) : (
             <div className="space-y-2">
               <span className="text-[11px] font-bold uppercase text-slate-400 tracking-wider block mb-2">
-                Select Persona / Role to Test Dashboard:
+                Registered Staff Accounts (from Database):
               </span>
               <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
-                {PRESET_USERS.map(user => (
-                  <button
-                    key={`${user.role}_${user.email}`}
-                    type="button"
-                    onClick={() => handleQuickLogin(user)}
-                    className="w-full text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/60 hover:bg-indigo-950/20 transition-all flex items-center justify-between text-xs cursor-pointer group"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[10px] font-bold px-2 py-0.2 rounded font-mono ${
-                          user.role === 'SuperAdmin' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40' :
-                          user.role === 'BH' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
-                          user.role === 'GM' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' :
-                          user.role === 'Admin' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40' :
-                          user.role === 'Central Ops' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40' :
-                          user.role === 'FE' ? 'bg-red-500/20 text-red-300 border border-red-500/40' :
-                          'bg-slate-800 text-slate-300'
-                        }`}>
-                          {user.role === 'Admin' ? 'City Admin' : user.role}
+                {users && users.length > 0 ? (
+                  users.map(user => (
+                    <button
+                      key={user.id || user.email}
+                      type="button"
+                      onClick={() => handleQuickLogin({
+                        role: user.role,
+                        name: user.full_name || user.name,
+                        email: user.email,
+                        facilityCode: user.facility_code || 'All',
+                        personId: user.person_id || user.employee_code || ''
+                      })}
+                      className="w-full text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/60 hover:bg-indigo-950/20 transition-all flex items-center justify-between text-xs cursor-pointer group"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-bold px-2 py-0.2 rounded font-mono ${
+                            user.role === 'SuperAdmin' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40' :
+                            user.role === 'BH' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
+                            user.role === 'GM' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' :
+                            user.role === 'Admin' || user.role === 'City Admin' ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40' :
+                            user.role === 'Central Ops' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40' :
+                            user.role === 'FE' ? 'bg-red-500/20 text-red-300 border border-red-500/40' :
+                            'bg-slate-800 text-slate-300'
+                          }`}>
+                            {user.role === 'Admin' ? 'City Admin' : user.role}
+                          </span>
+                          <span className="font-bold text-white group-hover:text-indigo-300">{user.full_name || user.name}</span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
+                          {user.email} • Hub: {user.facility_code || 'All'}
                         </span>
-                        <span className="font-bold text-white group-hover:text-indigo-300">{user.name}</span>
                       </div>
-                      <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                        {user.email} • Hub: {user.facilityCode}
-                      </span>
-                    </div>
-                    <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-transform group-hover:translate-x-0.5" />
-                  </button>
-                ))}
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-transform group-hover:translate-x-0.5" />
+                    </button>
+                  ))
+                ) : (
+                  <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-xs text-slate-400">
+                    No users loaded from database. Please register your account via SuperAdmin or Excel Seeder.
+                  </div>
+                )}
               </div>
             </div>
           )}

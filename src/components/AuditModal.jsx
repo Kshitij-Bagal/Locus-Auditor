@@ -21,10 +21,19 @@ import {
   PackagePlus,
   Trash2,
   Clock,
-  Plus
+  Plus,
+  Scale,
+  Zap,
+  CornerDownLeft
 } from 'lucide-react';
 import { EQUIPMENT_CATALOGUE, FAULT_CONDITIONS, REPLACEMENT_URGENCY } from '../data/equipmentItems.js';
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
+
+export const BLANKET_FATAL_REASONS = [
+  'All images missing / blank / black',
+  'All images heavily blurred / unreadable',
+  'Duplicate / recycled images detected'
+];
 
 export default function AuditModal({
   task,
@@ -39,7 +48,10 @@ export default function AuditModal({
   auditorLocation,
   onOpenEmail,
   onUpdateReplacements,
-  rules = INITIAL_CENTRAL_RULES
+  rules = INITIAL_CENTRAL_RULES,
+  isReAudit = false,
+  onOverturnAudit,
+  onUpholdAudit
 }) {
   const [activeCriterionIndex, setActiveCriterionIndex] = useState(0);
   const [rightPanelTab, setRightPanelTab] = useState('sop'); // 'sop' | 'replacements'
@@ -49,6 +61,13 @@ export default function AuditModal({
   const [selectedViolations, setSelectedViolations] = useState([]);
   const [customRemark, setCustomRemark] = useState('');
   const [criteriaStatus, setCriteriaStatus] = useState({});
+
+  // Speedrun Zones & Keyboard Traversal State
+  const [activeZone, setActiveZone] = useState('verdict'); // 'image' | 'verdict' | 'criteria' | 'tools'
+  const [showBlanketFatalModal, setShowBlanketFatalModal] = useState(false);
+  const [blanketReasonIndex, setBlanketReasonIndex] = useState(0);
+  const [highlightedFailureIndex, setHighlightedFailureIndex] = useState(0);
+  const [highlightedToolIndex, setHighlightedToolIndex] = useState(0);
 
   // Equipment Replacements Requisition State
   const [replacements, setReplacements] = useState([]);
@@ -66,6 +85,10 @@ export default function AuditModal({
       setZoomLevel(1);
       setRotation(0);
       setShowFatalPicker(task.auditStatus === 'FATAL');
+      setShowBlanketFatalModal(false);
+      setBlanketReasonIndex(0);
+      setHighlightedFailureIndex(0);
+      setHighlightedToolIndex(0);
     }
   }, [task]);
 
@@ -142,23 +165,7 @@ export default function AuditModal({
     onUpdateReplacements?.(task.id, updated);
   };
 
-  // Keyboard navigation & quick shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      if (e.key === 'ArrowRight' && hasNext) onNextTask();
-      if (e.key === 'ArrowLeft' && hasPrev) onPrevTask();
-      if (e.key === 'Escape') onClose();
-      if (e.key === 'p' || e.key === 'P') handlePassClick();
-      if (e.key === 'f' || e.key === 'F') {
-        setShowFatalPicker(true);
-        setRightPanelTab('sop');
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [hasNext, hasPrev, activeCriterionIndex, replacements]);
-
+  // Immediate Quick Pass Execution
   const handlePassClick = () => {
     const allPassedCriteria = {};
     rules.forEach(r => {
@@ -170,6 +177,28 @@ export default function AuditModal({
       replacements: replacements,
       taskData: task
     });
+  };
+
+  // Immediate Blanket Fatal Execution
+  const triggerBlanketFatal = (reasonIdx) => {
+    const selectedReason = BLANKET_FATAL_REASONS[reasonIdx] || BLANKET_FATAL_REASONS[0];
+    const allFailedCriteria = {};
+    rules.forEach(r => {
+      allFailedCriteria[r.id || r.imageKey] = 'FAIL';
+    });
+
+    onFatalAudit(task.id, {
+      failedReasons: [selectedReason],
+      remarks: `Blanket Fatal: ${selectedReason}`,
+      criteriaStatus: allFailedCriteria,
+      replacements: replacements,
+      taskData: task,
+      emailNotified: false
+    });
+
+    setShowBlanketFatalModal(false);
+    if (hasNext) onNextTask();
+    else onClose();
   };
 
   const handleConfirmFatal = () => {
@@ -189,17 +218,214 @@ export default function AuditModal({
     });
   };
 
+  // ====================================================================
+  // SPEEDRUN VIM HOTKEYS & GLOBAL KEYBOARD LISTENER
+  // ====================================================================
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // 1. Strict guard against text inputs globally
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target?.tagName)) return;
+
+      // Modal Mode: Blanket Fatal Overlay Active
+      if (showBlanketFatalModal) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setShowBlanketFatalModal(false);
+          return;
+        }
+        if (e.key === '1') {
+          e.preventDefault();
+          triggerBlanketFatal(0);
+          return;
+        }
+        if (e.key === '2') {
+          e.preventDefault();
+          triggerBlanketFatal(1);
+          return;
+        }
+        if (e.key === '3') {
+          e.preventDefault();
+          triggerBlanketFatal(2);
+          return;
+        }
+        if (e.key === 'ArrowUp' || e.key === 'k' || e.key === 'K') {
+          e.preventDefault();
+          setBlanketReasonIndex(prev => Math.max(0, prev - 1));
+          return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'J') {
+          e.preventDefault();
+          setBlanketReasonIndex(prev => Math.min(2, prev + 1));
+          return;
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          triggerBlanketFatal(blanketReasonIndex);
+          return;
+        }
+        return;
+      }
+
+      // 2. Zone Switches: [i], [v], [c], [o]
+      if (e.key === 'i' || e.key === 'I') {
+        e.preventDefault();
+        setActiveZone('image');
+        return;
+      }
+      if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault();
+        setActiveZone('verdict');
+        setRightPanelTab('sop');
+        return;
+      }
+      if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        setActiveZone('criteria');
+        setRightPanelTab('sop');
+        setShowFatalPicker(true);
+        return;
+      }
+      if (e.key === 'o' || e.key === 'O') {
+        e.preventDefault();
+        setActiveZone('tools');
+        setRightPanelTab('replacements');
+        return;
+      }
+
+      // 3. Image Controls: [1], [2], [3], [4], [5] & [ArrowLeft] / [ArrowRight]
+      if (['1', '2', '3', '4', '5'].includes(e.key)) {
+        const photoIndex = parseInt(e.key, 10) - 1;
+        if (photoIndex >= 0 && photoIndex < rules.length) {
+          e.preventDefault();
+          setActiveCriterionIndex(photoIndex);
+        }
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setActiveCriterionIndex(prev => (prev > 0 ? prev - 1 : rules.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setActiveCriterionIndex(prev => (prev < rules.length - 1 ? prev + 1 : 0));
+        return;
+      }
+
+      // 4. Section Traversal: [ArrowUp], [ArrowDown], [j], [k]
+      if (['ArrowUp', 'k', 'K'].includes(e.key)) {
+        e.preventDefault();
+        if (activeZone === 'verdict') {
+          setActiveCriterionIndex(prev => (prev > 0 ? prev - 1 : rules.length - 1));
+        } else if (activeZone === 'criteria') {
+          const failuresCount = (currentCriterion.commonFailures || []).length;
+          if (failuresCount > 0) {
+            setHighlightedFailureIndex(prev => (prev > 0 ? prev - 1 : failuresCount - 1));
+          }
+        } else if (activeZone === 'tools') {
+          const toolsCount = (currentCriterion.relevantEquipment || []).length;
+          if (toolsCount > 0) {
+            setHighlightedToolIndex(prev => (prev > 0 ? prev - 1 : toolsCount - 1));
+          }
+        }
+        return;
+      }
+
+      if (['ArrowDown', 'j', 'J'].includes(e.key)) {
+        e.preventDefault();
+        if (activeZone === 'verdict') {
+          setActiveCriterionIndex(prev => (prev < rules.length - 1 ? prev + 1 : 0));
+        } else if (activeZone === 'criteria') {
+          const failuresCount = (currentCriterion.commonFailures || []).length;
+          if (failuresCount > 0) {
+            setHighlightedFailureIndex(prev => (prev < failuresCount - 1 ? prev + 1 : 0));
+          }
+        } else if (activeZone === 'tools') {
+          const toolsCount = (currentCriterion.relevantEquipment || []).length;
+          if (toolsCount > 0) {
+            setHighlightedToolIndex(prev => (prev < toolsCount - 1 ? prev + 1 : 0));
+          }
+        }
+        return;
+      }
+
+      // 5. Toggle Highlighted Item: [Space] or [Enter]
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        if (activeZone === 'verdict') {
+          const key = currentCriterion.id || currentCriterion.imageKey;
+          const currentStatus = criteriaStatus[key];
+          handleToggleCriterionStatus(key, currentStatus === 'FAIL' ? 'PASS' : 'FAIL');
+        } else if (activeZone === 'criteria') {
+          const failures = currentCriterion.commonFailures || [];
+          if (failures[highlightedFailureIndex]) {
+            toggleViolation(failures[highlightedFailureIndex]);
+          }
+        } else if (activeZone === 'tools') {
+          const tools = currentCriterion.relevantEquipment || [];
+          if (tools[highlightedToolIndex]) {
+            handleAddReplacement(tools[highlightedToolIndex]);
+          }
+        }
+        return;
+      }
+
+      // 6. Immediate Submissions: [p], [f], [Escape]
+      if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        handlePassClick();
+        if (hasNext) onNextTask();
+        else onClose();
+        return;
+      }
+
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        setShowBlanketFatalModal(true);
+        setBlanketReasonIndex(0);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    showBlanketFatalModal, 
+    blanketReasonIndex, 
+    activeZone, 
+    activeCriterionIndex, 
+    highlightedFailureIndex, 
+    highlightedToolIndex, 
+    criteriaStatus, 
+    selectedViolations, 
+    replacements, 
+    rules, 
+    hasNext, 
+    hasPrev, 
+    currentCriterion
+  ]);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
       
       {/* Modal Container */}
-      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-6xl max-h-[94vh] flex flex-col shadow-2xl overflow-hidden relative">
         
         {/* Top Header Bar */}
-        <div className="px-5 py-3.5 bg-slate-850 border-b border-slate-700/80 flex items-center justify-between">
+        <div className="px-5 py-3 bg-slate-850 border-b border-slate-700/80 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 font-bold">
-              <Eye className="w-4 h-4" />
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
+              isReAudit 
+                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' 
+                : 'bg-blue-600/20 text-blue-400 border border-blue-500/30'
+            }`}>
+              {isReAudit ? <Scale className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </div>
             <div>
               <div className="flex items-center space-x-2">
@@ -210,23 +436,20 @@ export default function AuditModal({
                 <span className="text-[10px] uppercase font-bold px-2 py-0.2 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-mono">
                   Facility: {task.facilityCode}
                 </span>
-                {task.pin && (
-                  <span className="text-[10px] uppercase font-bold px-2 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono">
-                    OTP: {task.pin}
+
+                {isReAudit && (
+                  <span className="text-[10px] uppercase font-black px-2 py-0.5 rounded bg-amber-500 text-slate-950 flex items-center gap-1 shadow-sm animate-pulse">
+                    <Scale className="w-3 h-3" />
+                    SENIOR RE-AUDIT MODE
                   </span>
                 )}
-                {replacements.length > 0 && (
-                  <span className="text-[10px] uppercase font-bold px-2 py-0.2 rounded bg-sky-500/20 text-sky-300 border border-sky-500/40 flex items-center gap-1">
-                    <Wrench className="w-3 h-3 text-sky-400" />
-                    {replacements.length} Faulty/To Order
-                  </span>
-                )}
-                {task.auditStatus === 'FATAL' && (
+
+                {task.auditStatus === 'FATAL' && !isReAudit && (
                   <span className="text-[10px] uppercase font-black px-2 py-0.2 rounded bg-red-500 text-white animate-pulse">
                     FATAL STRIKE
                   </span>
                 )}
-                {task.auditStatus === 'PASSED' && (
+                {task.auditStatus === 'PASSED' && !isReAudit && (
                   <span className="text-[10px] uppercase font-bold px-2 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
                     PASSED
                   </span>
@@ -248,7 +471,7 @@ export default function AuditModal({
                   ? 'border-slate-700 hover:bg-slate-800 text-slate-300' 
                   : 'border-slate-800 text-slate-600 cursor-not-allowed'
               }`}
-              title="Previous Task (Left Arrow)"
+              title="Previous Task"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
@@ -260,7 +483,7 @@ export default function AuditModal({
                   ? 'border-slate-700 hover:bg-slate-800 text-slate-300' 
                   : 'border-slate-800 text-slate-600 cursor-not-allowed'
               }`}
-              title="Next Task (Right Arrow)"
+              title="Next Task"
             >
               <ChevronRight className="w-4 h-4" />
             </button>
@@ -274,11 +497,76 @@ export default function AuditModal({
           </div>
         </div>
 
+        {/* SPEEDRUN VIM HOTKEYS STATUS BAR */}
+        <div className="px-4 py-1.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between text-[11px] overflow-x-auto text-slate-400 select-none">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-sky-400 flex items-center gap-1">
+              <Zap className="w-3.5 h-3.5" /> Fast Auditing Hotkeys:
+            </span>
+            <div className="flex items-center gap-1.5 font-mono">
+              <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'image' ? 'bg-sky-500/20 text-sky-300 border-sky-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
+                [i] Image
+              </span>
+              <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'verdict' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
+                [v] Verdict
+              </span>
+              <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'criteria' ? 'bg-red-500/20 text-red-300 border-red-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
+                [c] Criteria
+              </span>
+              <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'tools' ? 'bg-amber-500/20 text-amber-300 border-amber-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
+                [o] Tool Orders
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 font-mono text-[10px]">
+            <span>[1-5] Jump Photo</span>
+            <span>&bull;</span>
+            <span>[j/k] Navigate</span>
+            <span>&bull;</span>
+            <span>[Space/Enter] Toggle</span>
+            <span>&bull;</span>
+            <span className="text-emerald-400 font-bold">[p] Quick Pass</span>
+            <span>&bull;</span>
+            <span className="text-red-400 font-bold">[f] Blanket Fatal</span>
+          </div>
+        </div>
+
+        {/* Re-Audit Banner (if active) */}
+        {isReAudit && (
+          <div className="px-5 py-2.5 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between text-xs text-amber-200">
+            <div className="flex items-center gap-2">
+              <Scale className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                <strong>Contested Grounds:</strong> &ldquo;{task.disputeReason || 'FE contested this fatal strike'}&rdquo; ({task.disputeCategory || 'Checklist Dispute'})
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onOverturnAudit?.(task.id, customRemark || 'Contestation approved upon Senior QA photo re-audit.')}
+                className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 shadow-sm cursor-pointer"
+              >
+                <Check className="w-3.5 h-3.5" />
+                Overturn Strike (Pass)
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpholdAudit?.(task.id, customRemark || 'Fatal strike upheld upon Senior QA re-audit.')}
+                className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold text-xs flex items-center gap-1 shadow-sm cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+                Uphold Strike
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Dynamic Criteria Switcher Tabs (From Central Rules Engine) */}
         <div className="bg-slate-800/90 border-b border-slate-700/80 px-4 py-2 flex items-center gap-1.5 overflow-x-auto">
           {rules.map((crit, idx) => {
             const fieldKey = crit.field || crit.imageKey;
-            const hasMedia = Boolean(task.images[fieldKey]);
+            const hasMedia = Boolean(task.images?.[fieldKey]);
             const isCurrent = idx === activeCriterionIndex;
             const status = criteriaStatus[crit.id || fieldKey];
 
@@ -295,6 +583,7 @@ export default function AuditModal({
                     : 'bg-slate-900/60 text-slate-400 hover:text-white hover:bg-slate-700/60'
                 }`}
               >
+                <span className="font-mono text-[11px] opacity-75">[{idx + 1}]</span>
                 <span>{crit.label || crit.title}</span>
                 {status === 'PASS' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
                 {status === 'FAIL' && <AlertTriangle className="w-3.5 h-3.5 text-red-400" />}
@@ -309,9 +598,13 @@ export default function AuditModal({
         <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-12 min-h-0">
           
           {/* Left Column: Image Viewer (7 cols) */}
-          <div className="lg:col-span-7 bg-slate-950 p-4 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-slate-800">
-                        {/* Criterion brief & itemized pass/fail buttons */}
-            <div className="mt-3 p-3 bg-slate-900/60 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+          <div className={`lg:col-span-7 bg-slate-950 p-4 flex flex-col justify-between border-b lg:border-b-0 lg:border-r transition-all ${
+            activeZone === 'image' ? 'border-sky-500/60 ring-1 ring-sky-500/30' : 'border-slate-800'
+          }`}>
+            {/* Criterion brief & itemized pass/fail buttons */}
+            <div className={`mt-1 p-3 bg-slate-900/60 rounded-xl border flex items-center justify-between text-xs transition-all ${
+              activeZone === 'verdict' ? 'border-emerald-500/50 bg-emerald-950/10' : 'border-slate-800'
+            }`}>
               <div>
                 <span className="text-slate-400 block text-[11px]">SOP Rule:</span>
                 <span className="text-slate-200 font-medium">{currentCriterion.description}</span>
@@ -333,6 +626,7 @@ export default function AuditModal({
                     handleToggleCriterionStatus(currentCriterion.id, 'FAIL');
                     setShowFatalPicker(true);
                     setRightPanelTab('sop');
+                    setActiveZone('criteria');
                   }}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
                     criteriaStatus[currentCriterion.id] === 'FAIL'
@@ -347,7 +641,7 @@ export default function AuditModal({
             </div>
             
             {/* Image Toolbar */}
-            <div className="flex items-center justify-between mb-3 text-xs">
+            <div className="flex items-center justify-between my-2 text-xs">
               <div className="flex items-center space-x-2">
                 <span className="text-slate-400 font-medium">Viewing:</span>
                 <span className="font-semibold text-white">{currentCriterion.title}</span>
@@ -385,7 +679,7 @@ export default function AuditModal({
             </div>
 
             {/* Image Stage */}
-            <div className="relative flex-1 min-h-[320px] max-h-[440px] bg-slate-900/90 rounded-xl border border-slate-800 overflow-hidden flex items-center justify-center p-2 group">
+            <div className="relative flex-1 min-h-[300px] max-h-[420px] bg-slate-900/90 rounded-xl border border-slate-800 overflow-hidden flex items-center justify-center p-2 group">
               {originalUrl ? (
                 <div 
                   className="transition-transform duration-200 flex items-center justify-center"
@@ -394,7 +688,7 @@ export default function AuditModal({
                   <img
                     src={originalUrl}
                     alt={currentCriterion.title}
-                    className="max-h-[400px] w-auto object-contain rounded shadow-lg select-none"
+                    className="max-h-[380px] w-auto object-contain rounded shadow-lg select-none"
                   />
                 </div>
               ) : (
@@ -413,6 +707,7 @@ export default function AuditModal({
                       toggleViolation(`Missing mandatory photo for ${currentCriterion.title}`);
                       setShowFatalPicker(true);
                       setRightPanelTab('sop');
+                      setActiveZone('criteria');
                     }}
                     className="mt-4 px-3.5 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900/50 text-red-300 border border-red-500/40 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                   >
@@ -432,7 +727,10 @@ export default function AuditModal({
               {/* Tab Switcher for Right Panel */}
               <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-700/80 mb-4">
                 <button
-                  onClick={() => setRightPanelTab('sop')}
+                  onClick={() => {
+                    setRightPanelTab('sop');
+                    setActiveZone('criteria');
+                  }}
                   className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
                     rightPanelTab === 'sop'
                       ? 'bg-blue-600 text-white shadow-md'
@@ -440,10 +738,13 @@ export default function AuditModal({
                   }`}
                 >
                   <ShieldAlert className="w-3.5 h-3.5" />
-                  SOP & Fatals
+                  SOP & Fatals [v/c]
                 </button>
                 <button
-                  onClick={() => setRightPanelTab('replacements')}
+                  onClick={() => {
+                    setRightPanelTab('replacements');
+                    setActiveZone('tools');
+                  }}
                   className={`flex-1 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
                     rightPanelTab === 'replacements'
                       ? 'bg-sky-600 text-white shadow-md'
@@ -451,7 +752,7 @@ export default function AuditModal({
                   }`}
                 >
                   <Wrench className="w-3.5 h-3.5 text-sky-400" />
-                  City POS Orders ({replacements.length})
+                  City POS Orders ({replacements.length}) [o]
                 </button>
               </div>
 
@@ -477,29 +778,38 @@ export default function AuditModal({
                     </div>
                   </div>
 
-                  {/* Fatal Violations Selector */}
-                  <div>
+                  {/* Fatal Violations Selector (Active Zone c) */}
+                  <div className={`p-3 rounded-xl border transition-all ${
+                    activeZone === 'criteria' ? 'border-red-500/50 bg-red-950/10' : 'border-transparent'
+                  }`}>
                     <div className="flex items-center justify-between mb-2">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-red-400 flex items-center gap-1.5">
                         <AlertTriangle className="w-4 h-4 text-red-400" />
-                        Fatal Failure Reasons
+                        Fatal Failure Reasons ({activeZone === 'criteria' ? 'Zone [c] Active' : ''})
                       </h4>
                       <span className="text-[10px] text-slate-400">
-                        {selectedViolations.length} selected
+                        {selectedViolations.length} selected &bull; [j/k] traverse &bull; [Enter/Space] toggle
                       </span>
                     </div>
 
                     <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
                       {(currentCriterion.commonFailures || []).map((reason, i) => {
                         const isSelected = selectedViolations.includes(reason);
+                        const isHighlighted = activeZone === 'criteria' && highlightedFailureIndex === i;
+
                         return (
                           <button
                             key={i}
                             type="button"
-                            onClick={() => toggleViolation(reason)}
+                            onClick={() => {
+                              toggleViolation(reason);
+                              setHighlightedFailureIndex(i);
+                            }}
                             className={`w-full text-left p-2 rounded-lg text-xs font-medium transition-all flex items-center justify-between border cursor-pointer ${
                               isSelected
                                 ? 'bg-red-500/20 text-red-300 border-red-500/60 shadow-sm'
+                                : isHighlighted
+                                ? 'bg-slate-800 text-white border-amber-400/80 ring-1 ring-amber-400/40'
                                 : 'bg-slate-900/40 text-slate-400 hover:text-slate-200 border-slate-800 hover:bg-slate-800'
                             }`}
                           >
@@ -531,16 +841,18 @@ export default function AuditModal({
                 </div>
               )}
 
-              {/* TAB 2: Equipment Replacement & City POS Order Zone */}
+              {/* TAB 2: Equipment Replacement & City POS Order Zone (Active Zone o) */}
               {rightPanelTab === 'replacements' && (
-                <div className="space-y-4">
+                <div className={`space-y-4 p-2 rounded-xl border transition-all ${
+                  activeZone === 'tools' ? 'border-sky-500/50 bg-sky-950/10' : 'border-transparent'
+                }`}>
                   <div className="bg-sky-950/30 border border-sky-500/30 rounded-xl p-3 text-xs">
                     <span className="font-bold text-sky-300 block mb-0.5 flex items-center gap-1.5">
                       <Wrench className="w-3.5 h-3.5 text-sky-400" />
-                      City Admin POS Ordering Requisition
+                      City Admin POS Ordering Requisition (Zone [o])
                     </span>
                     <p className="text-[11px] text-sky-200/80">
-                      Items flagged here are assigned to the <strong>City Admin ({task.facilityCode})</strong> to order on their local POS, while Central Ops tracks inventory buffer.
+                      Use <strong>[j/k]</strong> and <strong>[Enter/Space]</strong> to quick-flag tools for <strong>{task.facilityCode}</strong>.
                     </p>
                   </div>
 
@@ -550,17 +862,28 @@ export default function AuditModal({
                       Quick Pick ({currentCriterion.title.split(':')[0]} Items):
                     </span>
                     <div className="flex flex-wrap gap-1.5">
-                      {(currentCriterion.relevantEquipment || []).map(item => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => handleAddReplacement(item)}
-                          className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-slate-800 hover:bg-sky-600/30 text-slate-300 hover:text-sky-200 border border-slate-700 hover:border-sky-500/50 flex items-center gap-1 transition-all cursor-pointer"
-                        >
-                          <Plus className="w-3 h-3 text-sky-400" />
-                          <span>{item.name}</span>
-                        </button>
-                      ))}
+                      {(currentCriterion.relevantEquipment || []).map((item, idx) => {
+                        const isHighlighted = activeZone === 'tools' && highlightedToolIndex === idx;
+
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              handleAddReplacement(item);
+                              setHighlightedToolIndex(idx);
+                            }}
+                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold border flex items-center gap-1 transition-all cursor-pointer ${
+                              isHighlighted
+                                ? 'bg-sky-600 text-white border-sky-300 ring-1 ring-sky-300 shadow-sm'
+                                : 'bg-slate-800 hover:bg-sky-600/30 text-slate-300 hover:text-sky-200 border-slate-700 hover:border-sky-500/50'
+                            }`}
+                          >
+                            <Plus className="w-3 h-3 text-sky-400" />
+                            <span>{item.name}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -696,17 +1019,91 @@ export default function AuditModal({
 
               <button
                 type="button"
-                onClick={handleConfirmFatal}
+                onClick={() => {
+                  setShowBlanketFatalModal(true);
+                  setBlanketReasonIndex(0);
+                }}
                 className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white shadow-lg shadow-red-500/20 flex items-center justify-center gap-1.5 transition-all cursor-pointer fatal-pulse"
               >
                 <AlertTriangle className="w-4 h-4" />
-                MARK FATAL & WARN (F)
+                BLANKET FATAL (F)
               </button>
             </div>
 
           </div>
 
         </div>
+
+        {/* ==================================================================== */}
+        {/* BLANKET FATAL RAPID-FIRE MODAL OVERLAY (Triggered on [f]) */}
+        {/* ==================================================================== */}
+        {showBlanketFatalModal && (
+          <div className="absolute inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+            <div className="bg-slate-900 border-2 border-red-500/80 rounded-2xl w-full max-w-lg p-6 shadow-2xl space-y-4">
+              
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-red-500/20 text-red-400 flex items-center justify-center font-bold">
+                    <AlertTriangle className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-black text-white text-base">Blanket Fatal Non-Compliance Strike</h3>
+                    <p className="text-[11px] text-slate-400">Task #{task.taskId} &bull; FE: {task.feName}</p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowBlanketFatalModal(false)}
+                  className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-300">
+                Select one of the <strong>top 3 objective auditor reasons</strong>. This immediately records the fatal strike with <code className="text-red-300">email_notified = false</code> and auto-advances to the next pending task.
+              </p>
+
+              {/* Top 3 Objective Reasons */}
+              <div className="space-y-2 font-sans">
+                {BLANKET_FATAL_REASONS.map((reason, idx) => {
+                  const isSelected = blanketReasonIndex === idx;
+
+                  return (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => triggerBlanketFatal(idx)}
+                      onMouseEnter={() => setBlanketReasonIndex(idx)}
+                      className={`w-full p-3 rounded-xl border text-left flex items-center justify-between transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-red-600 text-white border-red-400 font-bold shadow-lg shadow-red-900/40 ring-2 ring-red-400/50'
+                          : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-6 h-6 rounded-lg bg-black/40 text-xs font-mono font-black flex items-center justify-center">
+                          {idx + 1}
+                        </span>
+                        <span className="text-xs">{reason}</span>
+                      </div>
+                      
+                      <CornerDownLeft className="w-4 h-4 opacity-70" />
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Keybindings guide inside modal */}
+              <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                <span>Press <strong>[1]</strong>, <strong>[2]</strong>, or <strong>[3]</strong> to submit</span>
+                <span><strong>[Esc]</strong> Cancel</span>
+              </div>
+
+            </div>
+          </div>
+        )}
 
       </div>
 
