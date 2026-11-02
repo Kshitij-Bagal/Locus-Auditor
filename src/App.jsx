@@ -221,10 +221,55 @@ export default function App() {
         setCurrentUser(session.profile);
       }
 
-      // 2. Fetch tasks from REST API
+      // 2. Fetch tasks from REST API & recover any unsynced local audits
       const dbTasks = await tasksApi.getTasks();
       if (dbTasks && dbTasks.length > 0) {
-        setTasks(dbTasks);
+        let finalTasks = dbTasks;
+        try {
+          const cachedRaw = localStorage.getItem(TASKS_CACHE_KEY);
+          if (cachedRaw) {
+            const cachedList = JSON.parse(cachedRaw);
+            if (Array.isArray(cachedList) && cachedList.length > 0) {
+              const cachedMap = new Map(cachedList.map(t => [String(t.id || t.taskId), t]));
+              const unsyncedAudits = [];
+
+              finalTasks = dbTasks.map(dbT => {
+                const localT = cachedMap.get(String(dbT.id || dbT.taskId));
+                if (localT && (localT.auditStatus === 'FATAL' || localT.auditStatus === 'PASSED') && dbT.auditStatus === 'PENDING') {
+                  unsyncedAudits.push(localT);
+                  return {
+                    ...dbT,
+                    auditStatus: localT.auditStatus,
+                    audit_status: localT.auditStatus,
+                    auditedAt: localT.auditedAt,
+                    auditedBy: localT.auditedBy,
+                    auditedLocation: localT.auditedLocation,
+                    remarks: localT.remarks,
+                    criteriaStatus: localT.criteriaStatus,
+                    failedReasons: localT.failedReasons,
+                    replacements: localT.replacements
+                  };
+                }
+                return dbT;
+              });
+
+              if (unsyncedAudits.length > 0) {
+                console.log(`[Auto-Sync] Detected ${unsyncedAudits.length} unsynced local audits. Syncing to Supabase...`);
+                tasksApi.syncAuditedTasks(unsyncedAudits).then(res => {
+                  if (res.count > 0) {
+                    showToast(`Synced ${res.count} previously unsaved audits to database!`, 'success');
+                  }
+                }).catch(err => {
+                  console.warn('Auto-sync error:', err);
+                });
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Local audit cache recovery check:', e);
+        }
+
+        setTasks(finalTasks);
       }
 
       // 3. Fetch rules from REST API

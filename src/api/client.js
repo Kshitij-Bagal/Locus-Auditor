@@ -418,7 +418,7 @@ export const tasksApi = {
   async passAudit({ taskId, auditorName, auditorLocation, remarks, criteriaStatus, replacements, taskData }) {
     // 1. Update task in tasks table
     if (supabase) {
-      await supabase.from('tasks').update({
+      const { error } = await supabase.from('tasks').update({
         audit_status: 'PASSED',
         audited_at: new Date().toISOString(),
         audited_by_name: auditorName,
@@ -428,13 +428,18 @@ export const tasksApi = {
         failed_reasons: [],
         replacements: replacements || [],
         updated_at: new Date().toISOString()
-      }).eq('id', taskId);
+      }).eq('id', String(taskId));
+
+      if (error) {
+        console.error('tasksApi.passAudit Supabase error:', error);
+        throw new Error(error.message || 'Failed to update pass audit in Supabase');
+      }
     }
 
     // 2. If any equipment is flagged as faulty, write to replacement_orders
     if (replacements && replacements.length > 0 && supabase) {
       await replacementsApi.flagMultiple({
-        taskId,
+        taskId: String(taskId),
         feId: taskData?.feId || '',
         feName: taskData?.feName || '',
         feCode: taskData?.feCode || '',
@@ -490,9 +495,9 @@ export const tasksApi = {
       }
     }
 
-    // 2. Write FATAL status to database with email_notified = false (queuing for daily batch)
+    // 2. Write FATAL status to database with email_sent = false (queuing for daily batch)
     if (supabase) {
-      await supabase.from('tasks').update({
+      const { error } = await supabase.from('tasks').update({
         audit_status: 'FATAL',
         audited_at: new Date().toISOString(),
         audited_by_name: auditorName,
@@ -501,18 +506,22 @@ export const tasksApi = {
         failed_reasons: failedReasons || [],
         criteria_status: criteriaStatus || {},
         replacements: replacements || [],
-        email_notified: immediateEmail ? true : false,
         email_sent: immediateEmail ? true : false,
         email_sent_at: immediateEmail ? new Date().toISOString() : null,
         email_recipients: recipients,
         updated_at: new Date().toISOString()
-      }).eq('id', taskId);
+      }).eq('id', String(taskId));
+
+      if (error) {
+        console.error('tasksApi.failAudit Supabase error:', error);
+        throw new Error(error.message || 'Failed to record fatal audit in Supabase');
+      }
     }
 
     // 3. Write flagged faulty items to replacement_orders
     if (replacements && replacements.length > 0 && supabase) {
       await replacementsApi.flagMultiple({
-        taskId,
+        taskId: String(taskId),
         feId: taskData?.feId || '',
         feName: taskData?.feName || '',
         feCode: taskData?.feCode || '',
@@ -527,10 +536,54 @@ export const tasksApi = {
       success: true, 
       status: 'FATAL',
       emailSent: immediateEmail,
-      emailNotified: immediateEmail,
       recipients,
       emailDispatch
     };
+  },
+
+  // Batch sync audits from local state / recovery cache to Supabase
+  async syncAuditedTasks(tasksToSync) {
+    if (!tasksToSync || tasksToSync.length === 0 || !supabase) return { count: 0, errors: [] };
+    let successCount = 0;
+    const errors = [];
+
+    for (const t of tasksToSync) {
+      const isFatal = t.auditStatus === 'FATAL' || t.audit_status === 'FATAL';
+      const isPassed = t.auditStatus === 'PASSED' || t.audit_status === 'PASSED';
+      if (!isFatal && !isPassed) continue;
+
+      try {
+        const payload = {
+          audit_status: isFatal ? 'FATAL' : 'PASSED',
+          audited_at: t.auditedAt || t.audited_at || new Date().toISOString(),
+          audited_by_name: t.auditedBy || t.audited_by_name || 'Central Auditor',
+          audited_location: t.auditedLocation || t.audited_location || 'Ahmedabad Hub',
+          auditor_remarks: t.remarks || t.auditor_remarks || '',
+          criteria_status: t.criteriaStatus || t.criteria_status || {},
+          failed_reasons: t.failedReasons || t.failed_reasons || [],
+          replacements: t.replacements || [],
+          email_sent: Boolean(t.emailSent || t.email_sent),
+          email_sent_at: t.emailSentAt || t.email_sent_at || null,
+          email_recipients: Array.isArray(t.emailRecipients || t.email_recipients) ? (t.emailRecipients || t.email_recipients) : [],
+          updated_at: new Date().toISOString()
+        };
+
+        const { error } = await supabase
+          .from('tasks')
+          .update(payload)
+          .eq('id', String(t.id || t.taskId));
+
+        if (error) {
+          errors.push({ id: t.id, error: error.message });
+        } else {
+          successCount++;
+        }
+      } catch (err) {
+        errors.push({ id: t.id, error: err.message });
+      }
+    }
+
+    return { count: successCount, errors };
   },
 
   // Raise Fatal Objection / Dispute (FE or AM/RM)
