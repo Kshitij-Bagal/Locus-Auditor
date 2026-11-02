@@ -108,6 +108,15 @@ export default function AutoAllocationRoster({
     });
   }, [tasks]);
 
+  // All pending tasks with photos (both currently assigned and unassigned) that can be re-distributed
+  const pendingAuditablePool = useMemo(() => {
+    return tasks.filter(t => {
+      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
+      const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
+      return hasPhotos && isPending;
+    });
+  }, [tasks]);
+
   // Tasks without audit photos that are purposefully excluded from allocation
   const unassignedWithoutPhotos = useMemo(() => {
     return tasks.filter(t => {
@@ -125,10 +134,11 @@ export default function AutoAllocationRoster({
 
   // Estimate tasks per auditor
   const expectedSharePerAuditor = useMemo(() => {
-    if (activeAuditors.length === 0 || unassignedPool.length === 0) return 0;
+    const poolSize = unassignedPool.length > 0 ? unassignedPool.length : pendingAuditablePool.length;
+    if (activeAuditors.length === 0 || poolSize === 0) return 0;
     const totalWeight = activeAuditors.reduce((sum, a) => sum + (a.shiftStatus === 'HALF_DAY' ? 0.5 : 1), 0);
-    return totalWeight > 0 ? Math.round(unassignedPool.length / totalWeight) : 0;
-  }, [unassignedPool.length, activeAuditors]);
+    return totalWeight > 0 ? Math.round(poolSize / totalWeight) : 0;
+  }, [unassignedPool.length, pendingAuditablePool.length, activeAuditors]);
 
   // Workload count per auditor (accurately checks both ID and Name)
   const auditorWorkloadMap = useMemo(() => {
@@ -222,6 +232,74 @@ export default function AutoAllocationRoster({
       });
     } catch (err) {
       alert(`Auto-allocation error: ${err.message}`);
+    } finally {
+      setIsAllocating(false);
+    }
+  };
+
+  // Re-distribute all pending tasks equally among active auditors on shift
+  const handleReallocateAllTasks = async () => {
+    if (pendingAuditablePool.length === 0) {
+      alert('No pending tasks with photos available for redistribution.');
+      return;
+    }
+    if (activeAuditors.length === 0) {
+      alert('All auditors are marked on leave. Please mark at least one auditor as Available.');
+      return;
+    }
+
+    const confirmMsg = `Are you sure you want to re-distribute all ${pendingAuditablePool.length} pending tasks equally among the ${activeAuditors.length} active auditor(s) on shift?\n\nAlready completed audits (PASSED or FATAL) will remain strictly untouched.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsAllocating(true);
+
+    try {
+      // 1. Reset assignments ONLY on pending tasks with photos (completed audits are preserved completely)
+      const resetTasks = tasks.map(t => {
+        const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
+        const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
+        if (hasPhotos && isPending) {
+          return {
+            ...t,
+            assignedAuditorId: null,
+            assignedAuditorName: null,
+            assignedAuditorEmail: null,
+            allocatedAt: null,
+            allocationBatchId: null
+          };
+        }
+        return t;
+      });
+
+      // 2. Run equal distribution algorithm across currently active auditors
+      const result = runAutoAllocationAlgorithm({
+        tasks: resetTasks,
+        rosterAuditors: roster
+      });
+
+      // 3. Persist new allocations in Supabase tasks table
+      if (result.allocatedTasks && result.allocatedTasks.length > 0) {
+        await tasksApi.saveAllocations(result.allocatedTasks);
+      }
+
+      // 4. Sync workload counters in Supabase auditor_roster
+      if (result.auditorWorkloads) {
+        await rosterApi.syncAllocationCounts(result.auditorWorkloads);
+      }
+
+      // 5. Update parent state
+      if (allocateCallback) {
+        allocateCallback(result.allocatedTasks);
+      }
+
+      setAllocationLog({
+        timestamp: new Date().toLocaleTimeString(),
+        assignedCount: result.newlyAssignedCount,
+        workloads: result.auditorWorkloads,
+        note: `Re-distributed all ${result.newlyAssignedCount} pending tasks among ${activeAuditors.length} active auditors`
+      });
+    } catch (err) {
+      alert(`Re-allocation error: ${err.message}`);
     } finally {
       setIsAllocating(false);
     }
@@ -355,7 +433,7 @@ export default function AutoAllocationRoster({
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
           {nonAuditorStaff.length > 0 && (
             <button
               onClick={() => setShowAddAuditorModal(true)}
@@ -370,6 +448,7 @@ export default function AutoAllocationRoster({
             onClick={handleRunAllocation}
             disabled={isAllocating || unassignedPool.length === 0 || activeAuditors.length === 0}
             className="px-4 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-blue-600 via-indigo-600 to-sky-600 hover:from-blue-500 hover:to-sky-500 text-white shadow-lg shadow-blue-500/25 flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 self-start md:self-auto"
+            title={unassignedPool.length === 0 ? "No unassigned tasks remaining" : `Distribute ${unassignedPool.length} unassigned tasks`}
           >
             {isAllocating ? (
               <>
@@ -380,6 +459,25 @@ export default function AutoAllocationRoster({
               <>
                 <Cpu className="w-4 h-4" />
                 <span>Distribute All Tasks ({unassignedPool.length})</span>
+              </>
+            )}
+          </button>
+
+          <button
+            onClick={handleReallocateAllTasks}
+            disabled={isAllocating || pendingAuditablePool.length === 0 || activeAuditors.length === 0}
+            className="px-4 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 hover:from-amber-500 hover:to-orange-500 text-white shadow-lg shadow-amber-600/25 flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 self-start md:self-auto"
+            title={pendingAuditablePool.length === 0 ? "No pending tasks to reallocate" : `Re-distribute all ${pendingAuditablePool.length} pending tasks equally among active auditors`}
+          >
+            {isAllocating ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Re-distributing...</span>
+              </>
+            ) : (
+              <>
+                <RotateCw className="w-4 h-4" />
+                <span>Re-distribute Tasks ({pendingAuditablePool.length})</span>
               </>
             )}
           </button>

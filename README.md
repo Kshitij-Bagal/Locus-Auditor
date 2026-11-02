@@ -263,6 +263,10 @@ Locus_Auditor/
   - **Daily Attendance & Shift Roster**: Marks shift status (`AVAILABLE`, `ON_LEAVE`, `HALF_DAY`, `TRAINING`) with real-time Supabase persistence.
   - **Auditable-Only Filtering**: Isolates tasks with uploaded photos (`hasImages === true` and `imageCount > 0`). Text-only or cancelled tasks without photos are never allocated.
   - **Equal Load Balancing Algorithm** ([`src/lib/supabase.js`](file:///c:/Users/kshitijbagal/Desktop/Locus_Auditor/src/lib/supabase.js)): Divides pending photo tasks evenly across active roster members with capacity weights (`1.0` for full day, `0.5` for half day).
+  - **Dynamic Re-Distribution Engine (`Re-distribute Tasks`)**:
+    - Placed directly beside the initial "Distribute All Tasks" button.
+    - Resolves post-allocation rebalancing whenever auditor shifts change, staff go on emergency leave, or new City Admins join.
+    - Resets assignments across all **pending** auditable tasks while **strictly preserving already completed audits (PASSED or FATAL)**, re-distributes them evenly across active shift members, and updates Supabase.
   - One-click batch assignment that syncs directly with Supabase `tasks` table.
 
 ---
