@@ -397,16 +397,13 @@ export default function AutoAllocationRoster({
     }
   };
 
-  // Quick Promote Staff to Auditor Role
-  const handlePromoteStaff = async () => {
+  // Add staff member to allocation roster without modifying their system role
+  const handlePromoteStaff = () => {
     if (!selectedStaffToPromote) return;
     const targetUser = users.find(u => u.id === selectedStaffToPromote);
     if (!targetUser) return;
 
-    if (onUpdateUserRole) {
-      await onUpdateUserRole(targetUser.id, 'Auditor');
-    }
-
+    // Preserve exact user role in the system - no role mutation
     setRoster(prev => [
       ...prev,
       {
@@ -416,6 +413,8 @@ export default function AutoAllocationRoster({
         email: targetUser.email,
         hub: targetUser.facility_code || targetUser.city || 'National',
         employeeCode: targetUser.employee_code || targetUser.person_id || '',
+        role: targetUser.role,
+        roles: parseRoles(targetUser.roles || [targetUser.role]),
         shiftStatus: 'AVAILABLE'
       }
     ]);

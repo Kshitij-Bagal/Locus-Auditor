@@ -25,6 +25,7 @@ export default function FilterBar({
   setSelectedAuditor,
   auditors = [],
   isAuditorOnly = false,
+  currentUserName,
   onlyWithImages,
   setOnlyWithImages,
   onlyDPlusOneOverdue = false,
@@ -66,26 +67,31 @@ export default function FilterBar({
           
           {/* Auditor Queue Badge or Filter Dropdown */}
           {isAuditorOnly ? (
-            <div className="flex items-center bg-blue-500/10 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs font-bold text-sky-300">
+            <div 
+              className="flex items-center bg-blue-500/10 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs font-bold text-sky-300"
+              title="City Admins strictly see tasks allocated to their personal queue"
+            >
               <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
-              <span>My Allocated Queue Only</span>
+              <span>My Allocated Queue Only{currentUserName ? ` (${currentUserName})` : ''}</span>
             </div>
           ) : (
             auditors && auditors.length > 0 && setSelectedAuditor && (
-              <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-2 py-1">
+              <div className="flex items-center bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1 shadow-sm">
                 <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
                 <select
                   value={selectedAuditor}
                   onChange={(e) => setSelectedAuditor(e.target.value)}
                   className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer pr-1"
+                  title="SuperAdmin: Filter audits by specific auditor queue"
                 >
-                  <option value="ALL" className="bg-slate-800 text-white">All Auditors</option>
-                  <option value="UNASSIGNED" className="bg-slate-800 text-amber-300">Unassigned Tasks</option>
+                  <option value="ALL" className="bg-slate-800 text-white font-bold">All Auditors</option>
+                  <option value="UNASSIGNED" className="bg-slate-800 text-amber-300 font-bold">Unassigned Tasks</option>
                   {auditors.map(a => {
                     const name = a.full_name || a.name || a.id;
+                    const roleSuffix = a.role ? ` (${a.role})` : '';
                     return (
                       <option key={a.id || name} value={name} className="bg-slate-800 text-white">
-                        {name}
+                        {name}{roleSuffix}
                       </option>
                     );
                   })}

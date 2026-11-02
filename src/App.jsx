@@ -163,12 +163,53 @@ export default function App() {
       userRoles.includes('GM');
   }, [isSuperAdmin, userRoles]);
 
-  // Actual real auditors list from users:
-  // Dedicated Auditors, City Admins, and Central Ops who carry photo audit responsibilities
-  // (Strictly excludes supervisory and governance roles: AM, RM, GM, BH, FE, SuperAdmin)
-  const realAuditors = useMemo(() => {
-    return (users || []).filter(isEligibleForAuditRoster);
-  }, [users]);
+  // Available auditors for dropdown selection in the Audits console:
+  // For SuperAdmin: Includes all City Admins, SuperAdmins, and any auditor with assigned tasks
+  const availableAuditorsForFilter = useMemo(() => {
+    const list = [];
+    const seen = new Set();
+
+    // 1. All City Admins & SuperAdmins from user profiles
+    (users || []).forEach(u => {
+      const isEligible = isEligibleForAuditRoster(u, { includeSuperAdmin: true });
+      const roles = parseRoles(u.roles || [u.role]);
+      const isSuper = roles.includes('SuperAdmin') || normalizeRoleName(u.role) === 'SuperAdmin';
+      const isCity = roles.includes('City Admin') || roles.includes('Admin') || normalizeRoleName(u.role) === 'City Admin';
+
+      if (isEligible || isSuper || isCity) {
+        const name = (u.full_name || u.name || '').trim();
+        const key = name.toLowerCase();
+        if (name && !seen.has(key)) {
+          seen.add(key);
+          list.push({
+            id: u.id,
+            full_name: name,
+            name: name,
+            role: isSuper ? 'SuperAdmin' : 'City Admin'
+          });
+        }
+      }
+    });
+
+    // 2. Also ensure any auditor name that appears on existing tasks is included
+    (tasks || []).forEach(t => {
+      const name = (t.assignedAuditorName || '').trim();
+      if (name) {
+        const key = name.toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          list.push({
+            id: t.assignedAuditorId || `aud_${name}`,
+            full_name: name,
+            name: name,
+            role: 'Auditor'
+          });
+        }
+      }
+    });
+
+    return list;
+  }, [users, tasks]);
 
   // Sync session on mount
   useEffect(() => {
@@ -1145,8 +1186,9 @@ export default function App() {
               setSelectedAuditStatus={setSelectedAuditStatus}
               selectedAuditor={selectedAuditorFilter}
               setSelectedAuditor={setSelectedAuditorFilter}
-              auditors={realAuditors}
+              auditors={availableAuditorsForFilter}
               isAuditorOnly={isAuditorOnly}
+              currentUserName={currentUser?.full_name || currentUser?.name || 'City Admin'}
               onlyWithImages={onlyWithImages}
               setOnlyWithImages={setOnlyWithImages}
               onlyDPlusOneOverdue={onlyDPlusOneOverdue}
