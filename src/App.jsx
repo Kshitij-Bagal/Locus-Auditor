@@ -25,6 +25,7 @@ import { getTaskSLAStatus, filterDPlusOneOverdueTasks } from './utils/slaHelper.
 import { runAutoAllocationAlgorithm } from './lib/supabase.js';
 import { 
   parseRoles, 
+  normalizeRoleName,
   hasPageAccess, 
   deriveRolesFromPages, 
   getUserEffectivePages, 
