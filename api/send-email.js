@@ -72,28 +72,106 @@ export async function sendEmailHandler(req, res) {
       return;
     }
 
-    // Determine Provider: resend | smtp
+    // Determine Provider: brevo | resend | smtp
+    const brevoApiKey = credentials.brevoApiKey || process.env.BREVO_API_KEY;
     const resendApiKey = credentials.resendApiKey || process.env.RESEND_API_KEY;
     const smtpHost = credentials.smtpHost || process.env.SMTP_HOST;
     const smtpUser = credentials.smtpUser || process.env.SMTP_USER;
     const smtpPass = credentials.smtpPass || process.env.SMTP_PASS;
     const smtpPort = credentials.smtpPort || process.env.SMTP_PORT || 587;
-    const fromAddress = credentials.fromAddress || process.env.EMAIL_FROM || 'Lenskart Quality Audit <onboarding@resend.dev>';
+    const fromAddress = credentials.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@lenskart.com>';
 
-    const provider = requestedProvider || (resendApiKey ? 'resend' : smtpHost ? 'smtp' : null);
+    const provider = requestedProvider || (brevoApiKey ? 'brevo' : resendApiKey ? 'resend' : smtpHost ? 'smtp' : null);
 
     if (!provider) {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
-        error: 'No email service configured. Please provide a Resend API key or SMTP credentials in Email Settings.',
+        error: 'No email service configured. Please provide a BREVO_API_KEY, Resend API key, or SMTP credentials in Email Settings.',
         code: 'NO_GATEWAY_CONFIGURED'
       }));
       return;
     }
 
     // ==========================================
-    // 1. DISPATCH VIA RESEND API
+    // 1. DISPATCH VIA BREVO (SENDINBLUE) REST API
+    // ==========================================
+    if (provider === 'brevo') {
+      if (!brevoApiKey) {
+        throw new Error('Brevo API Key is missing. Please configure BREVO_API_KEY in environment variables.');
+      }
+
+      // Format sender
+      let senderName = 'Lenskart Quality Audit';
+      let senderEmail = 'kshitijbagal@lenskart.com';
+      if (fromAddress && fromAddress.includes('@')) {
+        const match = fromAddress.match(/(.*?)\s*<(.+?)>/);
+        if (match) {
+          senderName = match[1].trim() || senderName;
+          senderEmail = match[2].trim();
+        } else {
+          senderEmail = fromAddress.trim();
+        }
+      }
+
+      // Format recipients
+      const toList = (Array.isArray(to) ? to : [to]).map(e => {
+        if (typeof e === 'string') return { email: e.trim() };
+        return e;
+      });
+
+      const ccList = cc ? (Array.isArray(cc) ? cc : [cc]).map(e => {
+        if (typeof e === 'string') return { email: e.trim() };
+        return e;
+      }) : undefined;
+
+      const bccList = bcc ? (Array.isArray(bcc) ? bcc : [bcc]).map(e => {
+        if (typeof e === 'string') return { email: e.trim() };
+        return e;
+      }) : undefined;
+
+      const brevoPayload = {
+        sender: { name: senderName, email: senderEmail },
+        to: toList,
+        subject: subject || 'Lenskart DLC Quality Audit Notification',
+        htmlContent: html || text?.replace(/\n/g, '<br/>') || '<p>Audit Notification</p>',
+        textContent: text
+      };
+
+      if (ccList && ccList.length > 0) brevoPayload.cc = ccList;
+      if (bccList && bccList.length > 0) brevoPayload.bcc = bccList;
+
+      const brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': brevoApiKey,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(brevoPayload)
+      });
+
+      const brevoData = await brevoResponse.json();
+
+      if (!brevoResponse.ok) {
+        throw new Error(`Brevo Delivery Failed (${brevoResponse.status}): ${brevoData.message || JSON.stringify(brevoData)}`);
+      }
+
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        success: true,
+        provider: 'brevo',
+        messageId: brevoData.messageId,
+        to: toList,
+        cc: ccList,
+        message: 'Email delivered successfully via Brevo'
+      }));
+      return;
+    }
+
+    // ==========================================
+    // 2. DISPATCH VIA RESEND API
     // ==========================================
     if (provider === 'resend') {
       if (!resendApiKey) {

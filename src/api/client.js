@@ -836,20 +836,22 @@ export const rulesApi = {
 const EMAIL_CONFIG_KEY = 'locus_email_gateway_config_v1';
 
 export const emailApi = {
-  // Read configured gateway credentials (Resend or SMTP)
+  // Read configured gateway credentials (Brevo, Resend or SMTP)
   getGatewayConfig() {
     try {
       const saved = localStorage.getItem(EMAIL_CONFIG_KEY);
       if (saved) return JSON.parse(saved);
     } catch (e) {}
+    const brevoEnvKey = import.meta.env.VITE_BREVO_API_KEY || '';
     return {
-      provider: 'resend', // 'resend' | 'smtp'
+      provider: brevoEnvKey ? 'brevo' : 'resend', // 'brevo' | 'resend' | 'smtp'
+      brevoApiKey: brevoEnvKey,
       resendApiKey: '',
       smtpHost: '',
       smtpPort: 587,
       smtpUser: '',
       smtpPass: '',
-      fromAddress: 'Lenskart Quality Audit <onboarding@resend.dev>'
+      fromAddress: 'Lenskart Quality Audit <kshitijbagal@lenskart.com>'
     };
   },
 
@@ -898,6 +900,7 @@ export const emailApi = {
         html,
         provider: config.provider,
         credentials: {
+          brevoApiKey: config.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
           resendApiKey: config.resendApiKey,
           smtpHost: config.smtpHost,
           smtpPort: config.smtpPort,
@@ -1850,6 +1853,7 @@ export const feFatalDigestApi = {
         tasks,
         users,
         credentials: {
+          brevoApiKey: gatewayConfig.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
           resendApiKey: gatewayConfig.resendApiKey,
           smtpHost: gatewayConfig.smtpHost,
           smtpPort: gatewayConfig.smtpPort,
@@ -1886,6 +1890,42 @@ export const feFatalDigestApi = {
       } catch (e) {}
     }
 
+    return data;
+  },
+
+  // Dispatch General Executive Summary to GM, BH & SuperAdmin
+  async dispatchGmBhExecutiveSummary({ date, tasks, users, dryRun = false, leadershipEmails }) {
+    const gatewayConfig = emailApi.getGatewayConfig();
+
+    const response = await fetch('/api/cron/daily-fe-fatal-digest', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-requested-by': 'locus-portal'
+      },
+      body: JSON.stringify({
+        action: 'send_executive_summary',
+        date,
+        dryRun,
+        tasks,
+        users,
+        leadershipEmails,
+        credentials: {
+          brevoApiKey: gatewayConfig.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
+          resendApiKey: gatewayConfig.resendApiKey,
+          smtpHost: gatewayConfig.smtpHost,
+          smtpPort: gatewayConfig.smtpPort,
+          smtpUser: gatewayConfig.smtpUser,
+          smtpPass: gatewayConfig.smtpPass,
+          fromAddress: gatewayConfig.fromAddress
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to dispatch GM & BH executive summary');
+    }
     return data;
   }
 };

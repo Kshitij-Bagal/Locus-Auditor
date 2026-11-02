@@ -939,3 +939,408 @@ Lenskart Central Quality & Governance Division
 Portal: ${portalBaseUrl}`;
 }
 
+// ====================================================================
+// GENERAL EXECUTIVE SUMMARY FOR GM, BH & SUPERADMIN
+// High-level macro overview across all hubs, SOP failure Pareto, and FEs with strikes
+// ====================================================================
+
+/**
+ * Aggregate complete day's audit snapshot for executive leadership (GM & BH)
+ */
+export function aggregateGmBhExecutiveSummary({
+  tasks = [],
+  users = [],
+  targetDate = new Date(),
+  portalBaseUrl = 'https://locus-auditor.vercel.app'
+}) {
+  const targetDateStr = normalizeDateToYMD(targetDate);
+
+  // 1. Identify tasks audited on target date (or tasks dispatch on target date)
+  let auditedToday = (tasks || []).filter(t => {
+    const dStr = getTaskAuditDateYMD(t);
+    const status = t.auditStatus || t.audit_status;
+    const isAudited = status === 'PASSED' || status === 'FATAL';
+    return isAudited && dStr === targetDateStr;
+  });
+
+  // If strict date filter yields 0 (e.g. initial demo/test run), fallback to all audited tasks currently in system
+  if (auditedToday.length === 0) {
+    auditedToday = (tasks || []).filter(t => {
+      const status = t.auditStatus || t.audit_status;
+      return status === 'PASSED' || status === 'FATAL';
+    });
+  }
+
+  const totalAudited = auditedToday.length;
+  const passedTasks = auditedToday.filter(t => (t.auditStatus || t.audit_status) === 'PASSED');
+  const fatalTasks = auditedToday.filter(t => (t.auditStatus || t.audit_status) === 'FATAL');
+  const totalPassed = passedTasks.length;
+  const totalFatal = fatalTasks.length;
+  const passRate = totalAudited > 0 ? Math.round((totalPassed / totalAudited) * 100) : 100;
+  const fatalRate = totalAudited > 0 ? Math.round((totalFatal / totalAudited) * 100) : 0;
+
+  // 2. Hub / Facility Performance Breakdown
+  const hubMap = new Map();
+  auditedToday.forEach(t => {
+    const hub = t.facilityCode || t.teamName || t.city || 'Central Hub';
+    if (!hubMap.has(hub)) {
+      hubMap.set(hub, { hub, audited: 0, passed: 0, fatal: 0 });
+    }
+    const entry = hubMap.get(hub);
+    entry.audited++;
+    if ((t.auditStatus || t.audit_status) === 'FATAL') entry.fatal++;
+    else entry.passed++;
+  });
+
+  const hubBreakdown = Array.from(hubMap.values()).map(h => ({
+    ...h,
+    passRate: h.audited > 0 ? Math.round((h.passed / h.audited) * 100) : 100
+  })).sort((a, b) => b.fatal - a.fatal || b.audited - a.audited);
+
+  // 3. Pareto of SOP Non-Compliance Reasons
+  const reasonMap = new Map();
+  fatalTasks.forEach(t => {
+    const reasons = Array.isArray(t.failedReasons) ? t.failedReasons : (t.failed_reasons || []);
+    reasons.forEach(r => {
+      if (!r) return;
+      const count = reasonMap.get(r) || 0;
+      reasonMap.set(r, count + 1);
+    });
+  });
+
+  const topFailureReasons = Array.from(reasonMap.entries())
+    .map(([reason, count]) => ({
+      reason,
+      count,
+      percent: totalFatal > 0 ? Math.round((count / totalFatal) * 100) : 0
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  // 4. Field Executives (FEs) with Fatal Strikes
+  const feFatalList = aggregateFeFatalDigests({
+    tasks: auditedToday,
+    users,
+    targetDate: targetDateStr,
+    portalBaseUrl
+  });
+
+  // 5. Flagged Faulty Tools / Replacement Orders
+  const replacementOrders = [];
+  auditedToday.forEach(t => {
+    const reps = t.replacements || [];
+    if (Array.isArray(reps)) {
+      reps.forEach(r => {
+        replacementOrders.push({
+          taskId: t.id || t.taskId,
+          feName: t.feName || t.fe_name || 'Field Executive',
+          hub: t.facilityCode || t.teamName || t.city || 'Hub',
+          itemName: r.name || r.itemName || 'Equipment Item',
+          category: r.category || 'Asset',
+          urgency: r.urgency || 'NORMAL'
+        });
+      });
+    }
+  });
+
+  return {
+    digestDate: targetDateStr,
+    totalAudited,
+    totalPassed,
+    totalFatal,
+    passRate,
+    fatalRate,
+    hubBreakdown,
+    topFailureReasons,
+    feFatalList,
+    replacementOrders,
+    portalBaseUrl
+  };
+}
+
+/**
+ * Generate responsive, executive HTML email for GM, BH, and SuperAdmin
+ */
+export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'https://locus-auditor.vercel.app' }) {
+  const {
+    digestDate,
+    totalAudited,
+    totalPassed,
+    totalFatal,
+    passRate,
+    fatalRate,
+    hubBreakdown = [],
+    topFailureReasons = [],
+    feFatalList = [],
+    replacementOrders = []
+  } = summaryData;
+
+  const rulesUrl = `${portalBaseUrl}/rules`;
+  const auditsUrl = `${portalBaseUrl}/audits`;
+  const managerUrl = `${portalBaseUrl}/manager`;
+
+  // Hub breakdown rows
+  const hubRowsHtml = hubBreakdown.length > 0 ? hubBreakdown.map(h => {
+    const statusColor = h.fatal > 0 ? '#DC2626' : '#16A34A';
+    const statusBg = h.fatal > 0 ? '#FEF2F2' : '#F0FDF4';
+    return `
+      <tr style="border-bottom: 1px solid #E2E8F0;">
+        <td style="padding: 10px 14px; font-weight: 700; color: #0F172A; font-size: 13px;">${h.hub}</td>
+        <td style="padding: 10px 14px; text-align: center; color: #334155; font-size: 13px;">${h.audited}</td>
+        <td style="padding: 10px 14px; text-align: center; color: #16A34A; font-weight: 700; font-size: 13px;">${h.passed}</td>
+        <td style="padding: 10px 14px; text-align: center; color: ${h.fatal > 0 ? '#DC2626' : '#94A3B8'}; font-weight: 700; font-size: 13px;">${h.fatal}</td>
+        <td style="padding: 10px 14px; text-align: right;">
+          <span style="display: inline-block; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; background-color: ${statusBg}; color: ${statusColor};">
+            ${h.passRate}% Pass
+          </span>
+        </td>
+      </tr>
+    `;
+  }).join('') : `
+    <tr><td colspan="5" style="padding: 16px; text-align: center; color: #94A3B8;">No hub activity recorded today.</td></tr>
+  `;
+
+  // Top failure reasons rows
+  const failureRowsHtml = topFailureReasons.length > 0 ? topFailureReasons.slice(0, 5).map((r, i) => `
+    <tr style="border-bottom: 1px solid #F1F5F9;">
+      <td style="padding: 8px 12px; font-size: 12px; font-weight: 700; color: #DC2626; width: 28px;">#${i + 1}</td>
+      <td style="padding: 8px 12px; font-size: 12px; color: #1E293B; font-weight: 600;">${r.reason}</td>
+      <td style="padding: 8px 12px; font-size: 12px; text-align: right; color: #DC2626; font-weight: 700;">${r.count} strike${r.count > 1 ? 's' : ''} (${r.percent}%)</td>
+    </tr>
+  `).join('') : `
+    <tr><td colspan="3" style="padding: 12px; text-align: center; color: #16A34A; font-size: 12px; font-weight: 600;">Clean record: Zero SOP fatal failures recorded today!</td></tr>
+  `;
+
+  // Affected FEs table
+  const feRowsHtml = feFatalList.length > 0 ? feFatalList.map(fe => `
+    <tr style="border-bottom: 1px solid #E2E8F0;">
+      <td style="padding: 10px 12px; font-size: 12px;">
+        <strong style="color: #0F172A;">${fe.feName}</strong><br/>
+        <span style="font-family: monospace; font-size: 10px; color: #64748B;">${fe.feCode} &bull; ${fe.hub}</span>
+      </td>
+      <td style="padding: 10px 12px; font-size: 12px; text-align: center;">
+        <span style="display: inline-block; padding: 2px 7px; border-radius: 4px; background: #FEF2F2; color: #DC2626; font-weight: 800; font-size: 11px;">
+          ${fe.fatalCount} Strike${fe.fatalCount > 1 ? 's' : ''}
+        </span>
+      </td>
+      <td style="padding: 10px 12px; font-size: 11px; color: #475569;">
+        <strong>AM:</strong> ${fe.amName || 'Unassigned'}<br/>
+        <span style="color: #64748B;">RM: ${fe.rmName || 'Unassigned'}</span>
+      </td>
+    </tr>
+  `).join('') : `
+    <tr><td colspan="3" style="padding: 16px; text-align: center; color: #16A34A; font-size: 12px;">All Field Executives met 100% compliance criteria today.</td></tr>
+  `;
+
+  return `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+      <title>Lenskart DLC Executive Quality Overview</title>
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #0F172A; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #334155;">
+      
+      <!-- Container -->
+      <div style="max-width: 680px; margin: 24px auto; background-color: #FFFFFF; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.4); border: 1px solid #E2E8F0;">
+        
+        <!-- Executive Header -->
+        <div style="background: linear-gradient(135deg, #0A1128 0%, #1C2541 50%, #0F172A 100%); padding: 32px 28px; text-align: left; border-bottom: 3px solid #38BDF8;">
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td>
+                <span style="display: inline-block; background-color: rgba(56, 189, 248, 0.15); color: #38BDF8; font-size: 11px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; padding: 4px 10px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3);">
+                  EXECUTIVE BRIEFING &bull; GM &amp; BH QUALITY OVERVIEW
+                </span>
+                <h1 style="color: #FFFFFF; font-size: 24px; font-weight: 900; margin: 12px 0 4px 0; letter-spacing: -0.5px;">
+                  Lenskart Home Try-On (HTO) Quality Snapshot
+                </h1>
+                <p style="color: #94A3B8; font-size: 13px; margin: 0;">
+                  National Operations Quality Performance for <strong style="color: #F8FAFC;">${digestDate}</strong>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- High-Impact KPI Row -->
+        <div style="background-color: #F8FAFC; padding: 20px 24px; border-bottom: 1px solid #E2E8F0;">
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <!-- Audited -->
+              <td style="width: 25%; padding: 8px; text-align: center;">
+                <div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 10px; padding: 14px 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                  <div style="font-size: 11px; color: #64748B; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Audited</div>
+                  <div style="font-size: 26px; font-weight: 900; color: #0F172A; margin-top: 4px;">${totalAudited}</div>
+                  <div style="font-size: 10px; color: #94A3B8; margin-top: 2px;">Visits Reviewed</div>
+                </div>
+              </td>
+              <!-- Pass Rate -->
+              <td style="width: 25%; padding: 8px; text-align: center;">
+                <div style="background: #FFFFFF; border: 1px solid #BBF7D0; border-radius: 10px; padding: 14px 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                  <div style="font-size: 11px; color: #16A34A; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Pass Rate</div>
+                  <div style="font-size: 26px; font-weight: 900; color: #16A34A; margin-top: 4px;">${passRate}%</div>
+                  <div style="font-size: 10px; color: #16A34A; margin-top: 2px;">${totalPassed} Passed</div>
+                </div>
+              </td>
+              <!-- Fatal Strikes -->
+              <td style="width: 25%; padding: 8px; text-align: center;">
+                <div style="background: #FFFFFF; border: 1px solid ${totalFatal > 0 ? '#FECACA' : '#E2E8F0'}; border-radius: 10px; padding: 14px 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                  <div style="font-size: 11px; color: #DC2626; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Fatal Strikes</div>
+                  <div style="font-size: 26px; font-weight: 900; color: #DC2626; margin-top: 4px;">${totalFatal}</div>
+                  <div style="font-size: 10px; color: #DC2626; margin-top: 2px;">${feFatalList.length} FEs Impacted</div>
+                </div>
+              </td>
+              <!-- Fatal Rate -->
+              <td style="width: 25%; padding: 8px; text-align: center;">
+                <div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 10px; padding: 14px 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                  <div style="font-size: 11px; color: #64748B; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Fatal Rate</div>
+                  <div style="font-size: 26px; font-weight: 900; color: ${fatalRate > 10 ? '#DC2626' : '#0F172A'}; margin-top: 4px;">${fatalRate}%</div>
+                  <div style="font-size: 10px; color: #94A3B8; margin-top: 2px;">National Benchmark</div>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Main Body -->
+        <div style="padding: 24px;">
+
+          <!-- SECTION 1: Facility / Hub Performance Scorecard -->
+          <h2 style="font-size: 15px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+            Facility Hub Performance Scorecard
+          </h2>
+          <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+            <thead>
+              <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
+                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Facility / Hub</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Audited</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #16A34A; text-transform: uppercase;">Passed</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Fatal</th>
+                <th style="padding: 10px 14px; text-align: right; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Pass Rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${hubRowsHtml}
+            </tbody>
+          </table>
+
+          <!-- SECTION 2: Top SOP Failure Reasons Pareto -->
+          <h2 style="font-size: 15px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+            Top SOP Non-Compliance Criteria Pareto
+          </h2>
+          <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+            <tbody>
+              ${failureRowsHtml}
+            </tbody>
+          </table>
+
+          <!-- SECTION 3: Field Executives Flagged for Fatal Strikes -->
+          <h2 style="font-size: 15px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+            Field Executives with Fatal Strikes Today (${feFatalList.length})
+          </h2>
+          <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+            <thead>
+              <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
+                <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Field Executive</th>
+                <th style="padding: 10px 12px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Strikes</th>
+                <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Supervisory AM &amp; RM</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${feRowsHtml}
+            </tbody>
+          </table>
+
+          <!-- SECTION 4: Executive Action Buttons -->
+          <div style="background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%); border-radius: 10px; padding: 22px 24px; text-align: center; margin-top: 12px;">
+            <p style="color: #F8FAFC; font-size: 13px; font-weight: 600; margin: 0 0 14px 0;">
+              Need to calibrate audit rules, review disputes, or audit escalated visits?
+            </p>
+            <div style="display: inline-block;">
+              <a href="${rulesUrl}" target="_blank" style="display: inline-block; background-color: #38BDF8; color: #0F172A; font-weight: 800; font-size: 12px; padding: 10px 18px; border-radius: 6px; text-decoration: none; margin-right: 8px;">
+                Open GM &amp; BH Rules Studio &rarr;
+              </a>
+              <a href="${auditsUrl}" target="_blank" style="display: inline-block; background-color: #334155; color: #F8FAFC; font-weight: 700; font-size: 12px; padding: 10px 18px; border-radius: 6px; text-decoration: none;">
+                View Live Audit Queue &rarr;
+              </a>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 20px 24px; font-size: 11px; color: #94A3B8; text-align: center; line-height: 1.6;">
+          <strong>Lenskart Solutions Pvt. Ltd. &bull; Central Quality Operations &amp; Governance</strong><br/>
+          Confidential leadership briefing for General Managers (GM), Business Heads (BH), and SuperAdmins.<br/>
+          Automated Daily FE Fatal Dispatch Engine &bull; Dispatched via Brevo Mail Gateway
+        </div>
+
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+/**
+ * Plain text fallback for GM & BH Executive Summary
+ */
+export function buildGmBhExecutiveSummaryText({ summaryData, portalBaseUrl = 'https://locus-auditor.vercel.app' }) {
+  const {
+    digestDate,
+    totalAudited,
+    totalPassed,
+    totalFatal,
+    passRate,
+    fatalRate,
+    hubBreakdown = [],
+    topFailureReasons = [],
+    feFatalList = []
+  } = summaryData;
+
+  const hubText = hubBreakdown.map(h => 
+    `- ${h.hub}: Audited: ${h.audited} | Passed: ${h.passed} | Fatal: ${h.fatal} | Pass Rate: ${h.passRate}%`
+  ).join('\n');
+
+  const failureText = topFailureReasons.map((r, i) =>
+    `#${i + 1} ${r.reason}: ${r.count} strike(s) (${r.percent}%)`
+  ).join('\n');
+
+  const feText = feFatalList.map(fe =>
+    `- ${fe.feName} (${fe.feCode}, ${fe.hub}): ${fe.fatalCount} strike(s) | AM: ${fe.amName} | RM: ${fe.rmName}`
+  ).join('\n');
+
+  return `LENSKART DLC & HTO - EXECUTIVE QUALITY AUDIT BRIEFING
+Date: ${digestDate}
+Confidential Leadership Report for GM, BH & SuperAdmin
+
+============================================================
+EXECUTIVE KPI SUMMARY:
+============================================================
+Total Visits Audited: ${totalAudited}
+Visits Passed:        ${totalPassed}
+Overall Pass Rate:    ${passRate}%
+Fatal Strikes:        ${totalFatal}
+Fatal Incident Rate:  ${fatalRate}%
+
+============================================================
+FACILITY / HUB PERFORMANCE SCORECARD:
+============================================================
+${hubText || 'No hub activity recorded today.'}
+
+============================================================
+TOP SOP NON-COMPLIANCE PARETO:
+============================================================
+${failureText || 'Zero fatal failures recorded.'}
+
+============================================================
+FIELD EXECUTIVES (FES) WITH FATAL STRIKES TODAY:
+============================================================
+${feText || 'Zero FEs with fatal strikes today.'}
+
+Quality Rules Studio: ${portalBaseUrl}/rules
+Central Audits Console: ${portalBaseUrl}/audits
+
+Lenskart Central Quality & Governance Division`;
+}
+

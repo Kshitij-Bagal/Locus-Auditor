@@ -5,7 +5,10 @@ import {
   normalizeDateToYMD, 
   aggregateFeFatalDigests, 
   buildFeFatalWarningEmailHtml, 
-  buildFeFatalWarningEmailText 
+  buildFeFatalWarningEmailText,
+  aggregateGmBhExecutiveSummary,
+  buildGmBhExecutiveSummaryHtml,
+  buildGmBhExecutiveSummaryText
 } from '../../src/utils/dailyDigestHelper.js';
 
 /**
@@ -138,17 +141,19 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       }
     }
 
-    // 6. Setup Email Transport Credentials
+    // 6. Setup Email Transport Credentials (Brevo API | Resend | SMTP)
     const creds = body.credentials || {};
+    const brevoApiKey = creds.brevoApiKey || process.env.BREVO_API_KEY;
     const resendApiKey = creds.resendApiKey || process.env.RESEND_API_KEY;
     const smtpHost = creds.smtpHost || process.env.SMTP_HOST;
     const smtpPort = creds.smtpPort || process.env.SMTP_PORT || '587';
     const smtpUser = creds.smtpUser || process.env.SMTP_USER;
     const smtpPass = creds.smtpPass || process.env.SMTP_PASS;
-    const fromAddress = creds.fromAddress || process.env.EMAIL_FROM || 'Lenskart Quality Audit <alerts@lenskart.in>';
+    const fromAddress = creds.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@lenskart.com>';
 
     let provider = null;
-    if (resendApiKey) provider = 'resend';
+    if (brevoApiKey) provider = 'brevo';
+    else if (resendApiKey) provider = 'resend';
     else if (smtpHost && smtpUser && smtpPass) provider = 'smtp';
 
     const dispatchEmail = async ({ to, cc, subject, html, text }) => {
@@ -157,9 +162,61 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       }
 
       if (!provider) {
-        throw new Error('No email credentials configured. Please configure RESEND_API_KEY or SMTP credentials.');
+        throw new Error('No email credentials configured. Please configure BREVO_API_KEY, RESEND_API_KEY, or SMTP credentials.');
       }
 
+      // 1. BREVO REST API DISPATCH
+      if (provider === 'brevo') {
+        let senderName = 'Lenskart Quality Audit';
+        let senderEmail = 'kshitijbagal@lenskart.com';
+        if (fromAddress && fromAddress.includes('@')) {
+          const match = fromAddress.match(/(.*?)\s*<(.+?)>/);
+          if (match) {
+            senderName = match[1].trim() || senderName;
+            senderEmail = match[2].trim();
+          } else {
+            senderEmail = fromAddress.trim();
+          }
+        }
+
+        const toList = (Array.isArray(to) ? to : [to]).map(e => {
+          if (typeof e === 'string') return { email: e.trim() };
+          return e;
+        });
+
+        const ccList = cc && cc.length > 0 ? (Array.isArray(cc) ? cc : [cc]).map(e => {
+          if (typeof e === 'string') return { email: e.trim() };
+          return e;
+        }) : undefined;
+
+        const brevoPayload = {
+          sender: { name: senderName, email: senderEmail },
+          to: toList,
+          subject,
+          htmlContent: html || text?.replace(/\n/g, '<br/>') || '<p>Audit Notification</p>',
+          textContent: text
+        };
+
+        if (ccList && ccList.length > 0) brevoPayload.cc = ccList;
+
+        const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+          method: 'POST',
+          headers: {
+            'api-key': brevoApiKey,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify(brevoPayload)
+        });
+
+        const respData = await resp.json();
+        if (!resp.ok) {
+          throw new Error(`Brevo Error (${resp.status}): ${respData.message || JSON.stringify(respData)}`);
+        }
+        return { success: true, id: respData.messageId, provider: 'brevo' };
+      }
+
+      // 2. RESEND API DISPATCH
       if (provider === 'resend') {
         const resend = new Resend(resendApiKey);
         const resp = await resend.emails.send({
@@ -174,6 +231,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
         return { success: true, id: resp.data?.id, provider: 'resend' };
       }
 
+      // 3. SMTP RELAY DISPATCH
       if (provider === 'smtp') {
         const transporter = nodemailer.createTransport({
           host: smtpHost,
@@ -193,7 +251,131 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       }
     };
 
-    // 7. Process and Dispatch Each Fatal FE
+    // ====================================================================
+    // 7A. TRIAL MODE / GM & BH EXECUTIVE SUMMARY DISPATCH
+    // Dispatches comprehensive daily quality macro-overview to GM, BH & SuperAdmin
+    // ====================================================================
+    const isLeadershipTrial = query.action === 'send_executive_summary' ||
+      body.action === 'send_executive_summary' ||
+      query.trialLeadershipOnly === 'true' ||
+      body.trialLeadershipOnly === true ||
+      (process.env.TRIAL_LEADERSHIP_ONLY === 'true' && query.forceFE !== 'true' && body.forceFE !== true);
+
+    if (isLeadershipTrial) {
+      // 1. Compile Executive Macro Summary Data
+      const summaryData = aggregateGmBhExecutiveSummary({
+        tasks,
+        users,
+        targetDate,
+        portalBaseUrl
+      });
+
+      // 2. Identify GM, BH and SuperAdmin recipients
+      let leadershipEmails = [];
+      if (Array.isArray(body.leadershipEmails) && body.leadershipEmails.length > 0) {
+        leadershipEmails = body.leadershipEmails;
+      } else if (typeof query.leadershipEmails === 'string') {
+        leadershipEmails = query.leadershipEmails.split(',').map(s => s.trim()).filter(Boolean);
+      } else {
+        // Query users with role GM, BH or SuperAdmin
+        (users || []).forEach(u => {
+          const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+          const isEligible = roles.some(r => {
+            const rNorm = String(r || '').toLowerCase();
+            return rNorm.includes('gm') || 
+                   rNorm.includes('bh') || 
+                   rNorm.includes('superadmin') || 
+                   rNorm.includes('general manager') || 
+                   rNorm.includes('business head');
+          });
+          if (isEligible && u.email && u.email.includes('@')) {
+            leadershipEmails.push(u.email.trim().toLowerCase());
+          }
+        });
+
+        // Deduplicate
+        leadershipEmails = Array.from(new Set(leadershipEmails));
+      }
+
+      // Fallback defaults if none found
+      if (leadershipEmails.length === 0) {
+        leadershipEmails = [
+          'kshitijbagal@lenskart.com',
+          'gm.quality@lenskart.in',
+          'bh.lenskart@lenskart.in',
+          'mayank.gupta1@lenskart.in',
+          'ankita.aggarwal@lenskart.com'
+        ];
+      }
+
+      const execSubject = `[EXECUTIVE SUMMARY] Lenskart Quality Audit Overview - ${targetDate} (Pass: ${summaryData.passRate}% | Fatals: ${summaryData.totalFatal})`;
+      const execHtml = buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl });
+      const execText = buildGmBhExecutiveSummaryText({ summaryData, portalBaseUrl });
+
+      let dispatchResult = null;
+      let dispatchError = null;
+
+      try {
+        dispatchResult = await dispatchEmail({
+          to: leadershipEmails,
+          subject: execSubject,
+          html: execHtml,
+          text: execText
+        });
+      } catch (err) {
+        console.error('Failed to dispatch Executive Summary email to leadership:', err.message);
+        dispatchError = err.message;
+      }
+
+      const logStatus = dispatchError ? 'FAILED' : (dryRun ? 'DRY_RUN' : 'SENT');
+
+      // Record dispatch log
+      try {
+        if (!dryRun) {
+          await supabase.from('daily_fe_fatal_dispatch_logs').insert({
+            digest_date: targetDate,
+            fe_code: 'EXECUTIVE_SUMMARY_GM_BH',
+            fe_name: 'GM & BH Executive Briefing',
+            fe_email: leadershipEmails.join(', '),
+            hub: 'NATIONAL',
+            fatal_count: summaryData.totalFatal,
+            total_audited: summaryData.totalAudited,
+            task_ids: [],
+            sent_status: logStatus,
+            error_message: dispatchError,
+            sent_at: new Date().toISOString()
+          });
+        }
+      } catch (logErr) {}
+
+      res.statusCode = dispatchError ? 500 : 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        success: !dispatchError,
+        mode: dryRun ? 'DRY_RUN_LEADERSHIP' : 'TRIAL_LEADERSHIP_ONLY',
+        digestDate: targetDate,
+        targetAudience: 'GM, BH & SuperAdmin Only',
+        recipients: leadershipEmails,
+        provider: provider || (dryRun ? 'dryRun' : 'none'),
+        dispatchResult,
+        error: dispatchError,
+        summary: {
+          totalAudited: summaryData.totalAudited,
+          totalPassed: summaryData.totalPassed,
+          totalFatal: summaryData.totalFatal,
+          passRate: summaryData.passRate,
+          fatalRate: summaryData.fatalRate,
+          hubsCovered: summaryData.hubBreakdown.length,
+          fatalFEsCount: summaryData.feFatalList.length
+        }
+      }));
+      return;
+    }
+
+    // ====================================================================
+    // 7B. NORMAL FE-LEVEL FATAL STRIKE DISPATCH
+    // Strictly dispatched to FEs with >= 1 Fatal strike (CC: direct AM & RM)
+    // ====================================================================
     const results = [];
     let sentCount = 0;
     let skippedCount = 0;
@@ -205,7 +387,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       // Check if all fatal tasks for this FE were already notified and force isn't set
       const allTasksAlreadyNotified = !force && feDigest.fatalTasks.every(t => {
         const sourceTask = (tasks || []).find(st => (st.id || st.taskId) === t.taskId);
-        return sourceTask?.email_notified === true || sourceTask?.email_sent === true;
+        return sourceTask?.email_sent === true;
       });
 
       if (!force && (alreadyDispatchedFeCodes.has(feCodeLower) || allTasksAlreadyNotified)) {
@@ -247,7 +429,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
 
       const logStatus = dispatchError ? 'FAILED' : (dryRun ? 'DRY_RUN' : 'SENT');
 
-      // Update Supabase tasks: mark email_notified = true
+      // Update Supabase tasks: mark email_sent = true
       if (logStatus === 'SENT' || logStatus === 'DRY_RUN') {
         const fatalTaskIds = feDigest.fatalTasks.map(ft => ft.taskId).filter(Boolean);
         if (fatalTaskIds.length > 0 && !dryRun) {
@@ -255,7 +437,6 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
             await supabase
               .from('tasks')
               .update({
-                email_notified: true,
                 email_sent: true,
                 email_sent_at: new Date().toISOString(),
                 email_recipients: [toEmail, ...ccEmails],
@@ -263,7 +444,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
               })
               .in('id', fatalTaskIds);
           } catch (taskUpdErr) {
-            console.warn('Could not update task email_notified status:', taskUpdErr.message);
+            console.warn('Could not update task email_sent status:', taskUpdErr.message);
           }
         }
       }

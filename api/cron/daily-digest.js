@@ -143,15 +143,16 @@ export async function dailyDigestCronHandler(req, res) {
       }
     }
 
-    // 6. Setup Email Provider (Resend or SMTP)
+    // 6. Setup Email Provider (Brevo API | Resend | SMTP)
+    const brevoApiKey = body.credentials?.brevoApiKey || process.env.BREVO_API_KEY;
     const resendApiKey = body.credentials?.resendApiKey || process.env.RESEND_API_KEY;
     const smtpHost = body.credentials?.smtpHost || process.env.SMTP_HOST;
     const smtpUser = body.credentials?.smtpUser || process.env.SMTP_USER;
     const smtpPass = body.credentials?.smtpPass || process.env.SMTP_PASS;
     const smtpPort = body.credentials?.smtpPort || process.env.SMTP_PORT || 587;
-    const fromAddress = body.credentials?.fromAddress || process.env.EMAIL_FROM || 'Lenskart Quality Audit <onboarding@resend.dev>';
+    const fromAddress = body.credentials?.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@lenskart.com>';
 
-    const provider = resendApiKey ? 'resend' : smtpHost ? 'smtp' : null;
+    const provider = brevoApiKey ? 'brevo' : resendApiKey ? 'resend' : smtpHost ? 'smtp' : null;
 
     // Helper: Dispatch single email
     const dispatchEmail = async ({ to, subject, html, text }) => {
@@ -160,7 +161,47 @@ export async function dailyDigestCronHandler(req, res) {
       }
 
       if (!provider) {
-        throw new Error('No email service configured (Resend API Key or SMTP credentials required).');
+        throw new Error('No email service configured (Brevo API Key, Resend API Key, or SMTP credentials required).');
+      }
+
+      if (provider === 'brevo') {
+        let senderName = 'Lenskart Quality Audit';
+        let senderEmail = 'kshitijbagal@lenskart.com';
+        if (fromAddress && fromAddress.includes('@')) {
+          const match = fromAddress.match(/(.*?)\s*<(.+?)>/);
+          if (match) {
+            senderName = match[1].trim() || senderName;
+            senderEmail = match[2].trim();
+          } else {
+            senderEmail = fromAddress.trim();
+          }
+        }
+
+        const toList = (Array.isArray(to) ? to : [to]).map(e => ({ email: typeof e === 'string' ? e.trim() : e.email }));
+
+        const brevoPayload = {
+          sender: { name: senderName, email: senderEmail },
+          to: toList,
+          subject,
+          htmlContent: html,
+          textContent: text
+        };
+
+        const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+          method: 'POST',
+          headers: {
+            'api-key': brevoApiKey,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify(brevoPayload)
+        });
+
+        const respData = await resp.json();
+        if (!resp.ok) {
+          throw new Error(`Brevo Error (${resp.status}): ${respData.message || JSON.stringify(respData)}`);
+        }
+        return { success: true, id: respData.messageId, provider: 'brevo' };
       }
 
       if (provider === 'resend') {
