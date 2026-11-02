@@ -256,10 +256,10 @@ Locus_Auditor/
 ### G. Smart Auto-Allocation & Roster Balancing
 - **Component File**: [`src/components/AutoAllocationRoster.jsx`](file:///c:/Users/kshitijbagal/Desktop/Locus_Auditor/src/components/AutoAllocationRoster.jsx)
 - **Features**:
-  - **Comprehensive Auditor Pool (Auditors, City Admins & Central Ops)**:
-    - Both `City Admin` and `Central Ops` roles carry `'Audits'` console access in `ROLE_PRESETS`.
-    - Active staff holding `City Admin` and `Central Ops` roles are automatically recognized and included in the roster, workload tracking, filter dropdowns, and equal auto-allocation algorithm alongside dedicated Auditors.
-    - Clear visual role badges (`City Admin`, `Central Ops`, `Auditor`) are displayed in the live roster table.
+  - **City Admin Audit Pool (Operational Policy)**:
+    - In accordance with current operations (no dedicated personnel for pure Auditor role), **City Admins who hold access to the Audits Console** handle all photo quality auditing.
+    - Active staff holding `City Admin` / `Admin` roles with audit access are automatically recognized and displayed in the live roster, workload tracking, filter dropdowns, and equal auto-allocation algorithm.
+    - Strictly excludes non-auditing management and field roles (`AM`, `RM`, `GM`, `BH`, `FE`, `SuperAdmin`).
   - **Daily Attendance & Shift Roster**: Marks shift status (`AVAILABLE`, `ON_LEAVE`, `HALF_DAY`, `TRAINING`) with real-time Supabase persistence.
   - **Auditable-Only Filtering**: Isolates tasks with uploaded photos (`hasImages === true` and `imageCount > 0`). Text-only or cancelled tasks without photos are never allocated.
   - **Equal Load Balancing Algorithm** ([`src/lib/supabase.js`](file:///c:/Users/kshitijbagal/Desktop/Locus_Auditor/src/lib/supabase.js)): Divides pending photo tasks evenly across active roster members with capacity weights (`1.0` for full day, `0.5` for half day).
@@ -361,13 +361,19 @@ Locus_Auditor/
 - **Rapid Submissions**:
   - `[p]`: Instantly marks audit as **PASSED** and auto-advances to the next queued task
   - `[f]`: Opens the **Blanket Fatal Modal** overlay
-- **Blanket Fatal Modal Overlay**:
+- **Blanket Fatal Modal Overlay (Triggered by Hotkey `[f]`)**:
   - Rapid-fire modal with top 3 objective auditor reasons:
     1. *All images missing / blank / black*
     2. *All images heavily blurred / unreadable*
     3. *Duplicate / recycled images detected*
   - Press `[1]`, `[2]`, or `[3]` (or `[ArrowUp]` / `[ArrowDown]` + `[Enter]`): Immediately marks task `FATAL` with selected reason, records `email_notified = false`, closes modal, and advances to next pending task.
   - `[Escape]`: Cancels and returns to regular audit.
+- **Dedicated Modal UI Fatal Button (`FATAL AUDIT`)**:
+  - Dedicated bottom action button is strictly reserved for manual, verified non-compliance strikes.
+  - **Prerequisites for Submission**:
+    1. **At least 1 checkpoint must be explicitly marked as FAIL** (`criteriaStatus`). Without any failed items, the button cannot mark the task as fatal.
+    2. **At least 1 fatal failure criteria reason must be selected** (from common failure checklist or auditor remarks).
+  - Provides intuitive validation feedback with real-time badges (`Needs Fail`, `Pick Reason`, or `X Failed`) to prevent accidental or groundless fatal submissions.
 
 ---
 

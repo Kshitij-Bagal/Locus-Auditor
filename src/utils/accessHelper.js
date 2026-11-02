@@ -378,36 +378,38 @@ export function parseRoles(raw) {
 }
 
 /**
- * Determines whether a user is an actual auditor eligible for the daily audit roster
- * and workload allocation.
+ * Determines whether a user is eligible for the daily audit roster and workload allocation.
  * 
- * STRICT RULES:
- * - Dedicated Auditors, City Admins, and Central Ops perform audits -> TRUE
- * - Supervisory, Field & Governance roles (AM, RM, GM, BH, FE, SuperAdmin) DO NOT perform audits -> FALSE
+ * OPERATIONAL POLICIES:
+ * 1. Must have access to the Audits Console ('audits').
+ * 2. Dedicated Auditor personnel do not exist currently; all auditing is handled by City Admins.
+ * 3. Strictly excludes supervisory, field, and governance roles (AM, RM, GM, BH, FE, SuperAdmin)
+ *    and non-City-Admin roles from photo audit allocations.
  */
 export function isEligibleForAuditRoster(user) {
   if (!user || user.is_active === false) return false;
   
+  // 1. Must have granted or preset access to the Audits Console
+  if (!hasAccess(user, 'audits')) {
+    return false;
+  }
+
   const primaryRole = normalizeRoleName(user.role);
-  
-  // Strictly excluded management, field, and governance roles (they will NEVER do photo audits)
+  const roles = parseRoles(user.roles || [user.role]);
+
+  // Strictly exclude top-level governance & field roles (they do not perform photo audits)
   const EXCLUDED_ROLES = ['AM', 'RM', 'GM', 'BH', 'FE', 'SuperAdmin'];
   if (EXCLUDED_ROLES.includes(primaryRole)) {
     return false;
   }
-  
-  // Explicitly allowed audit-performing roles
-  const AUDITOR_ROLES = ['Auditor', 'City Admin', 'Admin', 'Central Ops'];
-  if (AUDITOR_ROLES.includes(primaryRole)) {
-    return true;
-  }
-  
-  // Multi-role validation
-  const roles = parseRoles(user.roles || []);
-  const hasAuditorRole = roles.some(r => AUDITOR_ROLES.includes(r));
-  const hasExcludedRole = roles.some(r => EXCLUDED_ROLES.includes(r));
-  
-  return hasAuditorRole && !hasExcludedRole;
+
+  // Currently, only City Admins handle audits (no dedicated auditor personnel available)
+  const isCityAdmin = primaryRole === 'City Admin' || 
+                      primaryRole === 'Admin' || 
+                      roles.includes('City Admin') || 
+                      roles.includes('Admin');
+
+  return isCityAdmin;
 }
 
 // Local storage cache key for user granted pages

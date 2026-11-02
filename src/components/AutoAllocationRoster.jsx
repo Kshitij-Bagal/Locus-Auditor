@@ -34,9 +34,9 @@ export default function AutoAllocationRoster({
 }) {
   const allocateCallback = onAutoAllocate || onTasksAllocated;
 
-  // Filter real auditors from active users list:
-  // Dedicated Auditors, City Admins, and Central Ops who carry photo audit responsibilities
-  // (Strictly excludes AM, RM, GM, BH, FE, SuperAdmin)
+  // Filter eligible auditors from active users list:
+  // Operational Policy: City Admins who hold access to the Audits page handle all photo auditing.
+  // (Strictly excludes non-City-Admin and management roles: AM, RM, GM, BH, FE, SuperAdmin)
   const actualAuditorsFromUsers = useMemo(() => {
     return (users || []).filter(isEligibleForAuditRoster);
   }, [users]);
@@ -350,7 +350,7 @@ export default function AutoAllocationRoster({
             Equal Task Distribution & Auditor Allocations
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Divides 100% of pending tasks with photos equally among active auditors, City Admins, and Central Ops on shift in Supabase. Each member only sees their allocated queue.
+            Divides 100% of pending tasks with photos equally among active City Admins handling auditing on shift in Supabase. Each member only sees their allocated queue.
           </p>
         </div>
 

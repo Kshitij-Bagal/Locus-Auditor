@@ -201,21 +201,43 @@ export default function AuditModal({
     else onClose();
   };
 
+  // Count checkpoints marked as FAIL
+  const failedCheckpoints = useMemo(() => {
+    return Object.entries(criteriaStatus).filter(([_, status]) => status === 'FAIL').map(([id]) => id);
+  }, [criteriaStatus]);
+
+  const hasFatalCriteria = selectedViolations.length > 0 || Boolean(customRemark && customRemark.trim().length > 0);
+  const canSubmitFatal = failedCheckpoints.length > 0 && hasFatalCriteria;
+
   const handleConfirmFatal = () => {
-    if (selectedViolations.length === 0 && !customRemark.trim()) {
-      alert('Please select at least one violation reason or write a specific remark for the FATAL penalty.');
+    // 1. Strict Requirement: Without any failed items, no one can mark fatal by clicking the button!
+    if (failedCheckpoints.length === 0) {
+      alert('Cannot mark as FATAL: No checkpoint/item has been marked as FAIL. You must mark at least one checkpoint as FAIL before submitting a fatal audit.');
       return;
     }
+
+    // 2. Strict Requirement: Must select at least 1 criteria reason or provide specific remarks for fatal
+    if (!hasFatalCriteria) {
+      alert('Please select at least one fatal failure criteria reason (or enter specific feedback) for the failed items.');
+      setRightPanelTab('sop');
+      setActiveZone('criteria');
+      setShowFatalPicker(true);
+      return;
+    }
+
     onFatalAudit(task.id, {
-      failedReasons: selectedViolations.length > 0 ? selectedViolations : [customRemark],
-      remarks: customRemark,
+      failedReasons: selectedViolations.length > 0 ? selectedViolations : [customRemark.trim()],
+      remarks: customRemark.trim(),
       criteriaStatus: {
-        ...criteriaStatus,
-        [currentCriterion.id || currentCriterion.imageKey]: 'FAIL'
+        ...criteriaStatus
       },
       replacements: replacements,
-      taskData: task
+      taskData: task,
+      emailNotified: false
     });
+
+    if (hasNext) onNextTask();
+    else onClose();
   };
 
   // ====================================================================
@@ -1019,14 +1041,35 @@ export default function AuditModal({
 
               <button
                 type="button"
-                onClick={() => {
-                  setShowBlanketFatalModal(true);
-                  setBlanketReasonIndex(0);
-                }}
-                className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white shadow-lg shadow-red-500/20 flex items-center justify-center gap-1.5 transition-all cursor-pointer fatal-pulse"
+                onClick={handleConfirmFatal}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  canSubmitFatal
+                    ? 'bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white shadow-lg shadow-red-500/20 fatal-pulse'
+                    : 'bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 hover:border-slate-600'
+                }`}
+                title={
+                  failedCheckpoints.length === 0
+                    ? 'Requires at least 1 checkpoint marked as FAIL'
+                    : !hasFatalCriteria
+                    ? 'Requires at least 1 fatal failure criteria reason selected'
+                    : 'Click to record FATAL penalty for failed items'
+                }
               >
-                <AlertTriangle className="w-4 h-4" />
-                BLANKET FATAL (F)
+                <AlertTriangle className={`w-4 h-4 ${canSubmitFatal ? 'text-white' : 'text-amber-400'}`} />
+                <span>FATAL AUDIT</span>
+                {failedCheckpoints.length === 0 ? (
+                  <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-slate-900 text-slate-400 border border-slate-700">
+                    Needs Fail
+                  </span>
+                ) : !hasFatalCriteria ? (
+                  <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    Pick Reason
+                  </span>
+                ) : (
+                  <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-white/20 text-white font-mono">
+                    {failedCheckpoints.length} Failed
+                  </span>
+                )}
               </button>
             </div>
 
