@@ -18,6 +18,7 @@ import AccessControlPanel from './components/AccessControlPanel.jsx';
 import SuperAdminCronEngine from './components/SuperAdminCronEngine.jsx';
 import ClusterManagerPortal from './components/ClusterManagerPortal.jsx';
 import FatalObjectionHub from './components/FatalObjectionHub.jsx';
+import ImageForensicsLab from './components/ImageForensicsLab.jsx';
 
 import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi, settingsApi } from './api/client.js';
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
@@ -1527,6 +1528,13 @@ export default function App() {
               const fresh = await tasksApi.getTasks();
               if (fresh) setTasks(fresh);
             }}
+          />
+        )}
+
+        {/* PAGE 11: IMAGE FORENSICS & DEDUPLICATION LAB */}
+        {activePage === 'forensicsLab' && (
+          <ImageForensicsLab
+            tasks={tasks}
           />
         )}
 

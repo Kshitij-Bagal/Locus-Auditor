@@ -16,7 +16,8 @@ import {
   Key,
   Briefcase,
   Scale,
-  Mail
+  Mail,
+  Fingerprint
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -108,6 +109,12 @@ export default function Navbar({
       label: 'Fatal objection',
       icon: Scale,
       allowedRoles: ['SuperAdmin', 'GM']
+    },
+    {
+      id: 'forensicsLab',
+      label: 'Forensics Lab',
+      icon: Fingerprint,
+      allowedRoles: ['Auditor', 'Central Ops', 'GM', 'BH', 'SuperAdmin']
     }
   ];
 

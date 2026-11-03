@@ -94,6 +94,13 @@ export const SYSTEM_PAGES = [
     fullName: 'Daily Fatal Mail Dispatch Engine',
     description: 'Automated & manual FE fatal notification dispatch, leadership digests, and delivery logs',
     category: 'Governance'
+  },
+  {
+    id: 'forensicsLab',
+    label: 'Forensics Lab',
+    fullName: 'Image Forensics & Deduplication Lab',
+    description: 'Inspect photo metadata, SHA-256 byte fingerprints, and perceptual dHash reuse',
+    category: 'Governance'
   }
 ];
 
@@ -110,7 +117,8 @@ export const PAGE_ID_TO_LABEL = {
   users: 'User Accounts',
   accessControl: 'Access Control',
   fatalObjection: 'Fatal objection',
-  emailDispatch: 'Mail Dispatch'
+  emailDispatch: 'Mail Dispatch',
+  forensicsLab: 'Forensics Lab'
 };
 
 export const PAGE_LABEL_TO_ID = {
@@ -129,7 +137,10 @@ export const PAGE_LABEL_TO_ID = {
   'Fatal objection': 'fatalObjection',
   'Fatal Objection': 'fatalObjection',
   'Mail Dispatch': 'emailDispatch',
-  'Email Dispatch': 'emailDispatch'
+  'Email Dispatch': 'emailDispatch',
+  'Forensics Lab': 'forensicsLab',
+  'Image Forensics Lab': 'forensicsLab',
+  'Image Forensics': 'forensicsLab'
 };
 
 // 9 Standard Corporate Roles represented in the system
@@ -160,7 +171,8 @@ export const DEFAULT_ROLE_PRESETS = {
     'User Accounts',
     'Access Control',
     'Fatal objection',
-    'Mail Dispatch'
+    'Mail Dispatch',
+    'Forensics Lab'
   ],
   'City Admin': [
     'Audits',
@@ -171,7 +183,8 @@ export const DEFAULT_ROLE_PRESETS = {
     'Tool Orders'
   ],
   Auditor: [
-    'Audits'
+    'Audits',
+    'Forensics Lab'
   ],
   AM: [
     'Tool Orders',
@@ -185,7 +198,8 @@ export const DEFAULT_ROLE_PRESETS = {
     'Audits',
     'Upload Task',
     'Tool Orders',
-    'Cluster Oversight'
+    'Cluster Oversight',
+    'Forensics Lab'
   ],
   GM: [
     'Audits',
@@ -196,7 +210,8 @@ export const DEFAULT_ROLE_PRESETS = {
     'Tool Orders',
     'Cluster Oversight',
     'Fatal objection',
-    'Mail Dispatch'
+    'Mail Dispatch',
+    'Forensics Lab'
   ],
   BH: [
     'Audits',
@@ -204,7 +219,8 @@ export const DEFAULT_ROLE_PRESETS = {
     'D + 1 Escalations',
     'Quality Rules',
     'Cluster Oversight',
-    'Mail Dispatch'
+    'Mail Dispatch',
+    'Forensics Lab'
   ],
   FE: [
     'My Visits'
