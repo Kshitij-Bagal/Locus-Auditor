@@ -614,24 +614,50 @@ export function aggregateFeFatalDigests({
     const feKey = String(t.feCode || t.fe_code || t.feId || t.fe_id || t.feName || 'unknown').trim().toLowerCase();
 
     if (!feMap.has(feKey)) {
-      // Find matching FE profile in users registry
+      // Find matching FE profile in users registry (Intelligent multi-attribute match)
+      const tCode = String(t.feCode || t.fe_code || t.feId || '').trim().toLowerCase();
+      const tEmail = String(t.feEmail || t.fe_email || '').trim().toLowerCase();
+      const tName = String(t.feName || t.fe_name || '').trim().toLowerCase();
+
       const feUser = users.find(u => {
         if (!u) return false;
         const uCode = String(u.employee_code || u.person_id || '').trim().toLowerCase();
         const uEmail = String(u.email || '').trim().toLowerCase();
         const uName = String(u.full_name || '').trim().toLowerCase();
-        const tCode = String(t.feCode || t.fe_code || t.feId || '').trim().toLowerCase();
-        const tEmail = String(t.feEmail || t.fe_email || '').trim().toLowerCase();
-        const tName = String(t.feName || t.fe_name || '').trim().toLowerCase();
 
-        return (tCode && uCode === tCode) ||
-               (tEmail && uEmail === tEmail) ||
-               (tName && uName === tName);
+        // 1. Match on FE code (e.g. LKH1703) in uCode, uEmail, or uName
+        if (tCode) {
+          if (uCode === tCode || uEmail.startsWith(tCode) || uEmail.includes(tCode) || uName.includes(tCode)) {
+            return true;
+          }
+        }
+        // 2. Exact email match
+        if (tEmail && uEmail && tEmail === uEmail) return true;
+        // 3. Name match (e.g. 'LKH1703_Amit Kumar Gouda' contains 'Amit Kumar Gouda')
+        if (tName && tName.length >= 3) {
+          if (uName === tName || uName.includes(tName) || tName.includes(uName)) {
+            return true;
+          }
+        }
+        return false;
       });
 
-      // Resolve direct Area Manager (AM)
+      const hub = String(t.facilityCode || t.facility_code || t.city || t.teamName || feUser?.facility_code || feUser?.city || '').trim();
+      const hubLower = hub.toLowerCase();
+
+      // 1. Resolve direct Area Manager (AM)
       let amEmail = feUser?.reporting_manager_email || t.amEmail || t.reporting_manager_email;
       let amName = feUser?.reporting_manager_name || t.amName || t.reporting_manager_name;
+
+      if (!amEmail && amName) {
+        const amObj = users.find(u => {
+          const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+          const target = String(amName).trim().toLowerCase();
+          return (uName === target || uName.includes(target) || target.includes(uName)) && u.email;
+        });
+        if (amObj) amEmail = amObj.email;
+      }
+
       if ((!amEmail || !amName) && feUser?.reporting_manager_id) {
         const amObj = users.find(u => String(u.id) === String(feUser.reporting_manager_id));
         if (amObj) {
@@ -640,9 +666,38 @@ export function aggregateFeFatalDigests({
         }
       }
 
-      // Resolve Regional Manager (RM)
+      // Fallback AM by Hub/Facility
+      if (!amEmail && hubLower) {
+        const amObj = users.find(u => {
+          const roles = u.roles || [u.role];
+          const isAM = roles.some(r => String(r).toUpperCase() === 'AM' || String(r).toLowerCase().includes('area manager'));
+          const uHub = String(u.facility_code || u.city || '').toLowerCase();
+          return isAM && (uHub.includes(hubLower) || hubLower.includes(uHub));
+        });
+        if (amObj) {
+          amEmail = amObj.email;
+          amName = amName || amObj.full_name;
+        }
+      }
+
+      // 2. Resolve Regional Manager (RM)
       let rmEmail = feUser?.regional_manager_email || t.rmEmail || t.regional_manager_email;
       let rmName = feUser?.regional_manager_name || t.rmName || t.regional_manager_name;
+
+      if (!rmEmail && rmName) {
+        const rmObj = users.find(u => {
+          const roles = u.roles || [u.role];
+          const isRM = roles.some(r => String(r).toUpperCase() === 'RM' || String(r).toLowerCase().includes('regional manager'));
+          const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+          const target = String(rmName).trim().toLowerCase();
+          return isRM && (uName === target || uName.includes(target) || target.includes(uName)) && u.email;
+        });
+        if (rmObj) {
+          rmEmail = rmObj.email;
+          rmName = rmObj.full_name || rmName;
+        }
+      }
+
       if ((!rmEmail || !rmName) && feUser?.regional_manager_id) {
         const rmObj = users.find(u => String(u.id) === String(feUser.regional_manager_id));
         if (rmObj) {
@@ -651,28 +706,17 @@ export function aggregateFeFatalDigests({
         }
       }
 
-      // Fallback AM by Hub
-      const hub = t.facilityCode || t.facility_code || t.city || t.teamName || feUser?.facility_code || feUser?.city;
-      if (!amEmail && hub) {
-        const amObj = users.find(u => {
-          const roles = u.roles || [u.role];
-          return roles.includes('AM') && (u.facility_code === hub || u.city === hub);
-        });
-        if (amObj) {
-          amEmail = amObj.email;
-          amName = amObj.full_name;
-        }
-      }
-
-      // Fallback RM
-      if (!rmEmail) {
+      // Fallback RM strictly by City / Hub / Zone
+      if (!rmEmail && hubLower) {
         const rmObj = users.find(u => {
           const roles = u.roles || [u.role];
-          return roles.includes('RM');
+          const isRM = roles.some(r => String(r).toUpperCase() === 'RM' || String(r).toLowerCase().includes('regional manager'));
+          const uCity = String(u.city || u.facility_code || '').toLowerCase();
+          return isRM && (uCity.includes(hubLower) || hubLower.includes(uCity));
         });
         if (rmObj) {
           rmEmail = rmObj.email;
-          rmName = rmObj.full_name;
+          rmName = rmName || rmObj.full_name;
         }
       }
 

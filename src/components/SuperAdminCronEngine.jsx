@@ -134,6 +134,47 @@ export default function SuperAdminCronEngine({
     };
   }, [tasks, targetDate, feDigests]);
 
+  // Dynamic Leadership Recipients resolved directly from real database users (GM, BH & SuperAdmin)
+  const leadershipRecipients = useMemo(() => {
+    const list = [];
+    const seen = new Set();
+    (users || []).forEach(u => {
+      const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+      const isEligible = roles.some(r => {
+        const rNorm = String(r || '').toLowerCase();
+        return rNorm === 'gm' || 
+               rNorm === 'bh' || 
+               rNorm === 'superadmin' || 
+               rNorm.includes('general manager') || 
+               rNorm.includes('business head');
+      });
+      const email = (u.email || '').trim().toLowerCase();
+      const isRealEmail = email && 
+                          email.includes('@') && 
+                          !email.includes('example.com') && 
+                          !email.includes('demo') && 
+                          !email.includes('gm.quality') && 
+                          !email.includes('bh.lenskart');
+      if (isEligible && isRealEmail && !seen.has(email)) {
+        seen.add(email);
+        list.push({
+          name: u.full_name || u.name || 'Executive',
+          email,
+          role: u.role || roles[0] || 'Leadership'
+        });
+      }
+    });
+
+    if (list.length === 0) {
+      return [
+        { name: 'Mayank Gupta', email: 'mayank.gupta1@lenskart.in', role: 'GM' },
+        { name: 'Ankita Aggarwal', email: 'ankita.aggarwal@lenskart.com', role: 'BH' },
+        { name: 'Kshitij Bagal', email: 'kshitijbagal@lenskart.com', role: 'SuperAdmin' }
+      ];
+    }
+    return list;
+  }, [users]);
+
   // Filter FE digests by search query
   const filteredFeDigests = useMemo(() => {
     if (!searchQuery.trim()) return feDigests;
@@ -212,7 +253,8 @@ export default function SuperAdminCronEngine({
         date: targetDate,
         tasks,
         users,
-        dryRun: isDryRun
+        dryRun: isDryRun,
+        leadershipEmails: leadershipRecipients.map(r => r.email)
       });
 
       setExecutiveDispatchResult(res);
@@ -435,12 +477,12 @@ export default function SuperAdminCronEngine({
         {/* Target leadership recipients list */}
         <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="font-semibold text-slate-300">Trial Recipients (GM, BH &amp; SuperAdmin):</span>
-            <span className="px-2 py-0.5 rounded bg-slate-800/80 text-sky-300 font-mono text-[11px]">gm.quality@lenskart.in</span>
-            <span className="px-2 py-0.5 rounded bg-slate-800/80 text-purple-300 font-mono text-[11px]">bh.lenskart@lenskart.in</span>
-            <span className="px-2 py-0.5 rounded bg-slate-800/80 text-amber-300 font-mono text-[11px]">kshitijbagal@lenskart.com</span>
-            <span className="px-2 py-0.5 rounded bg-slate-800/80 text-indigo-300 font-mono text-[11px]">mayank.gupta1@lenskart.in</span>
-            <span className="px-2 py-0.5 rounded bg-slate-800/80 text-rose-300 font-mono text-[11px]">ankita.aggarwal@lenskart.com</span>
+            <span className="font-semibold text-slate-300">Trial Leadership Recipients:</span>
+            {leadershipRecipients.map(r => (
+              <span key={r.email} className="px-2 py-0.5 rounded bg-slate-800/80 text-sky-300 font-mono text-[11px] border border-slate-700/60 shadow-sm">
+                {r.name} ({r.role}): {r.email}
+              </span>
+            ))}
           </div>
 
           <div className="text-[11px] text-slate-400">
@@ -842,9 +884,11 @@ export default function SuperAdminCronEngine({
             <div className="p-3 bg-slate-950/70 border-b border-slate-800 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-bold text-slate-400">Target Leadership Group:</span>
-                <span className="text-sky-300">gm.quality@lenskart.in (GM)</span> &bull;
-                <span className="text-purple-300">bh.lenskart@lenskart.in (BH)</span> &bull;
-                <span className="text-amber-300">kshitijbagal@lenskart.com (SuperAdmin)</span>
+                {leadershipRecipients.map((r, i) => (
+                  <span key={r.email} className="text-sky-300">
+                    {r.name} ({r.role}): {r.email}{i < leadershipRecipients.length - 1 ? ' • ' : ''}
+                  </span>
+                ))}
               </div>
               <span className="text-[11px] text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
                 Trial Mode: 0 Emails Sent to Field Executives

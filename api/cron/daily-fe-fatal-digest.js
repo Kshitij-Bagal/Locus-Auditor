@@ -302,8 +302,10 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
                    rNorm.includes('general manager') || 
                    rNorm.includes('business head');
           });
-          if (isEligible && u.email && u.email.includes('@')) {
-            leadershipEmails.push(u.email.trim().toLowerCase());
+          const email = (u.email || '').trim().toLowerCase();
+          const isReal = email && email.includes('@') && !email.includes('example.com') && !email.includes('demo') && !email.includes('gm.quality') && !email.includes('bh.lenskart');
+          if (isEligible && isReal) {
+            leadershipEmails.push(email);
           }
         });
 
@@ -314,11 +316,9 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       // Fallback defaults if none found
       if (leadershipEmails.length === 0) {
         leadershipEmails = [
-          'kshitijbagal@lenskart.com',
-          'gm.quality@lenskart.in',
-          'bh.lenskart@lenskart.in',
           'mayank.gupta1@lenskart.in',
-          'ankita.aggarwal@lenskart.com'
+          'ankita.aggarwal@lenskart.com',
+          'kshitijbagal@lenskart.com'
         ];
       }
 
