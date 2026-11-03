@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { 
   normalizeDateToYMD, 
+  getTaskBatchDateYMD,
   aggregateFeFatalDigests, 
   buildFeFatalWarningEmailHtml,
   aggregateGmBhExecutiveSummary,
@@ -38,7 +39,36 @@ export default function SuperAdminCronEngine({
   users = [],
   currentUser
 }) {
+  // Available upload batch dates in tasks
+  const availableBatchDates = useMemo(() => {
+    const map = new Map();
+    (tasks || []).forEach(t => {
+      const d = getTaskBatchDateYMD(t);
+      if (!d) return;
+      const current = map.get(d) || { total: 0, fatal: 0, passed: 0 };
+      current.total++;
+      const st = (t.auditStatus || t.audit_status || '').toUpperCase();
+      if (st === 'FATAL') current.fatal++;
+      else if (st === 'PASSED') current.passed++;
+      map.set(d, current);
+    });
+    return Array.from(map.entries())
+      .map(([date, stats]) => ({ date, ...stats }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [tasks]);
+
   const [targetDate, setTargetDate] = useState(() => normalizeDateToYMD(new Date()));
+
+  // Auto-align targetDate to the latest upload batch if today has no uploads
+  useEffect(() => {
+    if (availableBatchDates.length > 0) {
+      const hasSelected = availableBatchDates.some(b => b.date === targetDate);
+      if (!hasSelected) {
+        setTargetDate(availableBatchDates[0].date);
+      }
+    }
+  }, [availableBatchDates]);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [forceRedispatch, setForceRedispatch] = useState(false);
   const [isDispatching, setIsDispatching] = useState(false);
@@ -73,15 +103,17 @@ export default function SuperAdminCronEngine({
     });
   }, [tasks, users, targetDate, portalBaseUrl]);
 
-  // Overall metrics for the day
+  // Overall metrics for the upload batch
   const dayStats = useMemo(() => {
     let dayTotalAudited = 0;
     let dayPassed = 0;
     let dayFatals = 0;
+    let dayTotalUploaded = 0;
 
     tasks.forEach(t => {
-      const taskDate = (t.auditedAt || t.audited_at || t.dispatchDate || t.dispatch_date || '').slice(0, 10);
+      const taskDate = getTaskBatchDateYMD(t);
       if (taskDate !== targetDate) return;
+      dayTotalUploaded++;
       const status = (t.auditStatus || t.audit_status || '').toUpperCase();
       if (status === 'PASSED') {
         dayTotalAudited++;
@@ -93,6 +125,7 @@ export default function SuperAdminCronEngine({
     });
 
     return {
+      dayTotalUploaded,
       dayTotalAudited,
       dayPassed,
       dayFatals,
@@ -276,15 +309,29 @@ export default function SuperAdminCronEngine({
         {/* Date Selector Card */}
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-col justify-between">
           <div className="flex items-center justify-between text-xs text-slate-400 font-semibold">
-            <span>Target Audit Date</span>
+            <span>Target Upload Date</span>
             <Calendar className="w-4 h-4 text-sky-400" />
           </div>
-          <input
-            type="date"
-            value={targetDate}
-            onChange={(e) => setTargetDate(e.target.value)}
-            className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500"
-          />
+          {availableBatchDates.length > 0 ? (
+            <select
+              value={targetDate}
+              onChange={(e) => setTargetDate(e.target.value)}
+              className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500 font-mono cursor-pointer"
+            >
+              {availableBatchDates.map(b => (
+                <option key={b.date} value={b.date}>
+                  {b.date} ({b.total} uploaded • {b.fatal} fatals)
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="date"
+              value={targetDate}
+              onChange={(e) => setTargetDate(e.target.value)}
+              className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500"
+            />
+          )}
         </div>
 
         {/* Total Day Audits */}

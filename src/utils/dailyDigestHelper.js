@@ -9,8 +9,17 @@
 // Helper: Normalize any date input to YYYY-MM-DD in local/Asia-Kolkata timezone
 export function normalizeDateToYMD(dateInput = new Date()) {
   try {
+    if (!dateInput) return new Date().toISOString().slice(0, 10);
     if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.trim())) {
       return dateInput.trim();
+    }
+    // Handle DD/MM/YYYY or DD/MM/YYYY HH:mm AM/PM (e.g. '01/11/2026 06:30 AM')
+    if (typeof dateInput === 'string' && /^\d{1,2}\/\d{1,2}\/\d{4}/.test(dateInput.trim())) {
+      const parts = dateInput.trim().split(/[\s/]+/);
+      const day = parts[0].padStart(2, '0');
+      const month = parts[1].padStart(2, '0');
+      const year = parts[2];
+      return `${year}-${month}-${day}`;
     }
     const d = new Date(dateInput);
     if (isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
@@ -37,13 +46,26 @@ export function getRolling7DayRange(targetDateStr) {
   };
 }
 
-// Helper: Parse task audit date
-export function getTaskAuditDateYMD(task) {
+// Helper: Parse task batch date
+// STRICT RULE: Prioritize Upload Date (uploadedAt / created_at) so that delayed audits completed in the morning
+// (e.g. 5:00 AM) remain in their original upload day's batch rather than leaking into the next day.
+export function getTaskBatchDateYMD(task) {
   if (!task) return '';
-  const dateField = task.auditedAt || task.audited_at || task.dispatchDate || task.dispatch_date;
+  const dateField = task.uploadedAt || 
+                    task.uploaded_at || 
+                    task.createdAt || 
+                    task.created_at || 
+                    task.dispatchDate || 
+                    task.dispatch_date || 
+                    task.date || 
+                    task.auditedAt || 
+                    task.audited_at;
   if (!dateField) return '';
   return normalizeDateToYMD(dateField);
 }
+
+// Backwards compatibility alias
+export const getTaskAuditDateYMD = getTaskBatchDateYMD;
 
 /**
  * Filter tasks assigned or reporting to a specific manager (AM or RM)

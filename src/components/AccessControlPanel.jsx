@@ -51,14 +51,13 @@ export default function AccessControlPanel({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRoleFilter, setSelectedRoleFilter] = useState('ALL');
 
-  // Count pending fatal strikes for today
+  // Count pending fatal strikes waiting to be dispatched
   const pendingFatalFeCount = useMemo(() => {
-    const today = new Date().toISOString().slice(0, 10);
     const fatalFEs = new Set();
     (tasks || []).forEach(t => {
-      const d = (t.auditedAt || t.audited_at || t.dispatchDate || t.dispatch_date || '').slice(0, 10);
       const status = (t.auditStatus || t.audit_status || '').toUpperCase();
-      if (d === today && status === 'FATAL') {
+      const isSent = Boolean(t.emailSent || t.email_sent);
+      if (status === 'FATAL' && !isSent) {
         const feKey = t.feCode || t.fe_code || t.feId || t.feName;
         if (feKey) fatalFEs.add(feKey);
       }

@@ -84,7 +84,7 @@ export async function dailyDigestCronHandler(req, res) {
       const { data: dbTasks, error: taskErr } = await supabase
         .from('tasks')
         .select('*')
-        .order('audited_at', { ascending: false });
+        .order('created_at', { ascending: false });
       if (!taskErr && dbTasks) tasks = dbTasks;
       else tasks = [];
     }

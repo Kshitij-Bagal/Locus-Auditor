@@ -3,6 +3,7 @@ import nodemailer from 'nodemailer';
 import { Resend } from 'resend';
 import { 
   normalizeDateToYMD, 
+  getTaskBatchDateYMD,
   aggregateFeFatalDigests, 
   buildFeFatalWarningEmailHtml, 
   buildFeFatalWarningEmailText,
@@ -75,7 +76,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     }
     body = body || {};
 
-    const targetDate = query.date || body.date || normalizeDateToYMD(new Date());
+    let requestedDate = query.date || body.date;
     const force = query.force === 'true' || body.force === true;
     const feCodeTarget = query.feCode || body.feCode;
     const dryRun = query.dryRun === 'true' || body.dryRun === true;
@@ -94,7 +95,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       const { data: dbTasks, error: taskErr } = await supabase
         .from('tasks')
         .select('*')
-        .order('audited_at', { ascending: false });
+        .order('created_at', { ascending: false });
       if (!taskErr && dbTasks) tasks = dbTasks;
       else tasks = [];
     }
@@ -105,6 +106,19 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
         .select('*');
       if (!profErr && dbProfiles) users = dbProfiles;
       else users = [];
+    }
+
+    // Determine target upload date batch:
+    // If not explicitly provided in request, resolve to latest upload date with pending fatals or today
+    let targetDate = requestedDate;
+    if (!targetDate && tasks.length > 0) {
+      const pendingTask = tasks.find(t => (t.audit_status === 'FATAL' || t.auditStatus === 'FATAL') && !t.email_sent);
+      if (pendingTask) {
+        targetDate = getTaskBatchDateYMD(pendingTask);
+      }
+    }
+    if (!targetDate) {
+      targetDate = normalizeDateToYMD(new Date());
     }
 
     // 4. Aggregate FE-level fatal digests

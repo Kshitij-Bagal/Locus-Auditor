@@ -1854,7 +1854,7 @@ export const feFatalDigestApi = {
         if (!error && data) {
           if (!date) return data;
           return data.filter(t => {
-            const tDate = (t.audited_at || t.dispatch_date || '').slice(0, 10);
+            const tDate = (t.uploaded_at || t.created_at || t.dispatch_date || t.audited_at || '').slice(0, 10);
             return tDate === date;
           });
         }
