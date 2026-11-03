@@ -171,9 +171,9 @@ export default function FEPortal({
           </div>
         ) : (
           <div className="space-y-3">
-            {fatalTasks.map(task => (
+            {fatalTasks.map((task, idx) => (
               <div 
-                key={task.id}
+                key={`${task.id || task.taskId}_${idx}`}
                 className="bg-slate-900/90 border border-red-500/40 rounded-xl p-4 shadow-sm"
               >
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2.5 mb-3">

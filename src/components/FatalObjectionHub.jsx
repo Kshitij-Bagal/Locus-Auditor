@@ -272,7 +272,7 @@ export default function FatalObjectionHub({
             </p>
           </div>
         ) : (
-          filteredTasks.map(task => {
+          filteredTasks.map((task, idx) => {
             const disputeStatus = task.disputeStatus || task.dispute_status;
             const isMeetScheduled = disputeStatus === 'MEET_SCHEDULED';
             const isResolved = ['RESOLVED_OVERTURNED', 'RESOLVED_UPHELD'].includes(disputeStatus);
@@ -281,7 +281,7 @@ export default function FatalObjectionHub({
 
             return (
               <div
-                key={task.id}
+                key={`${task.id || task.taskId}_${idx}`}
                 className={`p-5 rounded-2xl bg-slate-900 border transition-all shadow-md space-y-3.5 ${
                   isMeetScheduled 
                     ? 'border-amber-500/50 hover:border-amber-400' 

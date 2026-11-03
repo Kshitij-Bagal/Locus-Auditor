@@ -69,7 +69,7 @@ export default function TaskTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700/50 text-slate-200">
-            {tasks.map((task) => {
+            {tasks.map((task, idx) => {
               const isSelected = selectedTaskId === task.id;
               const hasImages = task.hasImages;
               const isFatal = task.auditStatus === 'FATAL';
@@ -80,7 +80,7 @@ export default function TaskTable({
 
               return (
                 <tr 
-                  key={task.id}
+                  key={`${task.id || task.taskId}_${idx}`}
                   onClick={() => handleAudit(task)}
                   className={`hover:bg-slate-750/50 transition-colors cursor-pointer ${
                     isSelected ? 'bg-blue-900/20 ring-1 ring-blue-500/50' : ''

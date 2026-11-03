@@ -400,10 +400,10 @@ export default function DPlusOneEscalationDashboard({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-200">
-                {filteredOverdueTasks.map(task => {
+                {filteredOverdueTasks.map((task, idx) => {
                   const sla = getTaskSLAStatus(task);
                   return (
-                    <tr key={task.id} className="hover:bg-slate-850/60 transition-colors">
+                    <tr key={`${task.id || task.taskId}_${idx}`} className="hover:bg-slate-850/60 transition-colors">
                       
                       {/* Task ID */}
                       <td className="py-3.5 px-4 font-mono font-medium whitespace-nowrap">

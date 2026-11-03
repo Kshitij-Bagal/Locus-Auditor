@@ -792,9 +792,9 @@ export default function ClusterManagerPortal({
             </div>
           ) : (
             <div className="space-y-3">
-              {scopedFatalTasks.map(task => (
+              {scopedFatalTasks.map((task, idx) => (
                 <div 
-                  key={task.id}
+                  key={`${task.id || task.taskId}_${idx}`}
                   className="p-4 rounded-xl bg-slate-900 border border-red-500/30 hover:border-red-500/50 transition-all shadow-md space-y-3"
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-800">

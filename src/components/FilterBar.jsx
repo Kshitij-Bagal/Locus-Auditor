@@ -21,6 +21,9 @@ export default function FilterBar({
   setSelectedStatus,
   selectedAuditStatus,
   setSelectedAuditStatus,
+  selectedBatchDate = 'ALL',
+  setSelectedBatchDate,
+  availableBatchDates = [],
   selectedAuditor = 'ALL',
   setSelectedAuditor,
   auditors = [],
@@ -35,11 +38,110 @@ export default function FilterBar({
   setViewMode,
   zones = [],
   statuses = [],
+  totalCount = 0,
+  filteredCount = 0,
+  pendingCount = 0,
+  fatalCount = 0,
+  passedCount = 0,
   onClearFilters,
   hasActiveFilters
 }) {
   return (
-    <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-3 mb-5 shadow-lg backdrop-blur-sm">
+    <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-3 mb-5 shadow-lg backdrop-blur-sm space-y-3">
+      
+      {/* Top Row: Quick Queue Switcher (Auditor Focus: Pending vs Completed History) */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-700/60">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Queue:</span>
+          
+          <button
+            onClick={() => setSelectedAuditStatus('PENDING')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              selectedAuditStatus === 'PENDING'
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm ring-1 ring-amber-500/30'
+                : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-amber-300 hover:border-slate-600'
+            }`}
+            title="Focus strictly on actionable tasks waiting for audit"
+          >
+            <span>⚡ Pending Audits</span>
+            {pendingCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                selectedAuditStatus === 'PENDING' ? 'bg-amber-400/20 text-amber-200' : 'bg-slate-800 text-slate-300'
+              }`}>
+                {pendingCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setSelectedAuditStatus('ALL')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              selectedAuditStatus === 'ALL'
+                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/50 shadow-sm ring-1 ring-sky-500/30'
+                : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-sky-300 hover:border-slate-600'
+            }`}
+            title="View all tasks including completed audit history"
+          >
+            <span>📋 All Tasks</span>
+            <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+              selectedAuditStatus === 'ALL' ? 'bg-sky-400/20 text-sky-200' : 'bg-slate-800 text-slate-300'
+            }`}>
+              {totalCount}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setSelectedAuditStatus('FATAL')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              selectedAuditStatus === 'FATAL'
+                ? 'bg-red-500/20 text-red-300 border border-red-500/50 shadow-sm ring-1 ring-red-500/30'
+                : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-red-300 hover:border-slate-600'
+            }`}
+            title="View only FATAL strikes"
+          >
+            <span>❌ Fatal Strikes</span>
+            {fatalCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                selectedAuditStatus === 'FATAL' ? 'bg-red-400/20 text-red-200' : 'bg-slate-800 text-slate-300'
+              }`}>
+                {fatalCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setSelectedAuditStatus('PASSED')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              selectedAuditStatus === 'PASSED'
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm ring-1 ring-emerald-500/30'
+                : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-emerald-300 hover:border-slate-600'
+            }`}
+            title="View passed audits"
+          >
+            <span>✅ Passed</span>
+            {passedCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                selectedAuditStatus === 'PASSED' ? 'bg-emerald-400/20 text-emerald-200' : 'bg-slate-800 text-slate-300'
+              }`}>
+                {passedCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Auditor Queue Tag */}
+        {isAuditorOnly && (
+          <div 
+            className="flex items-center bg-blue-500/10 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs font-bold text-sky-300"
+            title="City Admins strictly see tasks allocated to their personal queue"
+          >
+            <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
+            <span>My Allocated Queue Only{currentUserName ? ` (${currentUserName})` : ''}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Main Filter Controls Row */}
       <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
         
         {/* Search Input */}
@@ -64,40 +166,50 @@ export default function FilterBar({
 
         {/* Filters Group */}
         <div className="flex flex-wrap items-center gap-2">
-          
-          {/* Auditor Queue Badge or Filter Dropdown */}
-          {isAuditorOnly ? (
-            <div 
-              className="flex items-center bg-blue-500/10 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs font-bold text-sky-300"
-              title="City Admins strictly see tasks allocated to their personal queue"
-            >
-              <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
-              <span>My Allocated Queue Only{currentUserName ? ` (${currentUserName})` : ''}</span>
+
+          {/* Upload Batch Date Filter */}
+          {availableBatchDates && availableBatchDates.length > 0 && setSelectedBatchDate && (
+            <div className="flex items-center bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1 shadow-sm">
+              <Calendar className="w-3.5 h-3.5 text-sky-400 mr-1.5 shrink-0" />
+              <select
+                value={selectedBatchDate}
+                onChange={(e) => setSelectedBatchDate(e.target.value)}
+                className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer pr-1"
+                title="Filter by Upload Batch Date to avoid seeing old historical tasks"
+              >
+                <option value="ALL" className="bg-slate-800 text-white font-bold">All Batch Dates</option>
+                {availableBatchDates.map((b, idx) => (
+                  <option key={b.date} value={b.date} className="bg-slate-800 text-white">
+                    {b.date} {idx === 0 ? '(Latest)' : ''} ({b.total} tasks{b.pending > 0 ? ` • ${b.pending} to do` : ''})
+                  </option>
+                ))}
+              </select>
             </div>
-          ) : (
-            auditors && auditors.length > 0 && setSelectedAuditor && (
-              <div className="flex items-center bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1 shadow-sm">
-                <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
-                <select
-                  value={selectedAuditor}
-                  onChange={(e) => setSelectedAuditor(e.target.value)}
-                  className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer pr-1"
-                  title="SuperAdmin: Filter audits by specific auditor queue"
-                >
-                  <option value="ALL" className="bg-slate-800 text-white font-bold">All Auditors</option>
-                  <option value="UNASSIGNED" className="bg-slate-800 text-amber-300 font-bold">Unassigned Tasks</option>
-                  {auditors.map(a => {
-                    const name = a.full_name || a.name || a.id;
-                    const roleSuffix = a.role ? ` (${a.role})` : '';
-                    return (
-                      <option key={a.id || name} value={name} className="bg-slate-800 text-white">
-                        {name}{roleSuffix}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-            )
+          )}
+          
+          {/* SuperAdmin Auditor Filter */}
+          {!isAuditorOnly && auditors && auditors.length > 0 && setSelectedAuditor && (
+            <div className="flex items-center bg-slate-900 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1 shadow-sm">
+              <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
+              <select
+                value={selectedAuditor}
+                onChange={(e) => setSelectedAuditor(e.target.value)}
+                className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer pr-1"
+                title="SuperAdmin: Filter audits by specific auditor queue"
+              >
+                <option value="ALL" className="bg-slate-800 text-white font-bold">All Auditors</option>
+                <option value="UNASSIGNED" className="bg-slate-800 text-amber-300 font-bold">Unassigned Tasks</option>
+                {auditors.map(a => {
+                  const name = a.full_name || a.name || a.id;
+                  const roleSuffix = a.role ? ` (${a.role})` : '';
+                  return (
+                    <option key={a.id || name} value={name} className="bg-slate-800 text-white">
+                      {name}{roleSuffix}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
           )}
 
           {/* Zone Filter */}
@@ -130,21 +242,6 @@ export default function FilterBar({
             </select>
           </div>
 
-          {/* Audit Status Filter */}
-          <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-2 py-1">
-            <span className="text-[11px] text-slate-400 mr-1.5 font-medium">Audit:</span>
-            <select
-              value={selectedAuditStatus}
-              onChange={(e) => setSelectedAuditStatus(e.target.value)}
-              className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer pr-1"
-            >
-              <option value="ALL" className="bg-slate-800 text-white">All Audits</option>
-              <option value="PENDING" className="bg-slate-800 text-amber-300">Pending</option>
-              <option value="PASSED" className="bg-slate-800 text-emerald-400">Passed</option>
-              <option value="FATAL" className="bg-slate-800 text-red-400">FATAL (Failed)</option>
-            </select>
-          </div>
-
           {/* Only with Images Toggle */}
           <button
             onClick={() => setOnlyWithImages(!onlyWithImages)}
@@ -167,7 +264,7 @@ export default function FilterBar({
               className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
                 onlyDPlusOneOverdue
                   ? 'bg-red-500/25 text-red-300 border border-red-500 shadow-sm animate-pulse'
-                  : 'bg-red-950/30 text-red-400 border border-red-500/30 hover:bg-red-900/40'
+                : 'bg-red-950/30 text-red-400 border border-red-500/30 hover:bg-red-900/40'
               }`}
               title="Show only tasks that have breached their 24h SLA into D+1 (Escalated to BH & GM)"
             >
@@ -180,7 +277,7 @@ export default function FilterBar({
           {hasActiveFilters && (
             <button
               onClick={onClearFilters}
-              className="px-2 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 transition-colors flex items-center gap-1"
+              className="px-2 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 transition-colors flex items-center gap-1 cursor-pointer"
               title="Reset all filters"
             >
               <X className="w-3 h-3" />
@@ -192,7 +289,7 @@ export default function FilterBar({
           <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg p-0.5 ml-auto">
             <button
               onClick={() => setViewMode('table')}
-              className={`p-1.5 rounded-md transition-colors ${
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
                 viewMode === 'table' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
               title="Table View"
@@ -201,7 +298,7 @@ export default function FilterBar({
             </button>
             <button
               onClick={() => setViewMode('grid')}
-              className={`p-1.5 rounded-md transition-colors ${
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${
                 viewMode === 'grid' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
               title="Card / Grid View"

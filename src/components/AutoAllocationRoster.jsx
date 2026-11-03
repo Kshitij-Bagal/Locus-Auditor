@@ -24,6 +24,7 @@ import {
 import { runAutoAllocationAlgorithm } from '../lib/supabase.js';
 import { rosterApi, tasksApi } from '../api/client.js';
 import { parseRoles, hasAccess, displayRoleName, isEligibleForAuditRoster } from '../utils/accessHelper.js';
+import { getTaskBatchDateYMD } from '../utils/dailyDigestHelper.js';
 
 export default function AutoAllocationRoster({
   tasks = [],
@@ -121,17 +122,6 @@ export default function AutoAllocationRoster({
     };
   }, [actualAuditorsFromUsers]);
 
-  // Strictly filter unassigned tasks that HAVE AUDIT PHOTOS waiting for an auditor
-  // (Tasks without images cannot be audited for equipment compliance and are omitted)
-  const unassignedPool = useMemo(() => {
-    return tasks.filter(t => {
-      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-      const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
-      const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
-      return hasPhotos && isPending && isUnassigned;
-    });
-  }, [tasks]);
-
   // Helper: Strictly check whether a task has already been audited by an auditor
   // Never touch, reassign, or auto-fatal any task that has already been audited!
   const isTaskAlreadyAudited = (t) => {
@@ -142,40 +132,81 @@ export default function AutoAllocationRoster({
     return false;
   };
 
+  // Available upload batch dates in tasks
+  const availableBatchDates = useMemo(() => {
+    const map = new Map();
+    (tasks || []).forEach(t => {
+      const d = getTaskBatchDateYMD(t);
+      if (!d) return;
+      const current = map.get(d) || { total: 0, pending: 0, fatal: 0, passed: 0 };
+      current.total++;
+      const st = (t.auditStatus || t.audit_status || 'PENDING').toUpperCase();
+      if (st === 'FATAL') current.fatal++;
+      else if (st === 'PASSED') current.passed++;
+      else current.pending++;
+      map.set(d, current);
+    });
+    return Array.from(map.entries())
+      .map(([date, stats]) => ({ date, ...stats }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [tasks]);
+
+  // Default to latest batch date
+  const [selectedBatchDate, setSelectedBatchDate] = useState(() => '');
+
+  useEffect(() => {
+    if (!selectedBatchDate && availableBatchDates.length > 0) {
+      setSelectedBatchDate(availableBatchDates[0].date);
+    }
+  }, [availableBatchDates, selectedBatchDate]);
+
+  // Scoped tasks for the selected batch date (prevents historical completed tasks from inflating numbers)
+  const scopedTasks = useMemo(() => {
+    if (!selectedBatchDate || selectedBatchDate === 'ALL') return tasks;
+    return tasks.filter(t => getTaskBatchDateYMD(t) === selectedBatchDate);
+  }, [tasks, selectedBatchDate]);
+
+  // Strictly filter unassigned tasks that HAVE AUDIT PHOTOS waiting for an auditor
+  const unassignedPool = useMemo(() => {
+    return scopedTasks.filter(t => {
+      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
+      const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
+      return hasPhotos && !isTaskAlreadyAudited(t) && isUnassigned;
+    });
+  }, [scopedTasks]);
+
   // All pending tasks with photos (both currently assigned and unassigned) that can be re-distributed
   const pendingAuditablePool = useMemo(() => {
-    return tasks.filter(t => {
+    return scopedTasks.filter(t => {
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
       return hasPhotos && !isTaskAlreadyAudited(t);
     });
-  }, [tasks]);
+  }, [scopedTasks]);
 
   // Tasks without audit photos that are purposefully excluded from allocation
   const unassignedWithoutPhotos = useMemo(() => {
-    return tasks.filter(t => {
+    return scopedTasks.filter(t => {
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
       const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
       return !hasPhotos && !isTaskAlreadyAudited(t) && isUnassigned;
     });
-  }, [tasks]);
+  }, [scopedTasks]);
 
   // Completed leads with missing/blank image evidence eligible for Auto-Fatal by System
-  // STRICT RULE: Only include leads that are strictly UN-AUDITED / PENDING!
-  // If an auditor has already reviewed/audited this task, it must remain strictly untouched!
   const blankCompletedTasks = useMemo(() => {
-    return (tasks || []).filter(t => {
+    return scopedTasks.filter(t => {
       const isCompleted = String(t.status || '').toUpperCase() === 'COMPLETED';
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && typeof t.images === 'object' && Object.values(t.images).some(Boolean)));
       return isCompleted && !hasPhotos && !isTaskAlreadyAudited(t);
     });
-  }, [tasks]);
+  }, [scopedTasks]);
 
   // Active auditors not on leave
   const activeAuditors = useMemo(() => {
     return roster.filter(a => a.shiftStatus !== 'ON_LEAVE');
   }, [roster]);
 
-  // Estimate tasks per auditor
+  // Estimate tasks per auditor for the active batch
   const expectedSharePerAuditor = useMemo(() => {
     const poolSize = unassignedPool.length > 0 ? unassignedPool.length : pendingAuditablePool.length;
     if (activeAuditors.length === 0 || poolSize === 0) return 0;
@@ -183,7 +214,7 @@ export default function AutoAllocationRoster({
     return totalWeight > 0 ? Math.round(poolSize / totalWeight) : 0;
   }, [unassignedPool.length, pendingAuditablePool.length, activeAuditors]);
 
-  // Workload count per auditor (accurately checks both ID and Name)
+  // Workload count per auditor for the active batch (accurately checks both ID and Name)
   const auditorWorkloadMap = useMemo(() => {
     const map = {};
     roster.forEach(a => {
@@ -191,7 +222,7 @@ export default function AutoAllocationRoster({
       const audAuthId = String(a.auth_user_id || '').toLowerCase();
       const audName = String(a.full_name || '').toLowerCase().trim();
 
-      const assigned = tasks.filter(t => {
+      const assigned = scopedTasks.filter(t => {
         const tId = String(t.assignedAuditorId || '').toLowerCase();
         const tName = String(t.assignedAuditorName || '').toLowerCase().trim();
 
@@ -200,8 +231,8 @@ export default function AutoAllocationRoster({
         return matchId || matchName;
       });
 
-      const pending = assigned.filter(t => t.auditStatus === 'PENDING').length;
-      const completed = assigned.filter(t => t.auditStatus !== 'PENDING').length;
+      const pending = assigned.filter(t => !isTaskAlreadyAudited(t)).length;
+      const completed = assigned.filter(t => isTaskAlreadyAudited(t)).length;
 
       map[a.id] = {
         total: assigned.length,
@@ -210,7 +241,7 @@ export default function AutoAllocationRoster({
       };
     });
     return map;
-  }, [roster, tasks]);
+  }, [roster, scopedTasks]);
 
   // Shift status toggle & DB persistence
   const handleUpdateShift = async (auditorId, newStatus) => {
@@ -331,11 +362,15 @@ export default function AutoAllocationRoster({
     setIsAllocating(true);
 
     try {
-      // 1. Run fair distribution algorithm using actual auditors
+      // 1. Run fair distribution algorithm using actual auditors on the active batch
       const result = runAutoAllocationAlgorithm({
-        tasks,
+        tasks: scopedTasks,
         rosterAuditors: roster
       });
+
+      // Merge newly allocated tasks back into the full tasks array
+      const allocMap = new Map((result.allocatedTasks || []).map(t => [String(t.id || t.taskId), t]));
+      const allUpdatedTasks = tasks.map(t => allocMap.get(String(t.id || t.taskId)) || t);
 
       // 2. Persist allocations in Supabase tasks table
       if (result.allocatedTasks && result.allocatedTasks.length > 0) {
@@ -349,7 +384,7 @@ export default function AutoAllocationRoster({
 
       // 4. Update parent state
       if (allocateCallback) {
-        allocateCallback(result.allocatedTasks);
+        allocateCallback(allUpdatedTasks);
       }
 
       setAllocationLog({
@@ -381,11 +416,11 @@ export default function AutoAllocationRoster({
     setIsAllocating(true);
 
     try {
-      // 1. Reset assignments ONLY on pending tasks with photos (completed audits are preserved completely)
+      // 1. Reset assignments ONLY on pending tasks with photos in the active batch
       const resetTasks = tasks.map(t => {
+        const isFromBatch = !selectedBatchDate || selectedBatchDate === 'ALL' || getTaskBatchDateYMD(t) === selectedBatchDate;
         const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-        const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
-        if (hasPhotos && isPending) {
+        if (isFromBatch && hasPhotos && !isTaskAlreadyAudited(t)) {
           return {
             ...t,
             assignedAuditorId: null,
@@ -398,11 +433,16 @@ export default function AutoAllocationRoster({
         return t;
       });
 
-      // 2. Run equal distribution algorithm across currently active auditors
+      const batchResetTasks = resetTasks.filter(t => !selectedBatchDate || selectedBatchDate === 'ALL' || getTaskBatchDateYMD(t) === selectedBatchDate);
+
+      // 2. Run equal distribution algorithm across currently active auditors for active batch
       const result = runAutoAllocationAlgorithm({
-        tasks: resetTasks,
+        tasks: batchResetTasks,
         rosterAuditors: roster
       });
+
+      const allocMap = new Map((result.allocatedTasks || []).map(t => [String(t.id || t.taskId), t]));
+      const allUpdatedTasks = resetTasks.map(t => allocMap.get(String(t.id || t.taskId)) || t);
 
       // 3. Persist new allocations in Supabase tasks table
       if (result.allocatedTasks && result.allocatedTasks.length > 0) {
@@ -416,7 +456,7 @@ export default function AutoAllocationRoster({
 
       // 5. Update parent state
       if (allocateCallback) {
-        allocateCallback(result.allocatedTasks);
+        allocateCallback(allUpdatedTasks);
       }
 
       setAllocationLog({
@@ -566,6 +606,26 @@ export default function AutoAllocationRoster({
 
         {/* Action Controls */}
         <div className="flex flex-wrap items-center gap-2.5">
+          {/* Active Shift Batch Selector */}
+          {availableBatchDates.length > 0 && (
+            <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-1.5 shadow-sm">
+              <Calendar className="w-4 h-4 text-sky-400 shrink-0" />
+              <select
+                value={selectedBatchDate}
+                onChange={(e) => setSelectedBatchDate(e.target.value)}
+                className="bg-transparent text-xs text-sky-300 font-bold focus:outline-none cursor-pointer pr-1"
+                title="Select upload batch to focus allocation and workloads strictly on today's active shift"
+              >
+                <option value="ALL" className="bg-slate-800 text-white font-bold">All Batches ({tasks.length} cumulative)</option>
+                {availableBatchDates.map((b, idx) => (
+                  <option key={b.date} value={b.date} className="bg-slate-800 text-white font-semibold">
+                    Batch {b.date} {idx === 0 ? '★ Today / Latest' : ''} ({b.total} tasks • {b.pending} to audit)
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Include SuperAdmin in Distribution Toggle Button */}
           <button
             type="button"
@@ -801,18 +861,18 @@ export default function AutoAllocationRoster({
                   </div>
 
                   {/* Current Assigned Counts */}
-                  <div className="flex items-center gap-4 text-xs">
-                    <div>
-                      <span className="text-[10px] text-slate-500 uppercase block">Assigned</span>
-                      <span className="font-bold text-white">{stats.total} tasks</span>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-500 uppercase block">Pending</span>
-                      <span className="font-bold text-amber-400">{stats.pending} left</span>
+                  <div className="flex items-center gap-3.5 text-xs">
+                    <div className="bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
+                      <span className="text-[10px] text-amber-400 font-bold uppercase block">Pending</span>
+                      <span className="font-extrabold text-amber-300 text-xs">{stats.pending} to do</span>
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 uppercase block">Audited</span>
                       <span className="font-bold text-emerald-400">{stats.completed} done</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">Batch Total</span>
+                      <span className="font-bold text-slate-300">{stats.total}</span>
                     </div>
                   </div>
 

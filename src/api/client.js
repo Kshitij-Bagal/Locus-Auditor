@@ -412,7 +412,18 @@ export const tasksApi = {
         }
       }
 
-      return allRows.map(row => ({
+      // Deduplicate rows by task ID to prevent duplicate React keys or inflated metrics
+      const seenIds = new Set();
+      const uniqueRows = [];
+      for (const row of allRows) {
+        const rowId = String(row.id || row.task_id);
+        if (!seenIds.has(rowId)) {
+          seenIds.add(rowId);
+          uniqueRows.push(row);
+        }
+      }
+
+      return uniqueRows.map(row => ({
         id: row.id,
         taskId: row.task_id,
         teamName: row.team_name,

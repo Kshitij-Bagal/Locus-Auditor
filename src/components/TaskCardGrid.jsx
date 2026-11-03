@@ -40,7 +40,7 @@ export default function TaskCardGrid({
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      {tasks.map((task) => {
+      {tasks.map((task, idx) => {
         const isFatal = task.auditStatus === 'FATAL';
         const isPassed = task.auditStatus === 'PASSED';
         const hasImages = task.hasImages;
@@ -49,7 +49,7 @@ export default function TaskCardGrid({
 
         return (
           <div
-            key={task.id}
+            key={`${task.id || task.taskId}_${idx}`}
             onClick={() => handleAudit(task)}
             className={`bg-slate-800/80 border rounded-xl overflow-hidden shadow-lg hover:shadow-2xl transition-all cursor-pointer group flex flex-col justify-between ${
               isFatal

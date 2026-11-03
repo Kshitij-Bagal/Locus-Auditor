@@ -23,6 +23,7 @@ import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, roste
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
 import { exportAuditReport } from './utils/excelParser.js';
 import { getTaskSLAStatus, filterDPlusOneOverdueTasks } from './utils/slaHelper.js';
+import { getTaskBatchDateYMD } from './utils/dailyDigestHelper.js';
 import { runAutoAllocationAlgorithm } from './lib/supabase.js';
 import { 
   parseRoles, 
@@ -97,13 +98,25 @@ export default function App() {
     return 'audits';
   });
 
+  // Helper: Deduplicate tasks by unique ID
+  const deduplicateTaskList = (list) => {
+    if (!Array.isArray(list)) return [];
+    const seen = new Set();
+    return list.filter(t => {
+      const id = String(t.id || t.taskId);
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  };
+
   // Dispatches Data: Starts EMPTY by default (No fake demo data)
   const [tasks, setTasks] = useState(() => {
     try {
       const saved = localStorage.getItem(TASKS_CACHE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) return deduplicateTaskList(parsed);
       }
     } catch (e) {}
     return [];
@@ -129,7 +142,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedZone, setSelectedZone] = useState('ALL');
   const [selectedStatus, setSelectedStatus] = useState('ALL');
-  const [selectedAuditStatus, setSelectedAuditStatus] = useState('ALL');
+  const [selectedAuditStatus, setSelectedAuditStatus] = useState('PENDING'); // Default to PENDING queue so auditors are not demotivated by past completed tasks
+  const [selectedBatchDate, setSelectedBatchDate] = useState('ALL');
   const [selectedAuditorFilter, setSelectedAuditorFilter] = useState('ALL');
   const [onlyWithImages, setOnlyWithImages] = useState(false);
   const [onlyDPlusOneOverdue, setOnlyDPlusOneOverdue] = useState(false);
@@ -1128,27 +1142,81 @@ export default function App() {
     return visibleTasks.filter(t => getTaskSLAStatus(t).isOverdue);
   }, [isAuditorOnly, visibleTasks]);
 
+  // Available upload batch dates in visible tasks
+  const availableBatchDates = useMemo(() => {
+    const map = new Map();
+    (visibleTasks || []).forEach(t => {
+      const d = getTaskBatchDateYMD(t);
+      if (!d) return;
+      const current = map.get(d) || { total: 0, pending: 0, fatal: 0, passed: 0 };
+      current.total++;
+      const st = (t.auditStatus || t.audit_status || 'PENDING').toUpperCase();
+      if (st === 'FATAL') current.fatal++;
+      else if (st === 'PASSED') current.passed++;
+      else current.pending++;
+      map.set(d, current);
+    });
+    return Array.from(map.entries())
+      .map(([date, stats]) => ({ date, ...stats }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [visibleTasks]);
+
   // Filtered Tasks for Auditing (derived from visibleTasks)
   const filteredTasks = useMemo(() => {
     return visibleTasks.filter(task => {
+      // 1. Full-text search across all identifiers & metadata
       if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        const matchesId = task.taskId?.toLowerCase().includes(q);
-        const matchesFE = task.feName?.toLowerCase().includes(q) || task.feCode?.toLowerCase().includes(q);
-        const matchesCust = task.customerName?.toLowerCase().includes(q) || task.customerAddress?.toLowerCase().includes(q);
-        const matchesPin = task.pin?.toLowerCase().includes(q) || task.pincode?.includes(q);
-        if (!matchesId && !matchesFE && !matchesCust && !matchesPin) return false;
+        const q = searchQuery.toLowerCase().trim();
+        const matchesId = String(task.taskId || task.id || '').toLowerCase().includes(q);
+        const matchesFE = String(task.feName || task.fe_name || '').toLowerCase().includes(q) || 
+                          String(task.feCode || task.fe_code || '').toLowerCase().includes(q);
+        const matchesCust = String(task.customerName || task.customer_name || '').toLowerCase().includes(q) || 
+                            String(task.customerAddress || task.customer_address || '').toLowerCase().includes(q);
+        const matchesPin = String(task.pin || task.delivery_pin || '').toLowerCase().includes(q) || 
+                           String(task.pincode || '').includes(q);
+        const matchesHub = String(task.teamName || task.facilityCode || task.facility_code || '').toLowerCase().includes(q);
+        const matchesAuditor = String(task.assignedAuditorName || task.assigned_auditor_name || '').toLowerCase().includes(q);
+        
+        if (!matchesId && !matchesFE && !matchesCust && !matchesPin && !matchesHub && !matchesAuditor) return false;
       }
 
-      if (selectedZone !== 'ALL' && task.zone !== selectedZone) return false;
-      if (selectedStatus !== 'ALL' && task.status !== selectedStatus) return false;
-      if (selectedAuditStatus !== 'ALL' && task.auditStatus !== selectedAuditStatus) return false;
+      // 2. Zone Filter (Case-insensitive trimmed)
+      if (selectedZone !== 'ALL') {
+        const taskZone = String(task.zone || '').trim().toLowerCase();
+        if (taskZone !== selectedZone.trim().toLowerCase()) return false;
+      }
+
+      // 3. Task Delivery Status (COMPLETED vs CANCELLED)
+      if (selectedStatus !== 'ALL') {
+        const taskStatus = String(task.status || '').trim().toUpperCase();
+        if (taskStatus !== selectedStatus.trim().toUpperCase()) return false;
+      }
+
+      // 4. Audit Status Filter (PENDING vs PASSED vs FATAL)
+      if (selectedAuditStatus !== 'ALL') {
+        const taskAuditStatus = String(task.auditStatus || task.audit_status || 'PENDING').trim().toUpperCase();
+        if (selectedAuditStatus === 'PENDING') {
+          if (taskAuditStatus === 'PASSED' || taskAuditStatus === 'FATAL') return false;
+        } else if (taskAuditStatus !== selectedAuditStatus.trim().toUpperCase()) {
+          return false;
+        }
+      }
+
+      // 5. Upload Batch Date Filter
+      if (selectedBatchDate && selectedBatchDate !== 'ALL') {
+        const taskBatchDate = getTaskBatchDateYMD(task);
+        if (taskBatchDate !== selectedBatchDate) return false;
+      }
+
+      // 6. Mandatory Image Filter
       if (onlyWithImages && !task.hasImages) return false;
+
+      // 7. D+1 Overdue SLA Filter
       if (onlyDPlusOneOverdue && !getTaskSLAStatus(task).isOverdue) return false;
 
       return true;
     });
-  }, [visibleTasks, searchQuery, selectedZone, selectedStatus, selectedAuditStatus, onlyWithImages, onlyDPlusOneOverdue]);
+  }, [visibleTasks, searchQuery, selectedZone, selectedStatus, selectedAuditStatus, selectedBatchDate, onlyWithImages, onlyDPlusOneOverdue]);
 
   // If user is not logged in, show dedicated Login Page
   if (!currentUser) {
@@ -1243,6 +1311,9 @@ export default function App() {
               setSelectedStatus={setSelectedStatus}
               selectedAuditStatus={selectedAuditStatus}
               setSelectedAuditStatus={setSelectedAuditStatus}
+              selectedBatchDate={selectedBatchDate}
+              setSelectedBatchDate={setSelectedBatchDate}
+              availableBatchDates={availableBatchDates}
               selectedAuditor={selectedAuditorFilter}
               setSelectedAuditor={setSelectedAuditorFilter}
               auditors={availableAuditorsForFilter}
@@ -1259,11 +1330,15 @@ export default function App() {
               statuses={availableStatuses}
               totalCount={visibleTasks.length}
               filteredCount={filteredTasks.length}
+              pendingCount={stats.pending}
+              fatalCount={stats.fatal}
+              passedCount={stats.passed}
               onClearFilters={() => {
                 setSearchQuery('');
                 setSelectedZone('ALL');
                 setSelectedStatus('ALL');
-                setSelectedAuditStatus('ALL');
+                setSelectedAuditStatus('PENDING');
+                setSelectedBatchDate('ALL');
                 setSelectedAuditorFilter('ALL');
                 setOnlyWithImages(false);
                 setOnlyDPlusOneOverdue(false);
@@ -1272,7 +1347,8 @@ export default function App() {
                 searchQuery || 
                 selectedZone !== 'ALL' || 
                 selectedStatus !== 'ALL' || 
-                selectedAuditStatus !== 'ALL' || 
+                selectedAuditStatus !== 'PENDING' || 
+                selectedBatchDate !== 'ALL' ||
                 selectedAuditorFilter !== 'ALL' || 
                 onlyWithImages ||
                 onlyDPlusOneOverdue
