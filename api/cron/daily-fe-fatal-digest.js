@@ -1,6 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 import nodemailer from 'nodemailer';
 import { Resend } from 'resend';
+
+// In local development behind corporate firewalls/proxies (e.g. Lenskart network), permit TLS negotiation
+if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 import { 
   normalizeDateToYMD, 
   getTaskBatchDateYMD,
@@ -464,8 +469,9 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
         });
         sentCount++;
       } catch (err) {
-        console.error(`Failed to dispatch fatal warning to FE ${feDigest.feCode}:`, err.message);
-        dispatchError = err.message;
+        const detail = err?.cause?.message || err?.cause?.code || '';
+        console.error(`Failed to dispatch fatal warning to FE ${feDigest.feCode}:`, err.message, err?.cause);
+        dispatchError = detail ? `${err.message}: ${detail}` : err.message;
         failedCount++;
       }
 

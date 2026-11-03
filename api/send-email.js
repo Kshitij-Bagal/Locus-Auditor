@@ -1,6 +1,11 @@
 import nodemailer from 'nodemailer';
 import { Resend } from 'resend';
 
+// In local development behind corporate firewalls/proxies (e.g. Lenskart network), permit TLS negotiation
+if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 /**
  * Universal Serverless Email Dispatch Handler
  * Compatible with Vercel Serverless Functions (/api/send-email)

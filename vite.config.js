@@ -5,6 +5,11 @@ import { sendEmailHandler } from './api/send-email.js'
 import { dailyDigestCronHandler } from './api/cron/daily-digest.js'
 import { dailyFeFatalDigestCronHandler } from './api/cron/daily-fe-fatal-digest.js'
 
+// In local development behind corporate firewalls/proxies (e.g. Lenskart network), permit TLS connections
+if (process.env.NODE_ENV !== 'production') {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 function emailDevPlugin() {
   return {
     name: 'email-dev-server-plugin',
