@@ -130,16 +130,44 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       portalBaseUrl
     });
 
+    // Targeted Single FE filter
     if (feCodeTarget) {
-      feDigests = feDigests.filter(f => 
-        (f.feCode && f.feCode.toLowerCase() === feCodeTarget.toLowerCase()) ||
-        (f.feEmail && f.feEmail.toLowerCase() === feCodeTarget.toLowerCase())
-      );
+      const target = String(feCodeTarget).trim().toLowerCase();
+      feDigests = feDigests.filter(f => {
+        const c = String(f.feCode || '').trim().toLowerCase();
+        const em = String(f.feEmail || '').trim().toLowerCase();
+        const k = String(f.feKey || '').trim().toLowerCase();
+        const nm = String(f.feName || '').trim().toLowerCase();
+        return (c && (c === target || c.includes(target) || target.includes(c))) ||
+               (em && (em === target || em.includes(target))) ||
+               (k && (k === target || k.includes(target))) ||
+               (nm && target.length >= 3 && nm.includes(target));
+      });
+
+      // STRICT SAFETY GUARANTEE: If a specific FE code was targeted, NEVER fall back to all FEs!
+      if (feDigests.length === 0) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          success: false,
+          error: `Target Field Executive '${feCodeTarget}' was not found in the queue of fatal strikes for batch date ${targetDate}. Dispatch aborted to prevent sending to incorrect recipients.`,
+          sentCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+          results: []
+        }));
+        return;
+      }
+
+      // Restrict strictly to the single targeted FE
+      if (feDigests.length > 1) {
+        feDigests = [feDigests[0]];
+      }
     }
 
-    // 5. Check already dispatched FEs if not forcing
+    // 5. Check already dispatched FEs if not forcing and not targeted single dispatch
     let alreadyDispatchedFeCodes = new Set();
-    if (!force) {
+    if (!force && !feCodeTarget) {
       try {
         const { data: existingLogs } = await supabase
           .from('daily_fe_fatal_dispatch_logs')
@@ -398,13 +426,13 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     for (const feDigest of feDigests) {
       const feCodeLower = String(feDigest.feCode).toLowerCase();
 
-      // Check if all fatal tasks for this FE were already notified and force isn't set
-      const allTasksAlreadyNotified = !force && feDigest.fatalTasks.every(t => {
+      // Check if all fatal tasks for this FE were already notified and force isn't set (ignored if single FE target dispatch)
+      const allTasksAlreadyNotified = !force && !feCodeTarget && feDigest.fatalTasks.every(t => {
         const sourceTask = (tasks || []).find(st => (st.id || st.taskId) === t.taskId);
         return sourceTask?.email_sent === true;
       });
 
-      if (!force && (alreadyDispatchedFeCodes.has(feCodeLower) || allTasksAlreadyNotified)) {
+      if (!force && !feCodeTarget && (alreadyDispatchedFeCodes.has(feCodeLower) || allTasksAlreadyNotified)) {
         skippedCount++;
         results.push({
           feCode: feDigest.feCode,

@@ -81,6 +81,7 @@ export default function SuperAdminCronEngine({
   const [showExecutivePreviewModal, setShowExecutivePreviewModal] = useState(false);
   const [isDispatchingExecutive, setIsDispatchingExecutive] = useState(false);
   const [executiveDispatchResult, setExecutiveDispatchResult] = useState(null);
+  const [dispatchingFeKey, setDispatchingFeKey] = useState(null);
 
   // Compute FE Fatal aggregation for selected date
   const portalBaseUrl = window.location.origin;
@@ -206,12 +207,11 @@ export default function SuperAdminCronEngine({
     loadLogs();
   }, [targetDate]);
 
-  // Handle Dispatch (Live or Dry-Run)
-  const handleTriggerDispatch = async (isDryRun = false, feCode = null) => {
+  // Handle Batch Dispatch for ALL FEs (Live or Dry-Run)
+  const handleTriggerDispatch = async (isDryRun = false) => {
     const actionName = isDryRun ? 'Dry-Run Simulation' : 'Live Warning Notice Dispatch';
-    const feTargetLabel = feCode ? `for FE (${feCode})` : `for ALL ${feDigests.length} affected FEs`;
 
-    if (!isDryRun && !window.confirm(`Are you sure you want to trigger ${actionName} ${feTargetLabel} for ${targetDate}?\n\nThis will send official compliance warning emails to Field Executives with CC to direct Area Managers & Regional Managers.`)) {
+    if (!isDryRun && !window.confirm(`Are you sure you want to trigger ${actionName} for ALL ${feDigests.length} affected FEs for ${targetDate}?\n\nThis will send official compliance warning emails to all ${feDigests.length} Field Executives with CC to their direct Area Managers & Regional Managers.`)) {
       return;
     }
 
@@ -222,7 +222,6 @@ export default function SuperAdminCronEngine({
       const result = await feFatalDigestApi.triggerFeFatalDispatch({
         date: targetDate,
         force: forceRedispatch,
-        feCode,
         dryRun: isDryRun,
         tasks,
         users
@@ -231,9 +230,44 @@ export default function SuperAdminCronEngine({
       setDispatchResult(result);
       await loadLogs();
     } catch (err) {
-      alert(`Dispatch Error: ${err.message}`);
+      alert(`Batch Dispatch Error: ${err.message}`);
     } finally {
       setIsDispatching(false);
+    }
+  };
+
+  // Handle Single FE Dispatch (Strictly targets ONLY 1 FE)
+  const handleSingleFeDispatch = async (fe) => {
+    const feTargetIdentifier = fe.feCode && fe.feCode !== 'N/A' ? fe.feCode : (fe.feEmail || fe.feKey);
+    const confirmMsg = `Send official compliance warning notice ONLY to:\n\nField Executive: ${fe.feName} (${fe.feCode || 'Code N/A'})\nEmail: ${fe.feEmail}\nCC: ${fe.amEmail} (AM), ${fe.rmEmail} (RM)\nIncidents: ${fe.fatalCount} fatal strike(s)\n\nBatch for other FEs will NOT be sent. Proceed?`;
+
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    setDispatchingFeKey(fe.feKey);
+    try {
+      const result = await feFatalDigestApi.triggerFeFatalDispatch({
+        date: targetDate,
+        force: true, // Specific button click bypasses already-sent filter
+        feCode: feTargetIdentifier,
+        dryRun: false,
+        tasks,
+        users
+      });
+
+      if (result.success && result.sentCount > 0) {
+        alert(`Success! Warning notice email dispatched ONLY to ${fe.feName} (${fe.feEmail}). CC delivered to direct AM & RM.`);
+      } else if (result.skippedCount > 0) {
+        alert(`Notice for ${fe.feName} was skipped: ${result.results?.[0]?.reason || 'Already dispatched today.'}`);
+      } else {
+        alert(`Notice dispatch failed: ${result.results?.[0]?.error || result.error || 'Unknown error'}`);
+      }
+      await loadLogs();
+    } catch (err) {
+      alert(`Single FE Dispatch Error: ${err.message}`);
+    } finally {
+      setDispatchingFeKey(null);
     }
   };
 
@@ -678,13 +712,22 @@ export default function SuperAdminCronEngine({
                       </button>
 
                       <button
-                        onClick={() => handleTriggerDispatch(false, fe.feCode)}
-                        disabled={isDispatching}
+                        onClick={() => handleSingleFeDispatch(fe)}
+                        disabled={dispatchingFeKey === fe.feKey || isDispatching}
                         className="px-2.5 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1 border border-red-500/30 transition-colors cursor-pointer disabled:opacity-50"
-                        title="Send only this FE's warning notice now"
+                        title={`Send only ${fe.feName}'s warning notice now`}
                       >
-                        <Send className="w-3.5 h-3.5" />
-                        Send Now
+                        {dispatchingFeKey === fe.feKey ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-400" />
+                            <span>Sending...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Send Now</span>
+                          </>
+                        )}
                       </button>
 
                       <button
