@@ -1867,6 +1867,18 @@ export const feFatalDigestApi = {
 
   // Query dispatch history logs
   async getDispatchLogs(date = null) {
+    if (typeof window !== 'undefined' && sessionStorage.getItem('locus_table_dispatch_logs_missing') === 'true') {
+      try {
+        const cached = localStorage.getItem(FE_FATAL_LOGS_CACHE_KEY);
+        if (cached) {
+          let list = JSON.parse(cached);
+          if (date) list = list.filter(l => l.digest_date === date);
+          return list;
+        }
+      } catch (e) {}
+      return [];
+    }
+
     if (supabase) {
       try {
         let query = supabase
@@ -1876,12 +1888,19 @@ export const feFatalDigestApi = {
         
         if (date) query = query.eq('digest_date', date);
         const { data, error } = await query;
-        if (!error && data) {
+        if (error) {
+          if (error.code === 'PGRST205' && typeof window !== 'undefined') {
+            sessionStorage.setItem('locus_table_dispatch_logs_missing', 'true');
+          }
+        } else if (data) {
+          if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('locus_table_dispatch_logs_missing');
+          }
           localStorage.setItem(FE_FATAL_LOGS_CACHE_KEY, JSON.stringify(data));
           return data;
         }
       } catch (err) {
-        console.warn('daily_fe_fatal_dispatch_logs table query notice:', err.message);
+        // Fallback to local cache
       }
     }
 
