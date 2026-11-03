@@ -87,6 +87,13 @@ export const SYSTEM_PAGES = [
     fullName: 'Fatal Objection & Dispute Meet Hub',
     description: 'Senior Auditor review for contested strikes, dispute meets, and re-auditing',
     category: 'Governance'
+  },
+  {
+    id: 'emailDispatch',
+    label: 'Mail Dispatch',
+    fullName: 'Daily Fatal Mail Dispatch Engine',
+    description: 'Automated & manual FE fatal notification dispatch, leadership digests, and delivery logs',
+    category: 'Governance'
   }
 ];
 
@@ -102,7 +109,8 @@ export const PAGE_ID_TO_LABEL = {
   fePortal: 'My Visits',
   users: 'User Accounts',
   accessControl: 'Access Control',
-  fatalObjection: 'Fatal objection'
+  fatalObjection: 'Fatal objection',
+  emailDispatch: 'Mail Dispatch'
 };
 
 export const PAGE_LABEL_TO_ID = {
@@ -119,7 +127,9 @@ export const PAGE_LABEL_TO_ID = {
   'User Accounts': 'users',
   'Access Control': 'accessControl',
   'Fatal objection': 'fatalObjection',
-  'Fatal Objection': 'fatalObjection'
+  'Fatal Objection': 'fatalObjection',
+  'Mail Dispatch': 'emailDispatch',
+  'Email Dispatch': 'emailDispatch'
 };
 
 // 9 Standard Corporate Roles represented in the system
@@ -149,7 +159,8 @@ export const DEFAULT_ROLE_PRESETS = {
     'Cluster Oversight',
     'User Accounts',
     'Access Control',
-    'Fatal objection'
+    'Fatal objection',
+    'Mail Dispatch'
   ],
   'City Admin': [
     'Audits',
@@ -184,14 +195,16 @@ export const DEFAULT_ROLE_PRESETS = {
     'Quality Rules',
     'Tool Orders',
     'Cluster Oversight',
-    'Fatal objection'
+    'Fatal objection',
+    'Mail Dispatch'
   ],
   BH: [
     'Audits',
     'Roster & Workload',
     'D + 1 Escalations',
     'Quality Rules',
-    'Cluster Oversight'
+    'Cluster Oversight',
+    'Mail Dispatch'
   ],
   FE: [
     'My Visits'

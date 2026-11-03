@@ -15,7 +15,8 @@ import {
   AlertTriangle,
   Key,
   Briefcase,
-  Scale
+  Scale,
+  Mail
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -91,10 +92,10 @@ export default function Navbar({
       allowedRoles: ['FE']
     },
     {
-      id: 'users',
-      label: 'User Accounts',
-      icon: Sliders,
-      allowedRoles: ['SuperAdmin']
+      id: 'emailDispatch',
+      label: 'Mail Dispatch',
+      icon: Mail,
+      allowedRoles: ['SuperAdmin', 'GM', 'BH']
     },
     {
       id: 'accessControl',

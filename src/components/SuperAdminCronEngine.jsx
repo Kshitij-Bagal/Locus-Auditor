@@ -88,6 +88,7 @@ export default function SuperAdminCronEngine({
     return aggregateFeFatalDigests({
       tasks,
       users,
+      targetDate,
       targetDateStr: targetDate,
       portalBaseUrl
     });

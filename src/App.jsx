@@ -15,6 +15,7 @@ import UserManagement from './components/UserManagement.jsx';
 import FEPortal from './components/FEPortal.jsx';
 import DPlusOneEscalationDashboard from './components/DPlusOneEscalationDashboard.jsx';
 import AccessControlPanel from './components/AccessControlPanel.jsx';
+import SuperAdminCronEngine from './components/SuperAdminCronEngine.jsx';
 import ClusterManagerPortal from './components/ClusterManagerPortal.jsx';
 import FatalObjectionHub from './components/FatalObjectionHub.jsx';
 
@@ -1410,26 +1411,27 @@ export default function App() {
           />
         )}
 
-        {/* PAGE 8: SUPERADMIN USER MANAGEMENT */}
-        {activePage === 'users' && (
-          <UserManagement
+        {/* PAGE 8: DAILY FATAL MAIL DISPATCH ENGINE (DEDICATED CONSOLE) */}
+        {activePage === 'emailDispatch' && (
+          <SuperAdminCronEngine
+            tasks={tasks}
             users={users}
-            onAddUser={handleAddUser}
-            onImportUsers={handleImportUsers}
-            onAddMultipleUsers={handleImportUsers}
-            onUpdateUserRole={handleUpdateUserRole}
-            onToggleUserActive={handleToggleUserActive}
-            onNavigate={setActivePage}
+            currentUser={currentUser}
           />
         )}
 
-        {/* PAGE 9: GRANULAR ACCESS CONTROL PANEL & SUPERADMIN CRON ENGINE */}
-        {activePage === 'accessControl' && (
+        {/* PAGE 9: ACCESS CONTROL PANEL & USER ACCOUNTS */}
+        {(activePage === 'accessControl' || activePage === 'users') && (
           <AccessControlPanel
             users={users}
-            tasks={tasks}
             currentUser={currentUser}
+            initialTab={activePage === 'users' ? 'userAccounts' : 'rolePresets'}
             onSaveUserPermissions={handleSaveUserPermissions}
+            onAddUser={handleAddUser}
+            onImportUsers={handleImportUsers}
+            onUpdateUserRole={handleUpdateUserRole}
+            onToggleUserActive={handleToggleUserActive}
+            onNavigate={setActivePage}
             onRefreshUsers={async () => {
               const fresh = await usersApi.getUsers();
               if (fresh && fresh.length > 0) setUsers(fresh);

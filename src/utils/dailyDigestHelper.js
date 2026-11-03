@@ -596,19 +596,20 @@ Lenskart Central Quality & Governance Division`;
 export function aggregateFeFatalDigests({
   tasks = [],
   users = [],
-  targetDate = new Date(),
+  targetDate,
+  targetDateStr,
   portalBaseUrl = 'https://locus-auditor.vercel.app'
 }) {
-  const targetDateStr = normalizeDateToYMD(targetDate);
+  const targetDateStrNormalized = normalizeDateToYMD(targetDateStr || targetDate || new Date());
   const feMap = new Map();
 
-  // Filter tasks audited today (or whose audit timestamp matches targetDate)
+  // Filter tasks belonging to target upload batch date
   tasks.forEach(t => {
     const taskDate = getTaskAuditDateYMD(t);
     const status = t.auditStatus || t.audit_status;
     const isAudited = status === 'PASSED' || status === 'FATAL';
 
-    if (!isAudited || taskDate !== targetDateStr) return;
+    if (!isAudited || taskDate !== targetDateStrNormalized) return;
 
     const feKey = String(t.feCode || t.fe_code || t.feId || t.fe_id || t.feName || 'unknown').trim().toLowerCase();
 

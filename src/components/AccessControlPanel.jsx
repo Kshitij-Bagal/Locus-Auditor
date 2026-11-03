@@ -37,33 +37,24 @@ import {
   PAGE_ID_TO_LABEL,
   PAGE_LABEL_TO_ID
 } from '../utils/accessHelper.js';
-import SuperAdminCronEngine from './SuperAdminCronEngine.jsx';
+import UserManagement from './UserManagement.jsx';
 import RolePresetsMatrix from './RolePresetsMatrix.jsx';
 
 export default function AccessControlPanel({
   users = [],
-  tasks = [],
   currentUser,
   onSaveUserPermissions,
-  onRefreshUsers
+  onRefreshUsers,
+  onAddUser,
+  onImportUsers,
+  onUpdateUserRole,
+  onToggleUserActive,
+  onNavigate,
+  initialTab = 'rolePresets'
 }) {
-  const [activeAdminTab, setActiveAdminTab] = useState('rolePresets'); // 'rolePresets' | 'permissions' | 'cronEngine'
+  const [activeAdminTab, setActiveAdminTab] = useState(initialTab || 'rolePresets');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRoleFilter, setSelectedRoleFilter] = useState('ALL');
-
-  // Count pending fatal strikes waiting to be dispatched
-  const pendingFatalFeCount = useMemo(() => {
-    const fatalFEs = new Set();
-    (tasks || []).forEach(t => {
-      const status = (t.auditStatus || t.audit_status || '').toUpperCase();
-      const isSent = Boolean(t.emailSent || t.email_sent);
-      if (status === 'FATAL' && !isSent) {
-        const feKey = t.feCode || t.fe_code || t.feId || t.feName;
-        if (feKey) fatalFEs.add(feKey);
-      }
-    });
-    return fatalFEs.size;
-  }, [tasks]);
 
   // Local state for modified granted permissions: map of { [userEmailOrId]: string[] } (granted page IDs)
   const [grantedPermissions, setGrantedPermissions] = useState(() => {
@@ -208,24 +199,19 @@ export default function AccessControlPanel({
           }`}
         >
           <Key className="w-4 h-4 text-purple-400" />
-          <span>User Individual Access & Overrides</span>
+          <span>Staff Page Permissions & Overrides</span>
         </button>
 
         <button
-          onClick={() => setActiveAdminTab('cronEngine')}
+          onClick={() => setActiveAdminTab('userAccounts')}
           className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
-            activeAdminTab === 'cronEngine'
-              ? 'bg-gradient-to-r from-red-600/30 via-red-500/20 to-purple-600/30 text-white border border-red-500/40 shadow-lg shadow-red-950/40'
+            activeAdminTab === 'userAccounts'
+              ? 'bg-gradient-to-r from-blue-600/30 via-indigo-600/20 to-sky-600/30 text-white border border-blue-500/50 shadow-lg shadow-blue-950/40'
               : 'bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800'
           }`}
         >
-          <ShieldAlert className="w-4 h-4 text-red-400" />
-          <span>Daily FE Fatal Dispatch Engine (Schedulable Cron)</span>
-          {pendingFatalFeCount > 0 && (
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-red-500 text-white animate-pulse">
-              {pendingFatalFeCount} FEs
-            </span>
-          )}
+          <Users className="w-4 h-4 text-sky-400" />
+          <span>User Accounts & Staff Registry ({users.length})</span>
         </button>
       </div>
 
@@ -234,11 +220,15 @@ export default function AccessControlPanel({
           users={users}
           currentUser={currentUser}
         />
-      ) : activeAdminTab === 'cronEngine' ? (
-        <SuperAdminCronEngine
-          tasks={tasks}
+      ) : activeAdminTab === 'userAccounts' ? (
+        <UserManagement
           users={users}
-          currentUser={currentUser}
+          onAddUser={onAddUser}
+          onImportUsers={onImportUsers}
+          onAddMultipleUsers={onImportUsers}
+          onUpdateUserRole={onUpdateUserRole}
+          onToggleUserActive={onToggleUserActive}
+          onNavigate={onNavigate}
         />
       ) : (
         <>
