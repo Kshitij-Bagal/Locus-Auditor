@@ -1999,6 +1999,15 @@ export const feFatalDigestApi = {
 export const settingsApi = {
   // Fetch system setting by key (e.g., 'role_presets')
   async getSetting(key, defaultValue = null) {
+    // If the table is missing from Supabase schema, cleanly avoid failing network calls
+    if (typeof window !== 'undefined' && sessionStorage.getItem('locus_table_system_settings_missing') === 'true') {
+      try {
+        const cached = localStorage.getItem(`locus_setting_${key}`);
+        if (cached) return JSON.parse(cached);
+      } catch (e) {}
+      return defaultValue;
+    }
+
     if (supabase) {
       try {
         const { data, error } = await supabase
@@ -2007,14 +2016,21 @@ export const settingsApi = {
           .eq('key', key)
           .maybeSingle();
 
-        if (!error && data?.value) {
+        if (error) {
+          if (error.code === 'PGRST205' && typeof window !== 'undefined') {
+            sessionStorage.setItem('locus_table_system_settings_missing', 'true');
+          }
+        } else if (data?.value) {
+          if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('locus_table_system_settings_missing');
+          }
           try {
             localStorage.setItem(`locus_setting_${key}`, JSON.stringify(data.value));
           } catch (e) {}
           return data.value;
         }
       } catch (err) {
-        console.warn('system_settings getSetting note:', err.message);
+        // Fallback to local storage
       }
     }
 
@@ -2032,6 +2048,10 @@ export const settingsApi = {
       localStorage.setItem(`locus_setting_${key}`, JSON.stringify(value));
     } catch (e) {}
 
+    if (typeof window !== 'undefined' && sessionStorage.getItem('locus_table_system_settings_missing') === 'true') {
+      return value;
+    }
+
     if (supabase) {
       try {
         const payload = {
@@ -2045,11 +2065,13 @@ export const settingsApi = {
           .upsert(payload, { onConflict: 'key' });
 
         if (error) {
-          console.warn('Supabase system_settings upsert error:', error.message);
+          if (error.code === 'PGRST205' && typeof window !== 'undefined') {
+            sessionStorage.setItem('locus_table_system_settings_missing', 'true');
+          }
+        } else if (typeof window !== 'undefined') {
+          sessionStorage.removeItem('locus_table_system_settings_missing');
         }
-      } catch (err) {
-        console.warn('system_settings setSetting note:', err.message);
-      }
+      } catch (err) {}
     }
     return value;
   },
