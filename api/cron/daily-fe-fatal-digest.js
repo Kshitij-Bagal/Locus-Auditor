@@ -149,7 +149,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     const smtpPort = creds.smtpPort || process.env.SMTP_PORT || '587';
     const smtpUser = creds.smtpUser || process.env.SMTP_USER;
     const smtpPass = creds.smtpPass || process.env.SMTP_PASS;
-    const fromAddress = creds.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@lenskart.com>';
+    const fromAddress = creds.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@gmail.com>';
 
     let provider = null;
     if (brevoApiKey) provider = 'brevo';
@@ -168,7 +168,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       // 1. BREVO REST API DISPATCH
       if (provider === 'brevo') {
         let senderName = 'Lenskart Quality Audit';
-        let senderEmail = 'kshitijbagal@lenskart.com';
+        let senderEmail = 'kshitijbagal@gmail.com';
         if (fromAddress && fromAddress.includes('@')) {
           const match = fromAddress.match(/(.*?)\s*<(.+?)>/);
           if (match) {

@@ -838,20 +838,32 @@ const EMAIL_CONFIG_KEY = 'locus_email_gateway_config_v1';
 export const emailApi = {
   // Read configured gateway credentials (Brevo, Resend or SMTP)
   getGatewayConfig() {
+    const brevoEnvKey = import.meta.env.VITE_BREVO_API_KEY || '';
     try {
       const saved = localStorage.getItem(EMAIL_CONFIG_KEY);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed) {
+          if (!parsed.brevoApiKey) parsed.brevoApiKey = brevoEnvKey;
+          if (!parsed.fromAddress || parsed.fromAddress.includes('lenskart.com') || parsed.fromAddress.includes('resend.dev')) {
+            parsed.fromAddress = 'Lenskart Quality Audit <kshitijbagal@gmail.com>';
+          }
+          if (parsed.provider !== 'smtp' && parsed.provider !== 'resend') {
+            parsed.provider = 'brevo';
+          }
+          return parsed;
+        }
+      }
     } catch (e) {}
-    const brevoEnvKey = import.meta.env.VITE_BREVO_API_KEY || '';
     return {
-      provider: brevoEnvKey ? 'brevo' : 'resend', // 'brevo' | 'resend' | 'smtp'
+      provider: 'brevo',
       brevoApiKey: brevoEnvKey,
       resendApiKey: '',
       smtpHost: '',
       smtpPort: 587,
       smtpUser: '',
       smtpPass: '',
-      fromAddress: 'Lenskart Quality Audit <kshitijbagal@lenskart.com>'
+      fromAddress: 'Lenskart Quality Audit <kshitijbagal@gmail.com>'
     };
   },
 

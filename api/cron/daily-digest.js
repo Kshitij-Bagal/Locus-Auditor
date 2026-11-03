@@ -150,7 +150,7 @@ export async function dailyDigestCronHandler(req, res) {
     const smtpUser = body.credentials?.smtpUser || process.env.SMTP_USER;
     const smtpPass = body.credentials?.smtpPass || process.env.SMTP_PASS;
     const smtpPort = body.credentials?.smtpPort || process.env.SMTP_PORT || 587;
-    const fromAddress = body.credentials?.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@lenskart.com>';
+    const fromAddress = body.credentials?.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@gmail.com>';
 
     const provider = brevoApiKey ? 'brevo' : resendApiKey ? 'resend' : smtpHost ? 'smtp' : null;
 
@@ -166,7 +166,7 @@ export async function dailyDigestCronHandler(req, res) {
 
       if (provider === 'brevo') {
         let senderName = 'Lenskart Quality Audit';
-        let senderEmail = 'kshitijbagal@lenskart.com';
+        let senderEmail = 'kshitijbagal@gmail.com';
         if (fromAddress && fromAddress.includes('@')) {
           const match = fromAddress.match(/(.*?)\s*<(.+?)>/);
           if (match) {

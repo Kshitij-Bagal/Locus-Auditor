@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   X, 
   CheckCircle2, 
@@ -68,6 +68,8 @@ export default function AuditModal({
   const [blanketReasonIndex, setBlanketReasonIndex] = useState(0);
   const [highlightedFailureIndex, setHighlightedFailureIndex] = useState(0);
   const [highlightedToolIndex, setHighlightedToolIndex] = useState(0);
+  const [verdictLeaderActive, setVerdictLeaderActive] = useState(false);
+  const verdictTimeoutRef = useRef(null);
 
   // Equipment Replacements Requisition State
   const [replacements, setReplacements] = useState([]);
@@ -288,20 +290,37 @@ export default function AuditModal({
         return;
       }
 
-      // 2. Zone Switches: [i], [v], [c], [o]
+      // 2. Zone Switches & [v + p] / [v + c] Verdict Combinations
       if (e.key === 'i' || e.key === 'I') {
         e.preventDefault();
         setActiveZone('image');
+        setVerdictLeaderActive(false);
         return;
       }
       if (e.key === 'v' || e.key === 'V') {
         e.preventDefault();
         setActiveZone('verdict');
         setRightPanelTab('sop');
+        setVerdictLeaderActive(true);
+        if (verdictTimeoutRef.current) clearTimeout(verdictTimeoutRef.current);
+        verdictTimeoutRef.current = setTimeout(() => {
+          setVerdictLeaderActive(false);
+        }, 3500);
         return;
       }
       if (e.key === 'c' || e.key === 'C') {
         e.preventDefault();
+        // [v + c] combination: Mark current item FAIL and open fatal criteria picker
+        if (verdictLeaderActive || activeZone === 'verdict') {
+          handleToggleCriterionStatus(currentCriterion.id, 'FAIL');
+          setShowFatalPicker(true);
+          setRightPanelTab('sop');
+          setActiveZone('criteria');
+          setVerdictLeaderActive(false);
+          return;
+        }
+
+        // Standalone [c] outside verdict: Switch to Criteria Zone
         setActiveZone('criteria');
         setRightPanelTab('sop');
         setShowFatalPicker(true);
@@ -311,6 +330,7 @@ export default function AuditModal({
         e.preventDefault();
         setActiveZone('tools');
         setRightPanelTab('replacements');
+        setVerdictLeaderActive(false);
         return;
       }
 
@@ -392,9 +412,21 @@ export default function AuditModal({
         return;
       }
 
-      // 6. Immediate Submissions: [p], [f], [Escape]
+      // 6. Submissions & Item Pass: [v + p] / [p], [f], [Escape]
       if (e.key === 'p' || e.key === 'P') {
         e.preventDefault();
+
+        // [v + p] combination: Mark current item PASS and advance to next photo
+        if (verdictLeaderActive || activeZone === 'verdict') {
+          handleToggleCriterionStatus(currentCriterion.id, 'PASS');
+          setVerdictLeaderActive(false);
+          if (activeCriterionIndex < rules.length - 1) {
+            setActiveCriterionIndex(prev => prev + 1);
+          }
+          return;
+        }
+
+        // Standalone [p] outside verdict mode: Quick Pass entire audit
         handlePassClick();
         if (hasNext) onNextTask();
         else onClose();
@@ -430,7 +462,8 @@ export default function AuditModal({
     rules, 
     hasNext, 
     hasPrev, 
-    currentCriterion
+    currentCriterion,
+    verdictLeaderActive
   ]);
 
   return (
@@ -529,8 +562,14 @@ export default function AuditModal({
               <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'image' ? 'bg-sky-500/20 text-sky-300 border-sky-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
                 [i] Image
               </span>
-              <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'verdict' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
-                [v] Verdict
+              <span className={`px-1.5 py-0.5 rounded border transition-all ${
+                verdictLeaderActive 
+                  ? 'bg-emerald-500 text-black border-emerald-300 font-bold animate-pulse' 
+                  : activeZone === 'verdict' 
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400 font-bold' 
+                  : 'bg-slate-900 border-slate-800'
+              }`}>
+                [v] Verdict {verdictLeaderActive ? '(press p or c)' : ''}
               </span>
               <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'criteria' ? 'bg-red-500/20 text-red-300 border-red-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
                 [c] Criteria
@@ -544,11 +583,9 @@ export default function AuditModal({
           <div className="flex items-center gap-3 font-mono text-[10px]">
             <span>[1-5] Jump Photo</span>
             <span>&bull;</span>
-            <span>[j/k] Navigate</span>
+            <span className="text-emerald-400 font-bold">[v+p] Item Pass</span>
             <span>&bull;</span>
-            <span>[Space/Enter] Toggle</span>
-            <span>&bull;</span>
-            <span className="text-emerald-400 font-bold">[p] Quick Pass</span>
+            <span className="text-red-400 font-bold">[v+c] Item Fail</span>
             <span>&bull;</span>
             <span className="text-red-400 font-bold">[f] Blanket Fatal</span>
           </div>
@@ -624,40 +661,62 @@ export default function AuditModal({
             activeZone === 'image' ? 'border-sky-500/60 ring-1 ring-sky-500/30' : 'border-slate-800'
           }`}>
             {/* Criterion brief & itemized pass/fail buttons */}
-            <div className={`mt-1 p-3 bg-slate-900/60 rounded-xl border flex items-center justify-between text-xs transition-all ${
-              activeZone === 'verdict' ? 'border-emerald-500/50 bg-emerald-950/10' : 'border-slate-800'
+            <div className={`mt-1 p-3 bg-slate-900/60 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs transition-all ${
+              verdictLeaderActive
+                ? 'border-emerald-400 bg-emerald-950/30 ring-2 ring-emerald-500/40 shadow-lg'
+                : activeZone === 'verdict'
+                ? 'border-emerald-500/50 bg-emerald-950/10'
+                : 'border-slate-800'
             }`}>
               <div>
-                <span className="text-slate-400 block text-[11px]">SOP Rule:</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400 block text-[11px]">SOP Rule:</span>
+                  {verdictLeaderActive && (
+                    <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[10px] font-bold border border-emerald-500/40 animate-pulse">
+                      Verdict Active: press [p] or [c]
+                    </span>
+                  )}
+                </div>
                 <span className="text-slate-200 font-medium">{currentCriterion.description}</span>
               </div>
-              <div className="flex items-center space-x-2 ml-4">
+              <div className="flex items-center space-x-2 shrink-0">
                 <button
-                  onClick={() => handleToggleCriterionStatus(currentCriterion.id, 'PASS')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                  type="button"
+                  onClick={() => {
+                    handleToggleCriterionStatus(currentCriterion.id, 'PASS');
+                    if (activeCriterionIndex < rules.length - 1) {
+                      setActiveCriterionIndex(prev => prev + 1);
+                    }
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
                     criteriaStatus[currentCriterion.id] === 'PASS'
                       ? 'bg-emerald-600 text-white shadow-md'
                       : 'bg-slate-800 text-slate-300 hover:text-emerald-400 hover:bg-slate-700'
                   }`}
+                  title="Mark this item as passed [Shortcut: v + p]"
                 >
                   <Check className="w-3.5 h-3.5" />
-                  Pass Item
+                  <span>Pass Item</span>
+                  <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-black/40 text-emerald-300 border border-emerald-500/30">v+p</span>
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
                     handleToggleCriterionStatus(currentCriterion.id, 'FAIL');
                     setShowFatalPicker(true);
                     setRightPanelTab('sop');
                     setActiveZone('criteria');
                   }}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
                     criteriaStatus[currentCriterion.id] === 'FAIL'
                       ? 'bg-red-600 text-white shadow-md'
                       : 'bg-slate-800 text-slate-300 hover:text-red-400 hover:bg-slate-700'
                   }`}
+                  title="Mark this item as failed [Shortcut: v + c]"
                 >
                   <AlertTriangle className="w-3.5 h-3.5" />
-                  Fail Item
+                  <span>Fail Item</span>
+                  <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-black/40 text-red-300 border border-red-500/30">v+c</span>
                 </button>
               </div>
             </div>

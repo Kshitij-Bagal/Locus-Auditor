@@ -79,7 +79,7 @@ export async function sendEmailHandler(req, res) {
     const smtpUser = credentials.smtpUser || process.env.SMTP_USER;
     const smtpPass = credentials.smtpPass || process.env.SMTP_PASS;
     const smtpPort = credentials.smtpPort || process.env.SMTP_PORT || 587;
-    const fromAddress = credentials.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@lenskart.com>';
+    const fromAddress = credentials.fromAddress || process.env.BREVO_FROM_EMAIL || process.env.EMAIL_FROM || 'Lenskart Quality Audit <kshitijbagal@gmail.com>';
 
     const provider = requestedProvider || (brevoApiKey ? 'brevo' : resendApiKey ? 'resend' : smtpHost ? 'smtp' : null);
 
@@ -103,7 +103,7 @@ export async function sendEmailHandler(req, res) {
 
       // Format sender
       let senderName = 'Lenskart Quality Audit';
-      let senderEmail = 'kshitijbagal@lenskart.com';
+      let senderEmail = 'kshitijbagal@gmail.com';
       if (fromAddress && fromAddress.includes('@')) {
         const match = fromAddress.match(/(.*?)\s*<(.+?)>/);
         if (match) {
