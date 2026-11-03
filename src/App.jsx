@@ -899,6 +899,12 @@ export default function App() {
     }
   };
 
+  // Batch Auto-Fatal: Handler when Roster triggers Auto-Fatal for completed leads without photos
+  const handleAutoFatalTasks = (updatedTasks, count) => {
+    setTasks(updatedTasks);
+    showToast(`Marked ${count} blank-image completed leads as FATAL (Auto Fatal by System)!`, 'warning');
+  };
+
   // Reassignment Handler for D+1 Overdue Audits (BH & GM Console)
   const handleReassignTask = async ({ taskId, auditorId, auditorName }) => {
     try {
@@ -1330,6 +1336,8 @@ export default function App() {
             users={users}
             onAutoAllocate={handleAutoAllocate}
             onTasksAllocated={handleAutoAllocate}
+            onAutoFatalTasks={handleAutoFatalTasks}
+            onUpdateTasks={setTasks}
             onUpdateUserRole={handleUpdateUserRole}
             currentUserRole={currentUser.role}
           />

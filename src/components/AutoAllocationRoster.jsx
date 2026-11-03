@@ -30,6 +30,8 @@ export default function AutoAllocationRoster({
   users = [],
   onAutoAllocate,
   onTasksAllocated,
+  onUpdateTasks,
+  onAutoFatalTasks,
   onUpdateUserRole,
   currentUserRole
 }) {
@@ -66,6 +68,7 @@ export default function AutoAllocationRoster({
   const [roster, setRoster] = useState([]);
   const [allocationLog, setAllocationLog] = useState(null);
   const [isAllocating, setIsAllocating] = useState(false);
+  const [isAutoFatalling, setIsAutoFatalling] = useState(false);
   const [showAddAuditorModal, setShowAddAuditorModal] = useState(false);
   const [selectedStaffToPromote, setSelectedStaffToPromote] = useState('');
 
@@ -148,6 +151,16 @@ export default function AutoAllocationRoster({
     });
   }, [tasks]);
 
+  // Completed leads with missing/blank image evidence eligible for Auto-Fatal by System
+  const blankCompletedTasks = useMemo(() => {
+    return (tasks || []).filter(t => {
+      const isCompleted = String(t.status || '').toUpperCase() === 'COMPLETED';
+      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && typeof t.images === 'object' && Object.values(t.images).some(Boolean)));
+      const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
+      return isCompleted && !hasPhotos && isPending;
+    });
+  }, [tasks]);
+
   // Active auditors not on leave
   const activeAuditors = useMemo(() => {
     return roster.filter(a => a.shiftStatus !== 'ON_LEAVE');
@@ -208,6 +221,80 @@ export default function AutoAllocationRoster({
         shiftStatus: newStatus,
         currentAssigned: currentStats.total
       });
+    }
+  };
+
+  // Direct Auto-Fatal by System: Mark all completed leads with missing/blank images as FATAL
+  const handleAutoFatalBlankTasks = async () => {
+    if (blankCompletedTasks.length === 0) {
+      alert('No pending completed tasks without images found. All completed tasks either have photos or have already been audited.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Mark all ${blankCompletedTasks.length} completed tasks without images as FATAL?\n\n` +
+      `• Database Attribution: "Auto Fatal by System"\n` +
+      `• Failure Reason: Missing mandatory photo evidence (Zero images uploaded)\n` +
+      `• Scope: ${blankCompletedTasks.length} leads in Supabase database.\n\n` +
+      `Do you want to proceed?`
+    );
+
+    if (!confirmed) return;
+
+    setIsAutoFatalling(true);
+
+    try {
+      const targetIds = blankCompletedTasks.map(t => String(t.id || t.taskId));
+      await tasksApi.autoFatalBlankTasks(targetIds);
+
+      const targetIdSet = new Set(targetIds);
+      const nowIso = new Date().toISOString();
+      const updatedTasks = tasks.map(t => {
+        const tid = String(t.id || t.taskId);
+        if (targetIdSet.has(tid)) {
+          return {
+            ...t,
+            auditStatus: 'FATAL',
+            audit_status: 'FATAL',
+            auditedAt: nowIso,
+            auditedBy: 'Auto Fatal by System',
+            audited_by_name: 'Auto Fatal by System',
+            auditedLocation: 'Central Compliance Engine',
+            auditor_remarks: 'Auto fatal by system: Completed task with zero mandatory photo evidence uploaded.',
+            failedReasons: ['Missing mandatory photo evidence (Zero images uploaded)'],
+            criteriaStatus: {
+              selfie: 'FAIL',
+              toolkit: 'FAIL',
+              torches: 'FAIL',
+              visionChart: 'FAIL',
+              frameDisplay: 'FAIL'
+            },
+            replacements: [],
+            emailSent: false,
+            email_sent: false
+          };
+        }
+        return t;
+      });
+
+      if (onAutoFatalTasks) {
+        onAutoFatalTasks(updatedTasks, targetIds.length);
+      } else if (onUpdateTasks) {
+        onUpdateTasks(updatedTasks);
+      } else if (allocateCallback) {
+        allocateCallback(updatedTasks);
+      }
+
+      setAllocationLog({
+        timestamp: new Date().toLocaleTimeString(),
+        assignedCount: targetIds.length,
+        note: `Applied FATAL to ${targetIds.length} completed leads with zero photos (Auto Fatal by System)`
+      });
+    } catch (err) {
+      console.error('Auto-fatal error:', err);
+      alert(`Auto-fatal error: ${err.message}`);
+    } finally {
+      setIsAutoFatalling(false);
     }
   };
 
@@ -529,6 +616,35 @@ export default function AutoAllocationRoster({
               </>
             )}
           </button>
+
+          {/* Direct Auto-Fatal Blank Image Tasks Button */}
+          <button
+            type="button"
+            onClick={handleAutoFatalBlankTasks}
+            disabled={isAutoFatalling || isAllocating || blankCompletedTasks.length === 0}
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer shadow-lg self-start md:self-auto border ${
+              blankCompletedTasks.length > 0
+                ? 'bg-gradient-to-r from-rose-600 via-red-600 to-rose-700 hover:from-rose-500 hover:to-red-500 text-white border-rose-500/40 shadow-rose-600/25 ring-1 ring-rose-500/30'
+                : 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed opacity-60'
+            }`}
+            title={
+              blankCompletedTasks.length === 0
+                ? 'No pending completed tasks without images'
+                : `Apply FATAL to all ${blankCompletedTasks.length} completed tasks missing mandatory photos (Recorded as Auto Fatal by System)`
+            }
+          >
+            {isAutoFatalling ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin text-white" />
+                <span>Applying Auto-Fatal ({blankCompletedTasks.length})...</span>
+              </>
+            ) : (
+              <>
+                <ShieldAlert className={`w-4 h-4 ${blankCompletedTasks.length > 0 ? 'text-rose-200' : 'text-slate-500'}`} />
+                <span>Auto-Fatal Blank Image Leads ({blankCompletedTasks.length})</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -546,11 +662,15 @@ export default function AutoAllocationRoster({
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">Excluded (No Photos)</span>
-            <ShieldAlert className="w-4 h-4 text-slate-400" />
+            <span className="text-xs font-semibold">Blank Image Leads</span>
+            <ShieldAlert className={`w-4 h-4 ${blankCompletedTasks.length > 0 ? 'text-rose-400' : 'text-slate-400'}`} />
           </div>
-          <div className="text-2xl font-black text-slate-300">{unassignedWithoutPhotos.length}</div>
-          <p className="text-[11px] text-slate-500 mt-0.5">Cannot audit • Omitted from queue</p>
+          <div className={`text-2xl font-black ${blankCompletedTasks.length > 0 ? 'text-rose-400' : 'text-slate-300'}`}>
+            {blankCompletedTasks.length}
+          </div>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            {blankCompletedTasks.length > 0 ? 'Zero photos • Ready for auto-fatal' : 'All zero-photo leads processed'}
+          </p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">

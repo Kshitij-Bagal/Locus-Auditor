@@ -329,6 +329,56 @@ export const tasksApi = {
     }
   },
 
+  // Batch Auto-Fatal: Mark all completed leads with missing/blank images as FATAL in Supabase
+  async autoFatalBlankTasks(taskIds) {
+    if (!taskIds || taskIds.length === 0) return { count: 0, success: true };
+    if (!supabase) return { count: taskIds.length, success: true, local: true };
+
+    try {
+      const payload = {
+        audit_status: 'FATAL',
+        audited_at: new Date().toISOString(),
+        audited_by_name: 'Auto Fatal by System',
+        audited_location: 'Central Compliance Engine',
+        auditor_remarks: 'Auto fatal by system: Completed task with zero mandatory photo evidence uploaded.',
+        failed_reasons: ['Missing mandatory photo evidence (Zero images uploaded)'],
+        criteria_status: {
+          selfie: 'FAIL',
+          toolkit: 'FAIL',
+          torches: 'FAIL',
+          visionChart: 'FAIL',
+          frameDisplay: 'FAIL'
+        },
+        replacements: [],
+        email_sent: false,
+        email_sent_at: null,
+        email_recipients: [],
+        updated_at: new Date().toISOString()
+      };
+
+      const chunkSize = 100;
+      let totalUpdated = 0;
+      for (let i = 0; i < taskIds.length; i += chunkSize) {
+        const chunk = taskIds.slice(i, i + chunkSize);
+        const { error } = await supabase
+          .from('tasks')
+          .update(payload)
+          .in('id', chunk);
+
+        if (error) {
+          console.error('tasksApi.autoFatalBlankTasks error:', error);
+          throw error;
+        }
+        totalUpdated += chunk.length;
+      }
+
+      return { count: totalUpdated, success: true };
+    } catch (err) {
+      console.warn('tasksApi.autoFatalBlankTasks failed:', err.message);
+      throw err;
+    }
+  },
+
   // Get all tasks from database (handles Supabase PostgREST default 1,000-row limit via automated range pagination)
   async getTasks() {
     if (!supabase) return null;
