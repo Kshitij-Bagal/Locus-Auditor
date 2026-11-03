@@ -164,6 +164,12 @@ export default function App() {
       userRoles.includes('GM');
   }, [isSuperAdmin, userRoles]);
 
+  // Real Auditors pool for task allocation, escalations, and upload auto-allocation:
+  // Dedicated Auditors, City Admins, and Central Ops who carry photo audit responsibilities
+  const realAuditors = useMemo(() => {
+    return (users || []).filter(u => isEligibleForAuditRoster(u, { includeSuperAdmin: true }));
+  }, [users]);
+
   // Available auditors for dropdown selection in the Audits console:
   // For SuperAdmin: Includes all City Admins, SuperAdmins, and any auditor with assigned tasks
   const availableAuditorsForFilter = useMemo(() => {
