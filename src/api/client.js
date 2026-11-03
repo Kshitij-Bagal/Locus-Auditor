@@ -360,10 +360,14 @@ export const tasksApi = {
       let totalUpdated = 0;
       for (let i = 0; i < taskIds.length; i += chunkSize) {
         const chunk = taskIds.slice(i, i + chunkSize);
+        // STRICT SAFETY GUARD: Only update tasks that have NEVER been audited!
+        // Never touch or overwrite tasks that a human auditor has already audited.
         const { error } = await supabase
           .from('tasks')
           .update(payload)
-          .in('id', chunk);
+          .in('id', chunk)
+          .or('audit_status.is.null,audit_status.eq.PENDING')
+          .is('audited_at', null);
 
         if (error) {
           console.error('tasksApi.autoFatalBlankTasks error:', error);

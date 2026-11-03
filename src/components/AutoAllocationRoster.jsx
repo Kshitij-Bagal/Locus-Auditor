@@ -132,12 +132,21 @@ export default function AutoAllocationRoster({
     });
   }, [tasks]);
 
+  // Helper: Strictly check whether a task has already been audited by an auditor
+  // Never touch, reassign, or auto-fatal any task that has already been audited!
+  const isTaskAlreadyAudited = (t) => {
+    if (!t) return false;
+    const status = String(t.auditStatus || t.audit_status || '').toUpperCase();
+    if (status === 'PASSED' || status === 'FATAL') return true;
+    if (t.auditedAt || t.audited_at || t.auditedBy || t.audited_by_name) return true;
+    return false;
+  };
+
   // All pending tasks with photos (both currently assigned and unassigned) that can be re-distributed
   const pendingAuditablePool = useMemo(() => {
     return tasks.filter(t => {
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-      const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
-      return hasPhotos && isPending;
+      return hasPhotos && !isTaskAlreadyAudited(t);
     });
   }, [tasks]);
 
@@ -145,19 +154,19 @@ export default function AutoAllocationRoster({
   const unassignedWithoutPhotos = useMemo(() => {
     return tasks.filter(t => {
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-      const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
       const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
-      return !hasPhotos && isPending && isUnassigned;
+      return !hasPhotos && !isTaskAlreadyAudited(t) && isUnassigned;
     });
   }, [tasks]);
 
   // Completed leads with missing/blank image evidence eligible for Auto-Fatal by System
+  // STRICT RULE: Only include leads that are strictly UN-AUDITED / PENDING!
+  // If an auditor has already reviewed/audited this task, it must remain strictly untouched!
   const blankCompletedTasks = useMemo(() => {
     return (tasks || []).filter(t => {
       const isCompleted = String(t.status || '').toUpperCase() === 'COMPLETED';
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && typeof t.images === 'object' && Object.values(t.images).some(Boolean)));
-      const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
-      return isCompleted && !hasPhotos && isPending;
+      return isCompleted && !hasPhotos && !isTaskAlreadyAudited(t);
     });
   }, [tasks]);
 
@@ -244,7 +253,14 @@ export default function AutoAllocationRoster({
     setIsAutoFatalling(true);
 
     try {
-      const targetIds = blankCompletedTasks.map(t => String(t.id || t.taskId));
+      // Filter strictly un-audited target tasks
+      const safeTargetTasks = blankCompletedTasks.filter(t => !isTaskAlreadyAudited(t));
+      if (safeTargetTasks.length === 0) {
+        alert('All zero-photo completed tasks have already been audited. Nothing to auto-fatal.');
+        return;
+      }
+
+      const targetIds = safeTargetTasks.map(t => String(t.id || t.taskId));
       await tasksApi.autoFatalBlankTasks(targetIds);
 
       const targetIdSet = new Set(targetIds);
@@ -252,6 +268,9 @@ export default function AutoAllocationRoster({
       const updatedTasks = tasks.map(t => {
         const tid = String(t.id || t.taskId);
         if (targetIdSet.has(tid)) {
+          // Never overwrite any task that was already audited
+          if (isTaskAlreadyAudited(t)) return t;
+
           return {
             ...t,
             auditStatus: 'FATAL',
