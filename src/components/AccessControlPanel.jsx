@@ -19,6 +19,7 @@ import {
   AlertTriangle, 
   ShoppingBag, 
   User, 
+  Users,
   Copy,
   ShieldAlert,
   Clock,
