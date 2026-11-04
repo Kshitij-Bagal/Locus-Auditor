@@ -3,11 +3,54 @@
  * 
  * Provides:
  * 1. Cryptographic SHA-256 Byte Fingerprinting (100% exact bit match)
- * 2. Perceptual Difference Hashing (dHash 64-bit) for visual clone detection
- *    (immune to re-compression, minor cropping, format changes, and brightness shifts)
+ * 2. Perceptual Difference Hashing (dHash 64-bit) for visual clone & screenshot detection
+ *    (resilient to re-compression, minor cropping, format changes, and brightness shifts)
  * 3. EXIF Metadata Extraction (DateTimeOriginal, Camera Make/Model, Software, GPS)
- * 4. Pairwise Hamming Distance & Similarity Analysis
+ * 4. Automated Batch Scanning across all field tasks with CORS proxy fallback
+ * 5. Cluster & Collusion Detection (Identical Files, Resized/Cropped Clones, Stale Photos)
  */
+
+// In-memory cache for downloaded buffers to avoid duplicate network roundtrips
+const bufferCache = new Map();
+
+/**
+ * Universal Image Fetcher with CORS Proxy Fallback
+ * @param {string} url 
+ * @returns {Promise<ArrayBuffer>}
+ */
+export async function fetchImageBuffer(url) {
+  if (!url || typeof url !== 'string') throw new Error('Invalid image URL');
+
+  if (bufferCache.has(url)) {
+    return bufferCache.get(url);
+  }
+
+  // 1. Try direct fetch first
+  try {
+    const directResp = await fetch(url, { mode: 'cors' });
+    if (directResp.ok) {
+      const buf = await directResp.arrayBuffer();
+      bufferCache.set(url, buf);
+      return buf;
+    }
+  } catch (directErr) {
+    // CORS or network error, proceed to proxy fallback
+  }
+
+  // 2. Fallback to serverless image proxy
+  try {
+    const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(url)}`;
+    const proxyResp = await fetch(proxyUrl);
+    if (!proxyResp.ok) {
+      throw new Error(`Proxy returned HTTP ${proxyResp.status} ${proxyResp.statusText}`);
+    }
+    const buf = await proxyResp.arrayBuffer();
+    bufferCache.set(url, buf);
+    return buf;
+  } catch (proxyErr) {
+    throw new Error(`Failed to load image from both direct & proxy endpoints: ${proxyErr.message}`);
+  }
+}
 
 /**
  * Computes SHA-256 hash of an ArrayBuffer using Web Crypto API
@@ -28,7 +71,7 @@ export async function computeSHA256(buffer) {
 /**
  * Computes 64-bit Perceptual Difference Hash (dHash) from an image element or canvas
  * Algorithm:
- * 1. Downsample image to 9x8 pixels (discards high-frequency detail)
+ * 1. Downsample image to 9x8 pixels
  * 2. Convert to grayscale luminance
  * 3. Compare adjacent horizontal pixels (P[x] > P[x+1] -> 1 else 0)
  * 4. Yields 8 rows * 8 comparisons = 64-bit binary fingerprint
@@ -44,11 +87,9 @@ export function computeDHash(img) {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
 
-    // Draw scaled down
     ctx.drawImage(img, 0, 0, 9, 8);
     const imgData = ctx.getImageData(0, 0, 9, 8).data;
 
-    // Build 9x8 grayscale luminance matrix
     const gray = [];
     for (let y = 0; y < 8; y++) {
       const row = [];
@@ -57,16 +98,14 @@ export function computeDHash(img) {
         const r = imgData[idx];
         const g = imgData[idx + 1];
         const b = imgData[idx + 2];
-        // Standard Rec. 601 luma formula
         const luma = 0.299 * r + 0.587 * g + 0.114 * b;
         row.push(luma);
       }
       gray.push(row);
     }
 
-    // Compare adjacent horizontal pixels -> 64 bits
     let binary = '';
-    const diffGrid = []; // For visual thumbnail preview
+    const diffGrid = [];
     for (let y = 0; y < 8; y++) {
       const diffRow = [];
       for (let x = 0; x < 8; x++) {
@@ -77,7 +116,6 @@ export function computeDHash(img) {
       diffGrid.push(diffRow);
     }
 
-    // Convert 64 bits to 16-character hex string
     let hex = '';
     for (let i = 0; i < binary.length; i += 4) {
       const nibble = binary.substring(i, i + 4);
@@ -107,7 +145,6 @@ export function calculateHammingDistance(hashA, hashB) {
   let binA = hashA;
   let binB = hashB;
 
-  // If passed as hex, convert to binary
   if (binA.length === 16 && !binA.includes(' ')) {
     binA = Array.from(binA).map(h => parseInt(h, 16).toString(2).padStart(4, '0')).join('');
   }
@@ -141,15 +178,13 @@ export function extractExifMetadata(buffer) {
     software: null,
     orientation: null,
     gps: null,
-    jfif: false,
-    rawTags: {}
+    jfif: false
   };
 
   try {
     const view = new DataView(buffer);
     if (view.byteLength < 4) return result;
 
-    // Check JPEG SOI (0xFFD8)
     if (view.getUint16(0) !== 0xFFD8) {
       return result; // Not a standard JPEG
     }
@@ -159,7 +194,6 @@ export function extractExifMetadata(buffer) {
       const marker = view.getUint16(offset);
       offset += 2;
 
-      // JFIF APP0 (0xFFE0)
       if (marker === 0xFFE0) {
         result.jfif = true;
         const length = view.getUint16(offset);
@@ -167,7 +201,6 @@ export function extractExifMetadata(buffer) {
         continue;
       }
 
-      // EXIF APP1 (0xFFE1)
       if (marker === 0xFFE1) {
         result.hasExif = true;
         const length = view.getUint16(offset);
@@ -185,12 +218,10 @@ export function extractExifMetadata(buffer) {
         continue;
       }
 
-      // If SOS (0xFFDA), image data begins -> stop parsing markers
       if (marker === 0xFFDA || marker === 0xFFD9) {
         break;
       }
 
-      // Other markers with length
       if ((marker & 0xFF00) === 0xFF00) {
         const length = view.getUint16(offset);
         offset += length;
@@ -199,19 +230,16 @@ export function extractExifMetadata(buffer) {
       }
     }
   } catch (err) {
-    console.debug('EXIF parsing stopped gracefully:', err);
+    // Graceful stop
   }
 
   return result;
 }
 
-/**
- * Helper to parse TIFF header inside APP1
- */
 function parseTiff(view, tiffStart, result) {
   try {
     const endianness = view.getUint16(tiffStart);
-    const littleEndian = endianness === 0x4949; // 'II'
+    const littleEndian = endianness === 0x4949;
 
     const fortyTwo = view.getUint16(tiffStart + 2, littleEndian);
     if (fortyTwo !== 0x002A) return;
@@ -220,9 +248,7 @@ function parseTiff(view, tiffStart, result) {
     if (firstIFDOffset < 8) return;
 
     readIFD(view, tiffStart, tiffStart + firstIFDOffset, littleEndian, result);
-  } catch (e) {
-    // Ignore malformed TIFF
-  }
+  } catch (e) {}
 }
 
 function readIFD(view, tiffStart, dirStart, littleEndian, result) {
@@ -240,9 +266,8 @@ function readIFD(view, tiffStart, dirStart, littleEndian, result) {
       const type = view.getUint16(entryOffset + 2, littleEndian);
       const count = view.getUint32(entryOffset + 4, littleEndian);
 
-      // Read string or value
       const getVal = () => {
-        if (type === 2) { // ASCII
+        if (type === 2) {
           const valOffset = count > 4 ? tiffStart + view.getUint32(entryOffset + 8, littleEndian) : entryOffset + 8;
           let str = '';
           for (let c = 0; c < count - 1; c++) {
@@ -254,8 +279,8 @@ function readIFD(view, tiffStart, dirStart, littleEndian, result) {
           }
           return str.trim();
         }
-        if (type === 3) return view.getUint16(entryOffset + 8, littleEndian); // SHORT
-        if (type === 4) return view.getUint32(entryOffset + 8, littleEndian); // LONG
+        if (type === 3) return view.getUint16(entryOffset + 8, littleEndian);
+        if (type === 4) return view.getUint32(entryOffset + 8, littleEndian);
         return null;
       };
 
@@ -268,14 +293,12 @@ function readIFD(view, tiffStart, dirStart, littleEndian, result) {
       else if (tag === 0x8825) gpsSubIFDOffset = view.getUint32(entryOffset + 8, littleEndian);
     }
 
-    // Read EXIF SubIFD if present
     if (exifSubIFDOffset) {
       const subEntries = view.getUint16(tiffStart + exifSubIFDOffset, littleEndian);
       for (let i = 0; i < subEntries; i++) {
         const subOffset = tiffStart + exifSubIFDOffset + 2 + i * 12;
         if (subOffset + 12 > view.byteLength) break;
         const tag = view.getUint16(subOffset, littleEndian);
-        const type = view.getUint16(subOffset + 2, littleEndian);
         const count = view.getUint32(subOffset + 4, littleEndian);
 
         if (tag === 0x9003 || tag === 0x9004) {
@@ -293,11 +316,9 @@ function readIFD(view, tiffStart, dirStart, littleEndian, result) {
     }
 
     if (gpsSubIFDOffset) {
-      result.gps = 'GPS Coordinates present in Exif';
+      result.gps = 'GPS Coordinates present';
     }
-  } catch (e) {
-    // Ignore malformed directory
-  }
+  } catch (e) {}
 }
 
 /**
@@ -312,31 +333,24 @@ export function evaluatePairwiseForensics(imgA, imgB) {
       status: 'PENDING',
       similarityPct: 0,
       hammingDistance: 64,
-      verdict: 'Upload both images to compare',
+      verdict: 'Incomplete inspection data',
       color: 'slate',
       isExactByteDuplicate: false,
       isPerceptualDuplicate: false
     };
   }
 
-  // 1. Check exact cryptographic byte match
   const isExactByteDuplicate = Boolean(imgA.sha256 && imgB.sha256 && imgA.sha256 === imgB.sha256);
-
-  // 2. Compute Hamming Distance on perceptual dHash
   const hammingDistance = calculateHammingDistance(imgA.dHash.hashBinary, imgB.dHash.hashBinary);
   const similarityPct = Math.max(0, Math.min(100, Math.round(((64 - hammingDistance) / 64) * 100)));
-
-  // 3. Check EXIF match if present
-  const bothHaveExifDate = Boolean(imgA.exif?.dateTimeOriginal && imgB.exif?.dateTimeOriginal);
-  const isSameCaptureTime = bothHaveExifDate && imgA.exif.dateTimeOriginal === imgB.exif.dateTimeOriginal;
 
   if (isExactByteDuplicate) {
     return {
       status: 'EXACT_DUPLICATE',
       similarityPct: 100,
       hammingDistance: 0,
-      verdict: '🚨 100% Exact Bit-for-Bit Duplicate (Re-uploaded Identical File)',
-      recommendation: 'FATAL STRIKE: Zero doubt. FE re-submitted the exact same image file across visits.',
+      verdict: '🚨 100% Exact Bit Duplicate',
+      recommendation: 'FATAL STRIKE: Zero doubt. Identical file submitted across visits.',
       color: 'rose',
       badgeClass: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
       isExactByteDuplicate: true,
@@ -349,8 +363,8 @@ export function evaluatePairwiseForensics(imgA, imgB) {
       status: 'PERCEPTUAL_CLONE',
       similarityPct,
       hammingDistance,
-      verdict: '🚨 Visual Clone / Re-compressed Reuse (Hamming Distance ≤ 2)',
-      recommendation: 'FATAL STRIKE: The same photograph was cropped, screenshotted, or re-saved to alter byte hashes.',
+      verdict: '🚨 Visual Clone (Resized / Screenshot)',
+      recommendation: 'FATAL STRIKE: Same photograph was cropped, screenshotted, or re-compressed.',
       color: 'red',
       badgeClass: 'bg-red-500/20 text-red-300 border-red-500/40',
       isExactByteDuplicate: false,
@@ -363,8 +377,8 @@ export function evaluatePairwiseForensics(imgA, imgB) {
       status: 'HIGH_SIMILARITY',
       similarityPct,
       hammingDistance,
-      verdict: '⚠️ High Probability Reuse / Same Framing (Hamming Distance 3–5)',
-      recommendation: 'FLAG FOR REVIEW: Extremely close angle/lighting. High likelihood of rapid duplicate burst or identical equipment staging.',
+      verdict: '⚠️ High Probability Reuse / Same Framing',
+      recommendation: 'FLAG FOR REVIEW: Extremely close angle/lighting. High likelihood of duplicate staging.',
       color: 'amber',
       badgeClass: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
       isExactByteDuplicate: false,
@@ -377,8 +391,8 @@ export function evaluatePairwiseForensics(imgA, imgB) {
       status: 'MODERATE_SIMILARITY',
       similarityPct,
       hammingDistance,
-      verdict: '🔍 Moderate Similarity (Hamming Distance 6–10)',
-      recommendation: 'ACCEPTABLE VARIANT: Common toolkit layout or similar background, but distinct photo capture.',
+      verdict: '🔍 Moderate Staging Similarity',
+      recommendation: 'ACCEPTABLE VARIANT: Common equipment setup, but distinct photo capture.',
       color: 'yellow',
       badgeClass: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/40',
       isExactByteDuplicate: false,
@@ -390,11 +404,307 @@ export function evaluatePairwiseForensics(imgA, imgB) {
     status: 'DISTINCT_AUTHENTIC',
     similarityPct,
     hammingDistance,
-    verdict: '✅ Distinct Authentic Photo (Hamming Distance > 10)',
+    verdict: '✅ Distinct Authentic Photo',
     recommendation: 'PASSED: Verified unique image. Zero visual or cryptographic overlap.',
     color: 'emerald',
     badgeClass: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
     isExactByteDuplicate: false,
     isPerceptualDuplicate: false
+  };
+}
+
+/**
+ * Fully inspects a single image item
+ * @param {object} item 
+ * @returns {Promise<object>}
+ */
+export async function inspectSingleImage(item) {
+  const startTime = performance.now();
+  const buffer = await fetchImageBuffer(item.url);
+  const sha256 = await computeSHA256(buffer);
+  const exif = extractExifMetadata(buffer);
+
+  const blob = new Blob([buffer], { type: 'image/jpeg' });
+  const objectUrl = URL.createObjectURL(blob);
+
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('Failed to render canvas for image'));
+    img.src = objectUrl;
+  });
+
+  const dHash = computeDHash(img);
+  const durationMs = Math.round(performance.now() - startTime);
+
+  return {
+    ...item,
+    fileSize: buffer.byteLength,
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+    sha256,
+    dHash,
+    exif,
+    objectUrl,
+    durationMs
+  };
+}
+
+/**
+ * Extracts all valid image items from a list of tasks
+ * @param {Array} tasks
+ * @returns {Array<object>}
+ */
+export function extractTaskImageItems(tasks = []) {
+  const items = [];
+  const knownKeys = ['selfie', 'toolkit', 'torches', 'visionChart', 'frameDisplay'];
+
+  for (const t of tasks) {
+    const taskId = String(t.id || t.taskId);
+    const feName = t.feName || t.fe_name || 'Unassigned';
+    const feCode = t.feCode || t.fe_code || '';
+    const feEmail = t.feEmail || t.fe_email || '';
+    const city = t.city || t.facilityCode || t.facility_code || t.teamName || '';
+    const date = t.date || t.dispatch_date || '';
+    const imgs = t.images || t.image_urls || {};
+
+    if (imgs && typeof imgs === 'object') {
+      for (const [key, rawUrl] of Object.entries(imgs)) {
+        if (rawUrl && typeof rawUrl === 'string' && rawUrl.trim().startsWith('http')) {
+          items.push({
+            id: `${taskId}_${key}`,
+            taskId,
+            task: t,
+            feName,
+            feCode,
+            feEmail,
+            city,
+            date,
+            slotName: key,
+            slotLabel: formatSlotLabel(key),
+            url: rawUrl.trim()
+          });
+        }
+      }
+    }
+  }
+
+  return items;
+}
+
+function formatSlotLabel(key) {
+  const map = {
+    selfie: 'FE Grooming & ID Selfie',
+    toolkit: 'Full Toolkit & Bag',
+    torches: 'Retinoscope & Pen Torch',
+    visionChart: 'Trial Lens & Vision Chart',
+    frameDisplay: 'Frame Display Case'
+  };
+  return map[key] || key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+/**
+ * Runs automated batch forensic scan across all task image items
+ * Detects:
+ * 1. Exact SHA-256 Byte Duplicates (Same file submitted to multiple tasks)
+ * 2. Perceptual dHash Clones (Hamming Distance <= 4, e.g. screenshot or cropped reuse)
+ * 3. Stale Photos (EXIF capture timestamp is older than visit dispatch date)
+ * 4. Cross-FE Collusion (Different FEs sharing identical or cloned equipment photos)
+ * 
+ * @param {Array} imageItems Array from extractTaskImageItems
+ * @param {Function} onProgress Callback ({ current, total, item, foundCount })
+ * @param {object} abortSignal Optional AbortController signal
+ * @returns {Promise<object>} Complete forensic cluster report
+ */
+export async function runBatchForensicScan(imageItems, onProgress, abortSignal = null) {
+  const total = imageItems.length;
+  const inspectedItems = [];
+  const errors = [];
+
+  // 1. Process images with concurrency pool of 4
+  const concurrency = 4;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < total) {
+      if (abortSignal?.aborted) break;
+      const index = cursor++;
+      const item = imageItems[index];
+
+      try {
+        const inspected = await inspectSingleImage(item);
+        inspectedItems.push(inspected);
+      } catch (err) {
+        errors.push({ item, error: err.message });
+      }
+
+      if (onProgress) {
+        onProgress({
+          current: Math.min(cursor, total),
+          total,
+          item,
+          inspectedCount: inspectedItems.length,
+          errorCount: errors.length
+        });
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, total) }, () => worker());
+  await Promise.all(workers);
+
+  // 2. Identify Exact Cryptographic Duplicates (SHA-256 Clusters)
+  const shaMap = new Map();
+  for (const item of inspectedItems) {
+    if (!item.sha256) continue;
+    if (!shaMap.has(item.sha256)) shaMap.set(item.sha256, []);
+    shaMap.get(item.sha256).push(item);
+  }
+
+  const exactClusters = [];
+  for (const [sha256, group] of shaMap.entries()) {
+    // Only flag if used across different tasks
+    const uniqueTasks = new Set(group.map(g => g.taskId));
+    if (uniqueTasks.size > 1) {
+      const feCodes = Array.from(new Set(group.map(g => g.feCode)));
+      exactClusters.push({
+        id: `exact_${sha256.substring(0, 10)}`,
+        type: 'EXACT_BYTE_DUPLICATE',
+        title: '100% Bit-for-Bit Duplicate File Uploaded',
+        severity: 'CRITICAL',
+        sha256,
+        items: group,
+        taskCount: uniqueTasks.size,
+        feCount: feCodes.length,
+        isCrossFE: feCodes.length > 1,
+        recommendation: 'FATAL: Re-uploaded identical file across tasks. Zero doubt fraud.'
+      });
+    }
+  }
+
+  // 3. Identify Perceptual Visual Clones & Resized/Cropped Photos (dHash Clustering)
+  // We compare photos within the same category/slotName or cross-task to catch visual reuse
+  const perceptualPairs = [];
+  const evaluatedPairs = new Set();
+
+  for (let i = 0; i < inspectedItems.length; i++) {
+    for (let j = i + 1; j < inspectedItems.length; j++) {
+      const a = inspectedItems[i];
+      const b = inspectedItems[j];
+
+      // Skip comparing an image to itself or within the same task
+      if (a.taskId === b.taskId) continue;
+
+      // Skip if already flagged as exact bit duplicate
+      if (a.sha256 && b.sha256 && a.sha256 === b.sha256) continue;
+
+      const pairKey = [a.id, b.id].sort().join('___');
+      if (evaluatedPairs.has(pairKey)) continue;
+      evaluatedPairs.add(pairKey);
+
+      // Compare visual difference
+      const dist = calculateHammingDistance(a.dHash.hashBinary, b.dHash.hashBinary);
+
+      // Hamming <= 4 means >= 93.75% identical visual structure (screenshot, re-compression, crop)
+      if (dist <= 4) {
+        const similarityPct = Math.round(((64 - dist) / 64) * 100);
+        const isCrossFE = a.feCode !== b.feCode;
+
+        perceptualPairs.push({
+          id: `perc_${pairKey}`,
+          type: 'PERCEPTUAL_CLONE',
+          title: dist <= 2 
+            ? 'Resized / Screenshotted Visual Clone' 
+            : 'Re-framed / High Similarity Equipment Reuse',
+          severity: dist <= 2 ? 'HIGH' : 'MEDIUM',
+          similarityPct,
+          hammingDistance: dist,
+          itemA: a,
+          itemB: b,
+          isCrossFE,
+          recommendation: isCrossFE 
+            ? 'FATAL / COLLUSION: Different FEs sharing identical equipment photo.' 
+            : 'FATAL: FE recycled old equipment photo by re-saving or cropping.'
+        });
+      }
+    }
+  }
+
+  // 4. Identify Stale / Historical Photos via EXIF Date Mismatch
+  const stalePhotoAlerts = [];
+  for (const item of inspectedItems) {
+    if (item.exif?.dateTimeOriginal && item.date) {
+      try {
+        // Parse EXIF date "YYYY:MM:DD HH:MM:SS"
+        const parts = item.exif.dateTimeOriginal.split(' ')[0].split(':');
+        if (parts.length === 3) {
+          const exifYMD = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+          
+          // Parse Task date (supports DD/MM/YYYY or YYYY-MM-DD)
+          let taskYMD = null;
+          if (item.date.includes('/')) {
+            const dp = item.date.split(' ')[0].split('/');
+            if (dp.length === 3) taskYMD = `${dp[2]}-${dp[1].padStart(2, '0')}-${dp[0].padStart(2, '0')}`;
+          } else if (item.date.includes('-')) {
+            taskYMD = item.date.split(' ')[0];
+          }
+
+          if (taskYMD && exifYMD !== taskYMD) {
+            stalePhotoAlerts.push({
+              id: `stale_${item.id}`,
+              type: 'STALE_PHOTO_DATE_MISMATCH',
+              title: 'Historical Photo Captured on Different Day',
+              severity: 'MEDIUM',
+              item,
+              exifDate: item.exif.dateTimeOriginal,
+              taskDate: item.date,
+              cameraModel: item.exif.model || 'Unknown Device',
+              recommendation: `WARNING: Camera captured on ${exifYMD}, but visit was on ${taskYMD}. Photo was taken beforehand.`
+            });
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Gather Summary Metrics
+  const affectedTasks = new Set();
+  const affectedFEs = new Set();
+
+  exactClusters.forEach(c => {
+    c.items.forEach(it => {
+      affectedTasks.add(it.taskId);
+      if (it.feCode) affectedFEs.add(it.feCode);
+    });
+  });
+
+  perceptualPairs.forEach(p => {
+    affectedTasks.add(p.itemA.taskId);
+    affectedTasks.add(p.itemB.taskId);
+    if (p.itemA.feCode) affectedFEs.add(p.itemA.feCode);
+    if (p.itemB.feCode) affectedFEs.add(p.itemB.feCode);
+  });
+
+  stalePhotoAlerts.forEach(s => {
+    affectedTasks.add(s.item.taskId);
+    if (s.item.feCode) affectedFEs.add(s.item.feCode);
+  });
+
+  return {
+    scannedCount: inspectedItems.length,
+    totalImages: total,
+    errors,
+    exactClusters,
+    perceptualPairs,
+    stalePhotoAlerts,
+    summary: {
+      totalViolations: exactClusters.length + perceptualPairs.length + stalePhotoAlerts.length,
+      affectedTaskCount: affectedTasks.size,
+      affectedFeCount: affectedFEs.size,
+      affectedTaskIds: Array.from(affectedTasks),
+      affectedFeCodes: Array.from(affectedFEs)
+    }
   };
 }

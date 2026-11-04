@@ -1535,6 +1535,9 @@ export default function App() {
         {activePage === 'forensicsLab' && (
           <ImageForensicsLab
             tasks={tasks}
+            currentUser={currentUser}
+            onInspectTask={(task) => setInspectingTask(task)}
+            onFatalTask={handleFatalAudit}
           />
         )}
 

@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { sendEmailHandler } from './api/send-email.js'
 import { dailyDigestCronHandler } from './api/cron/daily-digest.js'
 import { dailyFeFatalDigestCronHandler } from './api/cron/daily-fe-fatal-digest.js'
+import { proxyImageHandler } from './api/proxy-image.js'
 
 // In local development behind corporate firewalls/proxies (e.g. Lenskart network), permit TLS connections
 if (process.env.NODE_ENV !== 'production') {
@@ -33,6 +34,14 @@ function emailDevPlugin() {
       server.middlewares.use('/api/cron/daily-fe-fatal-digest', async (req, res, next) => {
         try {
           await dailyFeFatalDigestCronHandler(req, res);
+        } catch (err) {
+          next(err);
+        }
+      });
+
+      server.middlewares.use('/api/proxy-image', async (req, res, next) => {
+        try {
+          await proxyImageHandler(req, res);
         } catch (err) {
           next(err);
         }

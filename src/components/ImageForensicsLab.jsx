@@ -1,47 +1,143 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Fingerprint, 
-  Upload, 
-  Link as LinkIcon, 
-  Trash2, 
-  CheckCircle2, 
+  Play, 
+  Square, 
   AlertTriangle, 
+  CheckCircle2, 
   XCircle, 
+  Download, 
+  Eye, 
+  Layers, 
+  ShieldAlert, 
+  RefreshCw, 
+  Clock, 
+  Sparkles, 
+  Calendar, 
+  Filter, 
+  Users, 
   Copy, 
   Check, 
-  Info, 
-  RefreshCw, 
-  Eye, 
-  FileText, 
-  ShieldAlert, 
-  Cpu, 
-  Sparkles,
-  ArrowRight
+  ExternalLink,
+  ChevronRight,
+  Maximize2,
+  X,
+  FileCheck,
+  Search
 } from 'lucide-react';
 import { 
-  computeSHA256, 
-  computeDHash, 
-  extractExifMetadata, 
-  evaluatePairwiseForensics 
+  extractTaskImageItems, 
+  runBatchForensicScan 
 } from '../utils/imageForensics.js';
 
-export default function ImageForensicsLab({ tasks = [] }) {
-  // Slots state: Array of 3 image slots
-  const [slots, setSlots] = useState([
-    { id: 1, label: 'Image #1 (Reference Visit)', data: null, loading: false, error: null },
-    { id: 2, label: 'Image #2 (Test Photo A)', data: null, loading: false, error: null },
-    { id: 3, label: 'Image #3 (Test Photo B)', data: null, loading: false, error: null }
-  ]);
+export default function ImageForensicsLab({ 
+  tasks = [], 
+  onInspectTask, 
+  onFatalTask,
+  currentUser 
+}) {
+  // Available batch dates extracted from tasks
+  const availableDates = useMemo(() => {
+    const dates = new Set();
+    tasks.forEach(t => {
+      const d = t.date || t.dispatch_date;
+      if (d) {
+        const clean = d.split(' ')[0];
+        dates.add(clean);
+      }
+    });
+    return Array.from(dates).sort().reverse();
+  }, [tasks]);
 
+  // Selected filters
+  const [selectedDate, setSelectedDate] = useState(() => availableDates[0] || 'ALL');
+  const [selectedSlot, setSelectedSlot] = useState('ALL');
+  const [selectedStatus, setSelectedStatus] = useState('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [onlyCollusion, setOnlyCollusion] = useState(false);
+
+  // Scan state
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState({ current: 0, total: 0, currentItem: null });
+  const [scanResults, setScanResults] = useState(null);
+  const abortControllerRef = useRef(null);
+
+  // UI state
+  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'exact' | 'perceptual' | 'stale'
+  const [previewModalImage, setPreviewModalImage] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
-  const [urlInputs, setUrlInputs] = useState({ 1: '', 2: '', 3: '' });
-  const fileInputRefs = {
-    1: useRef(null),
-    2: useRef(null),
-    3: useRef(null)
+  const [actionSuccessMessage, setActionSuccessMessage] = useState(null);
+
+  // Filter tasks based on selected scope
+  const filteredTasks = useMemo(() => {
+    return tasks.filter(t => {
+      // Date filter
+      if (selectedDate !== 'ALL') {
+        const taskDate = (t.date || t.dispatch_date || '').split(' ')[0];
+        if (taskDate !== selectedDate) return false;
+      }
+      // Audit status filter
+      if (selectedStatus !== 'ALL') {
+        const status = t.auditStatus || t.audit_status || 'PENDING';
+        if (status !== selectedStatus) return false;
+      }
+      return true;
+    });
+  }, [tasks, selectedDate, selectedStatus]);
+
+  // Extract all valid image items ready to be scanned in this scope
+  const imageQueue = useMemo(() => {
+    const all = extractTaskImageItems(filteredTasks);
+    if (selectedSlot === 'ALL') return all;
+    return all.filter(it => it.slotName === selectedSlot);
+  }, [filteredTasks, selectedSlot]);
+
+  // Handle start batch scan
+  const handleStartScan = async () => {
+    if (imageQueue.length === 0) {
+      alert('No checklist photos found in the selected batch/date filter.');
+      return;
+    }
+
+    setIsScanning(true);
+    setScanProgress({ current: 0, total: imageQueue.length, currentItem: null });
+    setScanResults(null);
+
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    try {
+      const results = await runBatchForensicScan(
+        imageQueue,
+        (prog) => {
+          setScanProgress({
+            current: prog.current,
+            total: prog.total,
+            currentItem: prog.item
+          });
+        },
+        abortController.signal
+      );
+
+      setScanResults(results);
+    } catch (err) {
+      console.error('Batch scan failed:', err);
+      alert('Forensics scan encountered an issue: ' + err.message);
+    } finally {
+      setIsScanning(false);
+      abortControllerRef.current = null;
+    }
   };
 
-  // Copy helper
+  // Handle stop scan
+  const handleStopScan = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setIsScanning(false);
+    }
+  };
+
+  // Handle Copy
   const handleCopy = (text, key) => {
     if (!text) return;
     navigator.clipboard.writeText(text);
@@ -49,656 +145,971 @@ export default function ImageForensicsLab({ tasks = [] }) {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  // Process a loaded ArrayBuffer and Image object
-  const processImageBuffer = async (buffer, filename, mimeType, slotId) => {
-    const startTime = performance.now();
+  // One-click enforcement: Mark single task as FATAL
+  const handleMarkTaskFatal = async (taskId, reasonText) => {
+    if (!onFatalTask) return;
+    const confirm = window.confirm(`Mark Task #${taskId} as FATAL for "${reasonText}"?`);
+    if (!confirm) return;
 
-    // 1. SHA-256 byte hash
-    const sha256 = await computeSHA256(buffer);
-
-    // 2. EXIF metadata extraction
-    const exif = extractExifMetadata(buffer);
-
-    // 3. Load into HTML Image element for dHash & dimensions
-    const blob = new Blob([buffer], { type: mimeType || 'image/jpeg' });
-    const objectUrl = URL.createObjectURL(blob);
-
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error('Failed to render image canvas'));
-      img.src = objectUrl;
+    await onFatalTask(taskId, {
+      reasons: ['Duplicate / recycled images detected'],
+      remarks: `FATAL: Image Forensics Anti-Fraud Engine detected fraudulent photo reuse (${reasonText}).`,
+      location: currentUser?.facility_code || 'Central Forensics Lab'
     });
 
-    // 4. Perceptual dHash
-    const dHash = computeDHash(img);
-    const computeDurationMs = Math.round(performance.now() - startTime);
-
-    return {
-      filename: filename || 'image.jpg',
-      fileSize: buffer.byteLength,
-      width: img.naturalWidth,
-      height: img.naturalHeight,
-      mimeType: mimeType || 'image/jpeg',
-      objectUrl,
-      sha256,
-      exif,
-      dHash,
-      computeDurationMs
-    };
+    setActionSuccessMessage(`Task #${taskId} successfully struck as FATAL.`);
+    setTimeout(() => setActionSuccessMessage(null), 3500);
   };
 
-  // Handle local file selection
-  const handleFileSelect = async (slotId, file) => {
-    if (!file) return;
+  // One-click enforcement: Mark all tasks in an exact cluster as FATAL
+  const handleMarkClusterFatal = async (cluster) => {
+    if (!onFatalTask) return;
+    const taskIds = Array.from(new Set(cluster.items.map(it => it.taskId)));
+    const confirm = window.confirm(
+      `Mark all ${taskIds.length} tasks in this duplicate cluster as FATAL?\n\nTasks: ${taskIds.join(', ')}`
+    );
+    if (!confirm) return;
 
-    setSlots(prev => prev.map(s => s.id === slotId ? { ...s, loading: true, error: null } : s));
-
-    try {
-      const buffer = await file.arrayBuffer();
-      const result = await processImageBuffer(buffer, file.name, file.type, slotId);
-
-      setSlots(prev => prev.map(s => s.id === slotId ? {
-        ...s,
-        data: result,
-        loading: false,
-        error: null
-      } : s));
-    } catch (err) {
-      console.error('Failed to process image file:', err);
-      setSlots(prev => prev.map(s => s.id === slotId ? {
-        ...s,
-        loading: false,
-        error: 'Failed to inspect image: ' + (err.message || 'Corrupt format')
-      } : s));
+    for (const tid of taskIds) {
+      await onFatalTask(tid, {
+        reasons: ['Duplicate / recycled images detected'],
+        remarks: `FATAL: Exact Bit-for-Bit Duplicate File (SHA-256: ${cluster.sha256.substring(0, 16)}...) submitted across visits.`,
+        location: currentUser?.facility_code || 'Central Forensics Lab'
+      });
     }
+
+    setActionSuccessMessage(`All ${taskIds.length} tasks in duplicate cluster successfully struck as FATAL.`);
+    setTimeout(() => setActionSuccessMessage(null), 3500);
   };
 
-  // Handle URL fetch
-  const handleUrlFetch = async (slotId) => {
-    const url = urlInputs[slotId]?.trim();
-    if (!url) return;
+  // One-click enforcement: Mark both tasks in a perceptual pair as FATAL
+  const handleMarkPairFatal = async (pair) => {
+    if (!onFatalTask) return;
+    const tidA = pair.itemA.taskId;
+    const tidB = pair.itemB.taskId;
+    const confirm = window.confirm(
+      `Mark both Task #${tidA} and Task #${tidB} as FATAL?\n\nDetected ${pair.similarityPct}% visual clone (Hamming distance ${pair.hammingDistance}/64).`
+    );
+    if (!confirm) return;
 
-    setSlots(prev => prev.map(s => s.id === slotId ? { ...s, loading: true, error: null } : s));
-
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-      const buffer = await resp.arrayBuffer();
-      const contentType = resp.headers.get('content-type') || 'image/jpeg';
-      const filename = url.split('/').pop().split('?')[0] || `url_image_${slotId}.jpg`;
-
-      const result = await processImageBuffer(buffer, filename, contentType, slotId);
-
-      setSlots(prev => prev.map(s => s.id === slotId ? {
-        ...s,
-        data: result,
-        loading: false,
-        error: null
-      } : s));
-    } catch (err) {
-      console.error('Failed to fetch image from URL:', err);
-      setSlots(prev => prev.map(s => s.id === slotId ? {
-        ...s,
-        loading: false,
-        error: 'Failed to fetch URL: ' + (err.message || 'CORS or Network Blocked')
-      } : s));
-    }
-  };
-
-  // Clear a specific slot
-  const handleClearSlot = (slotId) => {
-    setSlots(prev => prev.map(s => {
-      if (s.id === slotId) {
-        if (s.data?.objectUrl) {
-          URL.revokeObjectURL(s.data.objectUrl);
-        }
-        return { ...s, data: null, loading: false, error: null };
-      }
-      return s;
-    }));
-    setUrlInputs(prev => ({ ...prev, [slotId]: '' }));
-    if (fileInputRefs[slotId]?.current) {
-      fileInputRefs[slotId].current.value = '';
-    }
-  };
-
-  // Reset all 3 slots
-  const handleResetAll = () => {
-    [1, 2, 3].forEach(id => handleClearSlot(id));
-  };
-
-  // Quick Demo: Load Real Task Images from active Locus tasks in memory
-  const handleLoadSampleTaskImages = async () => {
-    // Find tasks with real images
-    const tasksWithImages = (tasks || []).filter(t => {
-      const imgs = t.image_urls || t.imageUrls;
-      if (!imgs) return false;
-      const count = Object.values(imgs).filter(u => u && typeof u === 'string' && u.startsWith('http')).length;
-      return count > 0;
+    await onFatalTask(tidA, {
+      reasons: ['Duplicate / recycled images detected'],
+      remarks: `FATAL: Perceptual Clone (${pair.similarityPct}% Match) with Task #${tidB}.`,
+      location: currentUser?.facility_code || 'Central Forensics Lab'
     });
 
-    if (tasksWithImages.length === 0) {
-      alert('No tasks with remote image URLs found in active batch.');
-      return;
-    }
+    await onFatalTask(tidB, {
+      reasons: ['Duplicate / recycled images detected'],
+      remarks: `FATAL: Perceptual Clone (${pair.similarityPct}% Match) with Task #${tidA}.`,
+      location: currentUser?.facility_code || 'Central Forensics Lab'
+    });
 
-    // Collect 3 distinct image URLs
-    const sampleUrls = [];
-    for (const t of tasksWithImages) {
-      const imgs = t.image_urls || t.imageUrls || {};
-      for (const [k, u] of Object.entries(imgs)) {
-        if (u && typeof u === 'string' && u.startsWith('http') && !sampleUrls.includes(u)) {
-          sampleUrls.push({ url: u, task: t.id || t.taskId, key: k });
-          if (sampleUrls.length >= 3) break;
-        }
-      }
-      if (sampleUrls.length >= 3) break;
-    }
-
-    if (sampleUrls.length === 0) {
-      alert('Could not extract valid HTTP image URLs.');
-      return;
-    }
-
-    // Set URL inputs and fetch
-    for (let i = 0; i < Math.min(3, sampleUrls.length); i++) {
-      const slotId = i + 1;
-      const url = sampleUrls[i].url;
-      setUrlInputs(prev => ({ ...prev, [slotId]: url }));
-      setSlots(prev => prev.map(s => s.id === slotId ? { ...s, loading: true, error: null } : s));
-
-      try {
-        const resp = await fetch(url);
-        if (resp.ok) {
-          const buffer = await resp.arrayBuffer();
-          const result = await processImageBuffer(
-            buffer, 
-            `task_${sampleUrls[i].task}_${sampleUrls[i].key}.jpg`, 
-            'image/jpeg', 
-            slotId
-          );
-          setSlots(prev => prev.map(s => s.id === slotId ? { ...s, data: result, loading: false } : s));
-        } else {
-          setSlots(prev => prev.map(s => s.id === slotId ? { ...s, loading: false, error: 'HTTP ' + resp.status } : s));
-        }
-      } catch (e) {
-        setSlots(prev => prev.map(s => s.id === slotId ? { ...s, loading: false, error: e.message } : s));
-      }
-    }
+    setActionSuccessMessage(`Tasks #${tidA} and #${tidB} both marked FATAL for visual image reuse.`);
+    setTimeout(() => setActionSuccessMessage(null), 3500);
   };
 
-  // Pairwise forensic analysis
-  const img1 = slots[0]?.data;
-  const img2 = slots[1]?.data;
-  const img3 = slots[2]?.data;
+  // Export Forensic Report as CSV
+  const handleExportCSV = () => {
+    if (!scanResults) return;
 
-  const pair12 = evaluatePairwiseForensics(img1, img2);
-  const pair13 = evaluatePairwiseForensics(img1, img3);
-  const pair23 = evaluatePairwiseForensics(img2, img3);
+    const rows = [
+      ['Incident Type', 'Severity', 'Task ID', 'FE Name', 'FE Code', 'City', 'Visit Date', 'Checklist Slot', 'Similarity %', 'SHA-256 / Hash', 'Recommendation']
+    ];
+
+    // Exact clusters
+    scanResults.exactClusters.forEach(c => {
+      c.items.forEach(it => {
+        rows.push([
+          'EXACT_BYTE_DUPLICATE',
+          c.severity,
+          it.taskId,
+          it.feName,
+          it.feCode,
+          it.city,
+          it.date,
+          it.slotLabel,
+          '100%',
+          c.sha256,
+          c.recommendation
+        ]);
+      });
+    });
+
+    // Perceptual pairs
+    scanResults.perceptualPairs.forEach(p => {
+      rows.push([
+        'PERCEPTUAL_CLONE_PAIR_A',
+        p.severity,
+        p.itemA.taskId,
+        p.itemA.feName,
+        p.itemA.feCode,
+        p.itemA.city,
+        p.itemA.date,
+        p.itemA.slotLabel,
+        `${p.similarityPct}%`,
+        p.itemA.dHash?.hashHex || '',
+        `Cloned with Task #${p.itemB.taskId}`
+      ]);
+      rows.push([
+        'PERCEPTUAL_CLONE_PAIR_B',
+        p.severity,
+        p.itemB.taskId,
+        p.itemB.feName,
+        p.itemB.feCode,
+        p.itemB.city,
+        p.itemB.date,
+        p.itemB.slotLabel,
+        `${p.similarityPct}%`,
+        p.itemB.dHash?.hashHex || '',
+        `Cloned with Task #${p.itemA.taskId}`
+      ]);
+    });
+
+    // Stale photos
+    scanResults.stalePhotoAlerts.forEach(s => {
+      rows.push([
+        'STALE_PHOTO_DATE_MISMATCH',
+        s.severity,
+        s.item.taskId,
+        s.item.feName,
+        s.item.feCode,
+        s.item.city,
+        s.item.date,
+        s.item.slotLabel,
+        'N/A',
+        s.item.sha256 || '',
+        `Captured on ${s.exifDate} (${s.cameraModel})`
+      ]);
+    });
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + rows.map(r => r.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `image_forensics_audit_report_${selectedDate || 'all'}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Filtered views of scan results
+  const exactClustersFiltered = useMemo(() => {
+    if (!scanResults) return [];
+    let list = scanResults.exactClusters || [];
+    if (onlyCollusion) list = list.filter(c => c.isCrossFE);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(c => 
+        c.items.some(it => 
+          it.taskId.toLowerCase().includes(q) || 
+          it.feName.toLowerCase().includes(q) || 
+          it.feCode.toLowerCase().includes(q)
+        )
+      );
+    }
+    return list;
+  }, [scanResults, onlyCollusion, searchQuery]);
+
+  const perceptualPairsFiltered = useMemo(() => {
+    if (!scanResults) return [];
+    let list = scanResults.perceptualPairs || [];
+    if (onlyCollusion) list = list.filter(p => p.isCrossFE);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(p => 
+        p.itemA.taskId.toLowerCase().includes(q) || 
+        p.itemA.feName.toLowerCase().includes(q) || 
+        p.itemA.feCode.toLowerCase().includes(q) ||
+        p.itemB.taskId.toLowerCase().includes(q) || 
+        p.itemB.feName.toLowerCase().includes(q) || 
+        p.itemB.feCode.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [scanResults, onlyCollusion, searchQuery]);
+
+  const stalePhotosFiltered = useMemo(() => {
+    if (!scanResults) return [];
+    let list = scanResults.stalePhotoAlerts || [];
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(s => 
+        s.item.taskId.toLowerCase().includes(q) || 
+        s.item.feName.toLowerCase().includes(q) || 
+        s.item.feCode.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [scanResults, searchQuery]);
+
+  const totalFilteredIncidents = exactClustersFiltered.length + perceptualPairsFiltered.length + stalePhotosFiltered.length;
 
   return (
-    <div className="space-y-6 pb-16">
+    <div className="space-y-6 pb-20">
       
-      {/* Top Banner / Header */}
+      {/* SUCCESS TOAST */}
+      {actionSuccessMessage && (
+        <div className="fixed top-20 right-6 z-50 bg-emerald-500 text-white px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 text-xs font-semibold animate-in fade-in slide-in-from-top-2">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{actionSuccessMessage}</span>
+        </div>
+      )}
+
+      {/* TOP COMMAND HEADER */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
         <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-br from-indigo-500/10 via-purple-500/5 to-transparent rounded-full blur-3xl pointer-events-none" />
 
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative z-10">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5 relative z-10">
           <div>
             <div className="flex items-center space-x-3 mb-2">
               <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
                 <Fingerprint className="w-6 h-6" />
               </div>
               <h1 className="text-2xl font-bold text-white tracking-tight">
-                Image Forensics & Deduplication Lab
+                Field Image Forensics & Anti-Fraud Center
               </h1>
-              <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                Live Model Lab
+              <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Active Scanner
               </span>
             </div>
             <p className="text-slate-400 text-sm max-w-3xl leading-relaxed">
-              Verify the field photo reuse hypothesis across audits. Upload up to 3 images to extract cryptographic 
-              <strong className="text-slate-200"> SHA-256 byte hashes</strong>, 
-              <strong className="text-slate-200"> 64-bit perceptual visual fingerprints (dHash)</strong>, and 
-              <strong className="text-slate-200"> EXIF camera metadata</strong>.
+              Automated anti-fraud engine for audit checklist photos. Pulls remote task images and scans for 
+              <strong className="text-slate-200"> exact byte duplicates</strong>, 
+              <strong className="text-slate-200"> cropped/resized screenshots (dHash)</strong>, 
+              <strong className="text-slate-200"> old photos</strong>, and 
+              <strong className="text-slate-200"> cross-FE collusion</strong>.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {tasks.length > 0 && (
+          {/* MAIN ONE-CLICK SCAN BUTTON */}
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
+            {isScanning ? (
               <button
-                onClick={handleLoadSampleTaskImages}
-                className="px-3.5 py-2 text-xs font-medium rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/80 transition-all flex items-center gap-2 shadow-sm"
+                onClick={handleStopScan}
+                className="px-5 py-2.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition-all flex items-center gap-2 animate-pulse"
               >
-                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                Load Sample Audit Photos
+                <Square className="w-4 h-4 fill-white" />
+                Stop Scan ({scanProgress.current}/{scanProgress.total})
+              </button>
+            ) : (
+              <button
+                onClick={handleStartScan}
+                disabled={imageQueue.length === 0}
+                className="px-5 py-2.5 text-xs font-bold rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 text-white shadow-lg shadow-indigo-600/30 transition-all flex items-center gap-2.5"
+              >
+                <Play className="w-4 h-4 fill-white" />
+                Run Anti-Fraud Forensics Scan
+                <span className="bg-white/20 px-2 py-0.5 rounded-md font-mono text-[11px]">
+                  {imageQueue.length} Photos
+                </span>
               </button>
             )}
 
-            <button
-              onClick={handleResetAll}
-              className="px-3.5 py-2 text-xs font-medium rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/80 transition-all flex items-center gap-2 shadow-sm"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
-              Reset All Slots
-            </button>
+            {scanResults && (
+              <button
+                onClick={handleExportCSV}
+                className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-all flex items-center gap-2 shadow-sm"
+              >
+                <Download className="w-4 h-4 text-slate-400" />
+                Export CSV Report
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Speed / Compute Metric Pill */}
-        <div className="mt-4 pt-4 border-t border-slate-800/80 flex flex-wrap items-center gap-6 text-xs text-slate-400">
-          <div className="flex items-center gap-2">
-            <Cpu className="w-4 h-4 text-emerald-400" />
-            <span>Execution Mode: <strong className="text-slate-300">Client-Side WebAssembly / Canvas (0 Server Bandwidth)</strong></span>
+        {/* SCOPE FILTERS BAR */}
+        <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap items-center gap-3 text-xs">
+          {/* Date Selector */}
+          <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
+            <Calendar className="w-3.5 h-3.5 text-slate-400" />
+            <span className="text-slate-400 font-medium">Batch Date:</span>
+            <select
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              disabled={isScanning}
+              className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="bg-slate-900">All Available Dates</option>
+              {availableDates.map(d => (
+                <option key={d} value={d} className="bg-slate-900">{d}</option>
+              ))}
+            </select>
           </div>
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-sky-400" />
-            <span>Average Hash Compute: <strong className="text-slate-300">&lt; 15 ms per photo</strong></span>
+
+          {/* Checklist Slot Filter */}
+          <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <span className="text-slate-400 font-medium">Checklist Item:</span>
+            <select
+              value={selectedSlot}
+              onChange={(e) => setSelectedSlot(e.target.value)}
+              disabled={isScanning}
+              className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="bg-slate-900">All Checkpoints (5 Photos)</option>
+              <option value="toolkit" className="bg-slate-900">Full Toolkit & Bag</option>
+              <option value="selfie" className="bg-slate-900">FE Grooming Selfie</option>
+              <option value="torches" className="bg-slate-900">Retinoscope & Pen Torch</option>
+              <option value="visionChart" className="bg-slate-900">Trial Lens & Chart</option>
+              <option value="frameDisplay" className="bg-slate-900">Frame Display Case</option>
+            </select>
           </div>
-          <div className="flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 text-purple-400" />
-            <span>Algorithms: <strong className="text-slate-300">SHA-256 Byte Fingerprint + 64-bit dHash (Rec. 601 Luminance)</strong></span>
+
+          {/* Task Audit Status */}
+          <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
+            <span className="text-slate-400 font-medium">Audit Status:</span>
+            <select
+              value={selectedStatus}
+              onChange={(e) => setSelectedStatus(e.target.value)}
+              disabled={isScanning}
+              className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+            >
+              <option value="ALL" className="bg-slate-900">All Tasks</option>
+              <option value="PENDING" className="bg-slate-900">Pending Audits</option>
+              <option value="PASSED" className="bg-slate-900">Passed Audits</option>
+              <option value="FATAL" className="bg-slate-900">Fatal Audits</option>
+            </select>
+          </div>
+
+          {/* Scope count label */}
+          <div className="text-slate-500 ml-auto font-mono text-[11px]">
+            Target Scope: <strong className="text-slate-300">{filteredTasks.length}</strong> tasks • <strong className="text-slate-300">{imageQueue.length}</strong> checklist photos
           </div>
         </div>
       </div>
 
-      {/* 3 IMAGE UPLOAD & FORENSIC ANALYSIS SLOTS */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {slots.map((slot) => {
-          const imgData = slot.data;
+      {/* SCANNING PROGRESS BAR (ACTIVE SCAN) */}
+      {isScanning && (
+        <div className="bg-slate-900 border border-indigo-500/30 rounded-2xl p-5 shadow-2xl space-y-3 animate-in fade-in">
+          <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2.5">
+              <RefreshCw className="w-4 h-4 text-indigo-400 animate-spin" />
+              <span className="font-semibold text-slate-200">
+                Inspecting checklist images with SHA-256 byte & 64-bit dHash algorithms...
+              </span>
+            </div>
+            <div className="font-mono text-indigo-400 font-bold text-sm">
+              {Math.round((scanProgress.current / Math.max(1, scanProgress.total)) * 100)}%
+              <span className="text-slate-500 font-normal ml-2 text-xs">
+                ({scanProgress.current} / {scanProgress.total})
+              </span>
+            </div>
+          </div>
 
-          return (
+          {/* Progress bar */}
+          <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
             <div 
-              key={slot.id} 
-              className={`bg-slate-900 border rounded-2xl p-5 shadow-xl flex flex-col justify-between transition-all ${
-                imgData ? 'border-indigo-500/40 shadow-indigo-500/5' : 'border-slate-800'
-              }`}
-            >
-              <div>
-                {/* Slot Header */}
-                <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-800">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-400 font-bold text-xs flex items-center justify-center border border-indigo-500/30">
-                      #{slot.id}
-                    </span>
-                    <h2 className="text-sm font-semibold text-slate-200">
-                      {slot.label}
-                    </h2>
-                  </div>
+              className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full transition-all duration-200"
+              style={{ width: `${(scanProgress.current / Math.max(1, scanProgress.total)) * 100}%` }}
+            />
+          </div>
 
-                  {imgData && (
-                    <button
-                      onClick={() => handleClearSlot(slot.id)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                      title="Clear slot"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-
-                {/* Upload or Preview Content */}
-                {!imgData ? (
-                  <div className="space-y-4">
-                    {/* Drag and Drop Zone */}
-                    <div
-                      onClick={() => fileInputRefs[slot.id].current?.click()}
-                      className="border-2 border-dashed border-slate-700/80 hover:border-indigo-500/60 rounded-xl p-6 text-center cursor-pointer transition-all hover:bg-slate-800/40 group flex flex-col items-center justify-center min-h-[170px]"
-                    >
-                      <input
-                        ref={fileInputRefs[slot.id]}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={(e) => handleFileSelect(slot.id, e.target.files?.[0])}
-                      />
-                      <div className="w-12 h-12 rounded-xl bg-slate-800 group-hover:bg-indigo-500/10 text-slate-400 group-hover:text-indigo-400 flex items-center justify-center mb-2.5 transition-colors">
-                        <Upload className="w-6 h-6" />
-                      </div>
-                      <p className="text-xs font-semibold text-slate-200 group-hover:text-indigo-300">
-                        Drop image #{slot.id} or browse
-                      </p>
-                      <p className="text-[11px] text-slate-500 mt-1">
-                        JPEG, PNG, WebP from mobile camera
-                      </p>
-                    </div>
-
-                    {/* Or URL input */}
-                    <div className="space-y-1.5">
-                      <label className="text-[11px] font-medium text-slate-400">
-                        Or enter direct image URL:
-                      </label>
-                      <div className="flex gap-2">
-                        <div className="relative flex-1">
-                          <input
-                            type="text"
-                            placeholder="https://locus-api.com/..."
-                            value={urlInputs[slot.id] || ''}
-                            onChange={(e) => setUrlInputs({ ...urlInputs, [slot.id]: e.target.value })}
-                            onKeyDown={(e) => e.key === 'Enter' && handleUrlFetch(slot.id)}
-                            className="w-full bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-                          />
-                        </div>
-                        <button
-                          onClick={() => handleUrlFetch(slot.id)}
-                          disabled={slot.loading || !urlInputs[slot.id]?.trim()}
-                          className="px-3 py-1.5 text-xs font-medium rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white transition-colors shrink-0"
-                        >
-                          Fetch
-                        </button>
-                      </div>
-                    </div>
-
-                    {slot.loading && (
-                      <div className="flex items-center justify-center gap-2 text-xs text-indigo-400 py-2">
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Computing cryptographic fingerprints...</span>
-                      </div>
-                    )}
-
-                    {slot.error && (
-                      <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2">
-                        <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                        <span>{slot.error}</span>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    {/* Image Preview & Basic Specs */}
-                    <div className="relative rounded-xl overflow-hidden bg-slate-950 border border-slate-800 group">
-                      <img
-                        src={imgData.objectUrl}
-                        alt={`Slot ${slot.id}`}
-                        className="w-full h-44 object-contain"
-                      />
-                      <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between bg-slate-900/90 backdrop-blur-md px-2.5 py-1 rounded-lg text-[10px] text-slate-300 border border-slate-700/50">
-                        <span className="truncate max-w-[150px] font-mono">{imgData.filename}</span>
-                        <span>{imgData.width} × {imgData.height} px • {(imgData.fileSize / 1024).toFixed(1)} KB</span>
-                      </div>
-                    </div>
-
-                    {/* Cryptographic SHA-256 Fingerprint */}
-                    <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="font-semibold text-slate-300 flex items-center gap-1.5">
-                          <Fingerprint className="w-3.5 h-3.5 text-indigo-400" />
-                          SHA-256 Byte Hash:
-                        </span>
-                        <button
-                          onClick={() => handleCopy(imgData.sha256, `sha_${slot.id}`)}
-                          className="text-slate-400 hover:text-indigo-400 flex items-center gap-1 transition-colors"
-                        >
-                          {copiedKey === `sha_${slot.id}` ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                          <span className="text-[10px]">Copy</span>
-                        </button>
-                      </div>
-                      <div className="font-mono text-[11px] text-slate-300 bg-slate-900 px-2 py-1.5 rounded border border-slate-800 break-all select-all">
-                        {imgData.sha256}
-                      </div>
-                    </div>
-
-                    {/* Perceptual Difference Hash (dHash) */}
-                    <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2">
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="font-semibold text-slate-300 flex items-center gap-1.5">
-                          <Eye className="w-3.5 h-3.5 text-sky-400" />
-                          Perceptual dHash (64-bit):
-                        </span>
-                        <button
-                          onClick={() => handleCopy(imgData.dHash.hashHex, `dhash_${slot.id}`)}
-                          className="text-slate-400 hover:text-sky-400 flex items-center gap-1 transition-colors"
-                        >
-                          {copiedKey === `dhash_${slot.id}` ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                          <span className="text-[10px]">Copy</span>
-                        </button>
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        <div className="font-mono text-xs font-bold text-sky-300 bg-slate-900 px-2.5 py-1.5 rounded border border-slate-800 tracking-wider flex-1">
-                          {imgData.dHash.hashHex}
-                        </div>
-
-                        {/* 8x8 Visual Gradient Fingerprint */}
-                        <div 
-                          className="grid grid-cols-8 gap-[1px] p-1 bg-slate-900 rounded border border-slate-800 shrink-0"
-                          title="8x8 Perceptual Gradient Matrix"
-                        >
-                          {imgData.dHash.grid.map((row, rIdx) => 
-                            row.map((val, cIdx) => (
-                              <div
-                                key={`${rIdx}_${cIdx}`}
-                                className="w-1.5 h-1.5 rounded-[1px]"
-                                style={{ backgroundColor: val > 128 ? '#38bdf8' : '#1e293b' }}
-                              />
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* EXIF Metadata Card */}
-                    <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5 text-xs">
-                      <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300 pb-1 border-b border-slate-800/80">
-                        <span className="flex items-center gap-1.5">
-                          <FileText className="w-3.5 h-3.5 text-amber-400" />
-                          Embedded EXIF Metadata:
-                        </span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                          imgData.exif.hasExif 
-                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
-                            : 'bg-slate-800 text-slate-400'
-                        }`}>
-                          {imgData.exif.hasExif ? 'EXIF Found' : 'Stripped by Mobile App'}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 text-[11px] pt-1">
-                        <div>
-                          <span className="text-slate-500 block">Camera:</span>
-                          <span className="text-slate-300 font-medium truncate block">
-                            {imgData.exif.model ? `${imgData.exif.make || ''} ${imgData.exif.model}` : 'Not Available'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500 block">Capture Date/Time:</span>
-                          <span className="text-slate-300 font-mono block">
-                            {imgData.exif.dateTimeOriginal || 'Not Present'}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="text-[10px] text-slate-500 flex items-center justify-between px-1">
-                      <span>Compute Latency: {imgData.computeDurationMs} ms</span>
-                      <span>Format: {imgData.mimeType}</span>
-                    </div>
-
-                  </div>
-                )}
-              </div>
+          {/* Current image details */}
+          {scanProgress.currentItem && (
+            <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
+              <span className="truncate max-w-lg">
+                Inspecting: <strong className="text-slate-300">Task #{scanProgress.currentItem.taskId}</strong> • {scanProgress.currentItem.slotLabel} ({scanProgress.currentItem.feName})
+              </span>
+              <span className="text-indigo-400/80 font-mono">0 Server Overhead (Client-Side)</span>
             </div>
-          );
-        })}
-      </div>
-
-      {/* AUTOMATED PAIRWISE COMPARISON MATRIX (1 vs 2, 1 vs 3, 2 vs 3) */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-5">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
-              <ShieldAlert className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-white">
-                Pairwise Deduplication & Fraud Detection Matrix
-              </h2>
-              <p className="text-xs text-slate-400">
-                Automated verdicts comparing each photo pair using cryptographic & perceptual distance
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          {/* PAIR 1 vs 2 */}
-          <PairCard
-            label="Image #1 vs Image #2"
-            imgA={img1}
-            imgB={img2}
-            evalResult={pair12}
-            nameA="Image #1"
-            nameB="Image #2"
-          />
-
-          {/* PAIR 1 vs 3 */}
-          <PairCard
-            label="Image #1 vs Image #3"
-            imgA={img1}
-            imgB={img3}
-            evalResult={pair13}
-            nameA="Image #1"
-            nameB="Image #3"
-          />
-
-          {/* PAIR 2 vs 3 */}
-          <PairCard
-            label="Image #2 vs Image #3"
-            imgA={img2}
-            imgB={img3}
-            evalResult={pair23}
-            nameA="Image #2"
-            nameB="Image #3"
-          />
-        </div>
-      </div>
-
-      {/* TECHNICAL GUIDE / GOVERNANCE SUMMARY */}
-      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 text-xs text-slate-400 space-y-3">
-        <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-          <Info className="w-4 h-4 text-indigo-400" />
-          Technical Hypothesis Verification Guide:
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[12px] leading-relaxed">
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1">
-            <div className="font-semibold text-rose-300">1. Cryptographic SHA-256 Match</div>
-            <p>
-              Occurs when the exact same JPEG file is uploaded to multiple visits. Even 1 byte changed produces a completely different hash. 
-              <strong> 100% conclusive proof of fraudulent re-upload.</strong>
-            </p>
-          </div>
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1">
-            <div className="font-semibold text-amber-300">2. Perceptual dHash (Hamming ≤ 4)</div>
-            <p>
-              Catches FEs who take screenshots of old photos, crop borders, or re-compress them to evade byte matching. 
-              dHash compares relative luminance gradients, recognizing visual clones instantly.
-            </p>
-          </div>
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1">
-            <div className="font-semibold text-sky-300">3. Mobile Compression & EXIF</div>
-            <p>
-              Mobile client uploads often strip EXIF markers to conserve network bandwidth. When EXIF is absent, 
-              <strong> dHash provides 100% reliable fallback</strong> without relying on mobile timestamps.
-            </p>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  );
-}
-
-/**
- * Individual Pairwise Comparison Card
- */
-function PairCard({ label, imgA, imgB, evalResult, nameA, nameB }) {
-  const hasBoth = Boolean(imgA && imgB);
-
-  return (
-    <div className={`p-4 rounded-xl border flex flex-col justify-between space-y-3 ${
-      !hasBoth 
-        ? 'bg-slate-950/40 border-slate-800/60 opacity-60' 
-        : evalResult.isExactByteDuplicate || evalResult.isPerceptualDuplicate
-          ? 'bg-rose-950/20 border-rose-500/30 shadow-lg shadow-rose-950/20'
-          : 'bg-slate-950/60 border-slate-800'
-    }`}>
-      <div>
-        <div className="flex items-center justify-between text-xs font-semibold pb-2 border-b border-slate-800">
-          <span className="text-slate-300">{label}</span>
-          {hasBoth && (
-            <span className={`text-[11px] font-mono px-2 py-0.5 rounded border ${evalResult.badgeClass}`}>
-              {evalResult.similarityPct}% Visual Match
-            </span>
           )}
         </div>
+      )}
 
-        {!hasBoth ? (
-          <div className="py-8 text-center text-xs text-slate-500 flex flex-col items-center justify-center">
-            <ArrowRight className="w-5 h-5 text-slate-600 mb-1" />
-            <span>Upload {nameA} and {nameB} to run comparison</span>
+      {/* TOP KPI SUMMARY CARDS */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        {/* Scanned Count */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-medium">Scanned Images</span>
+            <Eye className="w-4 h-4 text-sky-400" />
           </div>
-        ) : (
-          <div className="space-y-3 pt-2">
-            {/* Verdict Badge */}
-            <div className="text-xs font-medium text-slate-200">
-              {evalResult.verdict}
+          <div className="text-2xl font-bold text-white font-mono">
+            {scanResults ? scanResults.scannedCount : 0}
+            <span className="text-xs text-slate-500 font-normal ml-1.5">/ {imageQueue.length}</span>
+          </div>
+          <p className="text-[11px] text-slate-500 mt-1">
+            {scanResults ? '< 12 ms per photo' : 'Ready to analyze'}
+          </p>
+        </div>
+
+        {/* Exact Duplicates */}
+        <div className={`border rounded-2xl p-4 shadow-lg ${
+          scanResults?.exactClusters?.length > 0 
+            ? 'bg-rose-950/20 border-rose-500/40' 
+            : 'bg-slate-900 border-slate-800'
+        }`}>
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-medium">Exact Bit Matches</span>
+            <Fingerprint className="w-4 h-4 text-rose-400" />
+          </div>
+          <div className="text-2xl font-bold text-rose-400 font-mono">
+            {scanResults ? scanResults.exactClusters.length : 0}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">
+            100% SHA-256 byte match
+          </p>
+        </div>
+
+        {/* Resized / Cropped Clones */}
+        <div className={`border rounded-2xl p-4 shadow-lg ${
+          scanResults?.perceptualPairs?.length > 0 
+            ? 'bg-amber-950/20 border-amber-500/40' 
+            : 'bg-slate-900 border-slate-800'
+        }`}>
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-medium">Resized / Clones</span>
+            <Layers className="w-4 h-4 text-amber-400" />
+          </div>
+          <div className="text-2xl font-bold text-amber-400 font-mono">
+            {scanResults ? scanResults.perceptualPairs.length : 0}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">
+            dHash visual match ≥ 94%
+          </p>
+        </div>
+
+        {/* Stale EXIF Photos */}
+        <div className={`border rounded-2xl p-4 shadow-lg ${
+          scanResults?.stalePhotoAlerts?.length > 0 
+            ? 'bg-purple-950/20 border-purple-500/40' 
+            : 'bg-slate-900 border-slate-800'
+        }`}>
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-medium">Stale Historical</span>
+            <Clock className="w-4 h-4 text-purple-400" />
+          </div>
+          <div className="text-2xl font-bold text-purple-400 font-mono">
+            {scanResults ? scanResults.stalePhotoAlerts.length : 0}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">
+            EXIF capture date mismatch
+          </p>
+        </div>
+
+        {/* High Risk FEs */}
+        <div className={`border rounded-2xl p-4 shadow-lg ${
+          scanResults?.summary?.affectedFeCount > 0 
+            ? 'bg-slate-900 border-rose-500/40' 
+            : 'bg-slate-900 border-slate-800'
+        }`}>
+          <div className="flex items-center justify-between text-slate-400 mb-2">
+            <span className="text-xs font-medium">Flagged FEs</span>
+            <Users className="w-4 h-4 text-indigo-400" />
+          </div>
+          <div className="text-2xl font-bold text-white font-mono">
+            {scanResults ? scanResults.summary.affectedFeCount : 0}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">
+            {scanResults ? `${scanResults.summary.affectedTaskCount} tasks impacted` : 'Zero strikes'}
+          </p>
+        </div>
+      </div>
+
+      {/* SCAN RESULTS & CLUSTERS SECTION */}
+      {scanResults ? (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
+          
+          {/* TABS & SEARCH BAR */}
+          <div className="p-4 border-b border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            
+            {/* Filter Tabs */}
+            <div className="flex items-center gap-1.5 overflow-x-auto text-xs">
+              <button
+                onClick={() => setActiveTab('all')}
+                className={`px-3 py-1.5 rounded-xl font-medium transition-colors ${
+                  activeTab === 'all'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                All Incidents ({scanResults.summary.totalViolations})
+              </button>
+
+              <button
+                onClick={() => setActiveTab('exact')}
+                className={`px-3 py-1.5 rounded-xl font-medium transition-colors flex items-center gap-1.5 ${
+                  activeTab === 'exact'
+                    ? 'bg-rose-600 text-white'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                Exact Duplicates ({scanResults.exactClusters.length})
+              </button>
+
+              <button
+                onClick={() => setActiveTab('perceptual')}
+                className={`px-3 py-1.5 rounded-xl font-medium transition-colors flex items-center gap-1.5 ${
+                  activeTab === 'perceptual'
+                    ? 'bg-amber-600 text-white'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                Resized / Clones ({scanResults.perceptualPairs.length})
+              </button>
+
+              <button
+                onClick={() => setActiveTab('stale')}
+                className={`px-3 py-1.5 rounded-xl font-medium transition-colors flex items-center gap-1.5 ${
+                  activeTab === 'stale'
+                    ? 'bg-purple-600 text-white'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                Stale EXIF ({scanResults.stalePhotoAlerts.length})
+              </button>
             </div>
 
-            {/* Similarity Progress Bar */}
-            <div className="space-y-1">
-              <div className="flex justify-between text-[11px] text-slate-400">
-                <span>Perceptual Similarity</span>
-                <span className="font-mono">{evalResult.similarityPct}%</span>
-              </div>
-              <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-                <div 
-                  className={`h-full transition-all duration-500 ${
-                    evalResult.similarityPct >= 90 
-                      ? 'bg-rose-500' 
-                      : evalResult.similarityPct >= 80 
-                        ? 'bg-amber-500' 
-                        : 'bg-emerald-500'
-                  }`}
-                  style={{ width: `${evalResult.similarityPct}%` }}
+            {/* Collusion toggle & Search */}
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={onlyCollusion}
+                  onChange={(e) => setOnlyCollusion(e.target.checked)}
+                  className="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0"
+                />
+                <span>Only Cross-FE Collusion</span>
+              </label>
+
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Filter by Task / FE..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-3 py-1 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 w-44"
                 />
               </div>
             </div>
 
-            {/* Metric Comparison Table */}
-            <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 border-t border-slate-800/80">
-              <div>
-                <span className="text-slate-500 block">SHA-256 Match:</span>
-                <span className={`font-semibold ${evalResult.isExactByteDuplicate ? 'text-rose-400' : 'text-slate-300'}`}>
-                  {evalResult.isExactByteDuplicate ? '🚨 100% IDENTICAL' : 'Unique Bytes'}
-                </span>
-              </div>
-              <div>
-                <span className="text-slate-500 block">Hamming Distance:</span>
-                <span className="font-mono text-slate-300 font-semibold">
-                  {evalResult.hammingDistance} / 64 bits
-                </span>
-              </div>
-            </div>
+          </div>
 
-            {/* Governance Action */}
-            <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
-              <strong className="text-slate-300 block mb-0.5">Audit Action:</strong>
-              {evalResult.recommendation}
+          {/* INCIDENTS LIST */}
+          <div className="p-5 space-y-6">
+            
+            {/* If zero violations found */}
+            {scanResults.summary.totalViolations === 0 && (
+              <div className="py-16 text-center space-y-3">
+                <div className="w-14 h-14 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+                <h3 className="text-base font-bold text-white">
+                  Zero Image Duplications or Re-use Detected!
+                </h3>
+                <p className="text-xs text-slate-400 max-w-md mx-auto">
+                  All {scanResults.scannedCount} checklist photos analyzed for this batch have verified unique cryptographic fingerprints and distinct visual framing.
+                </p>
+              </div>
+            )}
+
+            {/* EXACT DUPLICATES CLUSTERS */}
+            {(activeTab === 'all' || activeTab === 'exact') && exactClustersFiltered.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Fingerprint className="w-4 h-4" />
+                    Exact Bit-for-Bit Duplicate Clusters ({exactClustersFiltered.length})
+                  </h3>
+                  <span className="text-[11px] text-slate-400">100% Cryptographic SHA-256 Match</span>
+                </div>
+
+                <div className="space-y-4">
+                  {exactClustersFiltered.map((cluster) => (
+                    <div 
+                      key={cluster.id} 
+                      className="bg-slate-950/80 border border-rose-500/30 rounded-2xl p-5 space-y-4 shadow-lg shadow-rose-950/10"
+                    >
+                      {/* Cluster Header */}
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                              🚨 EXACT FILE RE-UPLOAD
+                            </span>
+                            {cluster.isCrossFE ? (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
+                                <Users className="w-3 h-3" />
+                                Cross-FE Collusion ({cluster.feCount} FEs)
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                Single FE Recycling ({cluster.taskCount} Visits)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs font-mono text-slate-400 flex items-center gap-2">
+                            <span>SHA-256: <strong className="text-slate-300 select-all">{cluster.sha256}</strong></span>
+                            <button
+                              onClick={() => handleCopy(cluster.sha256, cluster.id)}
+                              className="text-slate-500 hover:text-slate-300"
+                            >
+                              {copiedKey === cluster.id ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Cluster Action */}
+                        <button
+                          onClick={() => handleMarkClusterFatal(cluster)}
+                          className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          Apply Fatal Strike to All {cluster.taskCount} Tasks
+                        </button>
+                      </div>
+
+                      {/* Items Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                        {cluster.items.map((it) => (
+                          <div 
+                            key={it.id} 
+                            className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex flex-col justify-between space-y-2.5"
+                          >
+                            <div className="relative rounded-lg overflow-hidden bg-slate-950 aspect-video group">
+                              <img
+                                src={it.url}
+                                alt={it.slotLabel}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 cursor-pointer"
+                                onClick={() => setPreviewModalImage({ url: it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
+                              />
+                              <button
+                                onClick={() => setPreviewModalImage({ url: it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
+                                className="absolute top-1.5 right-1.5 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                              >
+                                <Maximize2 className="w-3.5 h-3.5" />
+                              </button>
+                              <div className="absolute bottom-1 left-1 bg-slate-900/90 text-[10px] text-slate-300 px-1.5 py-0.5 rounded font-medium">
+                                {it.slotLabel}
+                              </div>
+                            </div>
+
+                            <div className="space-y-1 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span className="font-bold text-white font-mono">Task #{it.taskId}</span>
+                                <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                                  it.task?.auditStatus === 'FATAL' 
+                                    ? 'bg-rose-500/20 text-rose-400' 
+                                    : it.task?.auditStatus === 'PASSED'
+                                      ? 'bg-emerald-500/20 text-emerald-400'
+                                      : 'bg-amber-500/20 text-amber-400'
+                                }`}>
+                                  {it.task?.auditStatus || 'PENDING'}
+                                </span>
+                              </div>
+                              <div className="text-slate-300 truncate font-medium">
+                                {it.feName} <span className="text-slate-500 font-mono">({it.feCode})</span>
+                              </div>
+                              <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                                <span>{it.city}</span>
+                                <span>{it.date}</span>
+                              </div>
+                            </div>
+
+                            <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
+                              {onInspectTask && (
+                                <button
+                                  onClick={() => onInspectTask(it.task)}
+                                  className="flex-1 py-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg text-center transition-colors"
+                                >
+                                  Inspect Task
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleMarkTaskFatal(it.taskId, `Exact duplicate ${it.slotLabel}`)}
+                                className="py-1 px-2 text-[11px] font-bold text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                                title="Strike this task"
+                              >
+                                Fatal
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* PERCEPTUAL CLONES / RESIZED / CROPPED PAIRS */}
+            {(activeTab === 'all' || activeTab === 'perceptual') && perceptualPairsFiltered.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Layers className="w-4 h-4" />
+                    Resized / Screenshotted Perceptual Clones ({perceptualPairsFiltered.length})
+                  </h3>
+                  <span className="text-[11px] text-slate-400">dHash Visual Similarity ≥ 94%</span>
+                </div>
+
+                <div className="space-y-4">
+                  {perceptualPairsFiltered.map((pair) => (
+                    <div 
+                      key={pair.id} 
+                      className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg shadow-amber-950/10"
+                    >
+                      {/* Pair Header */}
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              {pair.title}
+                            </span>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300 font-mono">
+                              {pair.similarityPct}% Visual Match (Hamming: {pair.hammingDistance}/64)
+                            </span>
+                            {pair.isCrossFE && (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
+                                <Users className="w-3 h-3" />
+                                Cross-FE Collusion
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-400">
+                            {pair.recommendation}
+                          </p>
+                        </div>
+
+                        <button
+                          onClick={() => handleMarkPairFatal(pair)}
+                          className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          Mark Both Tasks as Fatal Strike
+                        </button>
+                      </div>
+
+                      {/* Side-by-side comparison */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        {/* Image A */}
+                        <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex items-start gap-4">
+                          <div className="w-36 h-28 bg-slate-950 rounded-lg overflow-hidden shrink-0 relative group">
+                            <img
+                              src={pair.itemA.url}
+                              alt="Item A"
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer"
+                              onClick={() => setPreviewModalImage({ url: pair.itemA.url, title: `Task #${pair.itemA.taskId}` })}
+                            />
+                            <button
+                              onClick={() => setPreviewModalImage({ url: pair.itemA.url, title: `Task #${pair.itemA.taskId}` })}
+                              className="absolute top-1 right-1 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              <Maximize2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                          <div className="space-y-1.5 text-xs flex-1">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-white font-mono">Task #{pair.itemA.taskId}</span>
+                              <span className="text-[10px] font-medium text-slate-400">{pair.itemA.slotLabel}</span>
+                            </div>
+                            <div className="text-slate-300 font-medium">
+                              {pair.itemA.feName} <span className="text-slate-500 font-mono">({pair.itemA.feCode})</span>
+                            </div>
+                            <div className="text-[11px] text-slate-400">
+                              {pair.itemA.city} • {pair.itemA.date}
+                            </div>
+                            <div className="text-[10px] text-slate-500 font-mono">
+                              dHash: {pair.itemA.dHash?.hashHex || 'N/A'} • {pair.itemA.width}x{pair.itemA.height}px
+                            </div>
+                            {onInspectTask && (
+                              <button
+                                onClick={() => onInspectTask(pair.itemA.task)}
+                                className="mt-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1"
+                              >
+                                Open Task In Audit Console <ChevronRight className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Image B */}
+                        <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex items-start gap-4">
+                          <div className="w-36 h-28 bg-slate-950 rounded-lg overflow-hidden shrink-0 relative group">
+                            <img
+                              src={pair.itemB.url}
+                              alt="Item B"
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer"
+                              onClick={() => setPreviewModalImage({ url: pair.itemB.url, title: `Task #${pair.itemB.taskId}` })}
+                            />
+                            <button
+                              onClick={() => setPreviewModalImage({ url: pair.itemB.url, title: `Task #${pair.itemB.taskId}` })}
+                              className="absolute top-1 right-1 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              <Maximize2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                          <div className="space-y-1.5 text-xs flex-1">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-white font-mono">Task #{pair.itemB.taskId}</span>
+                              <span className="text-[10px] font-medium text-slate-400">{pair.itemB.slotLabel}</span>
+                            </div>
+                            <div className="text-slate-300 font-medium">
+                              {pair.itemB.feName} <span className="text-slate-500 font-mono">({pair.itemB.feCode})</span>
+                            </div>
+                            <div className="text-[11px] text-slate-400">
+                              {pair.itemB.city} • {pair.itemB.date}
+                            </div>
+                            <div className="text-[10px] text-slate-500 font-mono">
+                              dHash: {pair.itemB.dHash?.hashHex || 'N/A'} • {pair.itemB.width}x{pair.itemB.height}px
+                            </div>
+                            {onInspectTask && (
+                              <button
+                                onClick={() => onInspectTask(pair.itemB.task)}
+                                className="mt-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1"
+                              >
+                                Open Task In Audit Console <ChevronRight className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* STALE PHOTOS DATE MISMATCH */}
+            {(activeTab === 'all' || activeTab === 'stale') && stalePhotosFiltered.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-purple-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Clock className="w-4 h-4" />
+                    Stale Historical Photos (EXIF Date Mismatch) ({stalePhotosFiltered.length})
+                  </h3>
+                  <span className="text-[11px] text-slate-400">Photo taken before scheduled dispatch</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {stalePhotosFiltered.map((stale) => (
+                    <div 
+                      key={stale.id} 
+                      className="bg-slate-950/80 border border-purple-500/30 rounded-2xl p-4 flex items-start gap-4 shadow-lg shadow-purple-950/10"
+                    >
+                      <div className="w-32 h-28 bg-slate-900 rounded-xl overflow-hidden shrink-0 relative group">
+                        <img
+                          src={stale.item.url}
+                          alt="Stale photo"
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer"
+                          onClick={() => setPreviewModalImage({ url: stale.item.url, title: `Task #${stale.item.taskId}` })}
+                        />
+                        <button
+                          onClick={() => setPreviewModalImage({ url: stale.item.url, title: `Task #${stale.item.taskId}` })}
+                          className="absolute top-1 right-1 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <Maximize2 className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-1.5 text-xs flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-white font-mono">Task #{stale.item.taskId}</span>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300">
+                            {stale.item.slotLabel}
+                          </span>
+                        </div>
+
+                        <div className="text-slate-300 font-medium">
+                          {stale.item.feName} <span className="text-slate-500 font-mono">({stale.item.feCode})</span>
+                        </div>
+
+                        <div className="p-2 rounded bg-slate-900 border border-slate-800 space-y-0.5 text-[11px]">
+                          <div className="text-purple-300 font-medium">
+                            Camera Captured: <strong className="font-mono">{stale.exifDate}</strong>
+                          </div>
+                          <div className="text-slate-400">
+                            Visit Scheduled: <strong className="font-mono text-slate-300">{stale.taskDate}</strong>
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            Hardware: {stale.cameraModel}
+                          </div>
+                        </div>
+
+                        <div className="pt-2 flex items-center justify-between">
+                          {onInspectTask && (
+                            <button
+                              onClick={() => onInspectTask(stale.item.task)}
+                              className="text-[11px] text-slate-300 hover:text-white"
+                            >
+                              Inspect Task
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleMarkTaskFatal(stale.item.taskId, 'Stale historical photo')}
+                            className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white"
+                          >
+                            Mark Fatal
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          </div>
+
+        </div>
+      ) : (
+        /* PRE-SCAN IDLE STATE */
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center space-y-4 shadow-xl">
+          <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mx-auto shadow-inner">
+            <Sparkles className="w-8 h-8" />
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-lg font-bold text-white">
+              Ready to Scan {imageQueue.length} Checklist Photos
+            </h2>
+            <p className="text-xs text-slate-400 max-w-lg mx-auto leading-relaxed">
+              Click <strong className="text-indigo-300">"Run Anti-Fraud Forensics Scan"</strong> above. 
+              The system will extract cryptographic fingerprints and perceptual hashes for all checklist photos in the selected batch, 
+              instantly highlighting duplicate uploads, screenshot reuse, and cross-FE collusion.
+            </p>
+          </div>
+          <button
+            onClick={handleStartScan}
+            disabled={imageQueue.length === 0}
+            className="px-6 py-2.5 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 transition-all inline-flex items-center gap-2"
+          >
+            <Play className="w-4 h-4 fill-white" />
+            Start Batch Forensics Scan ({imageQueue.length} Photos)
+          </button>
+        </div>
+      )}
+
+      {/* FULL RESOLUTION LIGHTBOX MODAL */}
+      {previewModalImage && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4"
+          onClick={() => setPreviewModalImage(null)}
+        >
+          <div 
+            className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden max-w-4xl max-h-[90vh] flex flex-col shadow-2xl relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <span className="text-sm font-bold text-white">{previewModalImage.title}</span>
+              <button
+                onClick={() => setPreviewModalImage(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-2 overflow-auto flex items-center justify-center bg-black/50 min-h-[300px]">
+              <img
+                src={previewModalImage.url}
+                alt="Full resolution preview"
+                className="max-w-full max-h-[75vh] object-contain rounded-lg"
+              />
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
     </div>
   );
 }
