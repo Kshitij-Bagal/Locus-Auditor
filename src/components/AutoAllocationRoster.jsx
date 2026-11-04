@@ -153,6 +153,8 @@ export default function AutoAllocationRoster({
 
   // Default to latest batch date
   const [selectedBatchDate, setSelectedBatchDate] = useState(() => '');
+  // Carryover toggle: Always keep un-audited tasks from previous days in active slots and pool
+  const [includeCarryover, setIncludeCarryover] = useState(true);
 
   useEffect(() => {
     if (!selectedBatchDate && availableBatchDates.length > 0) {
@@ -160,11 +162,29 @@ export default function AutoAllocationRoster({
     }
   }, [availableBatchDates, selectedBatchDate]);
 
-  // Scoped tasks for the selected batch date (prevents historical completed tasks from inflating numbers)
+  // Carryover pending tasks with photos from previous days that remain un-audited
+  const carryoverPendingTasks = useMemo(() => {
+    return (tasks || []).filter(t => {
+      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
+      if (!hasPhotos || isTaskAlreadyAudited(t)) return false;
+      const d = getTaskBatchDateYMD(t);
+      return selectedBatchDate && selectedBatchDate !== 'ALL' && d !== selectedBatchDate;
+    });
+  }, [tasks, selectedBatchDate]);
+
+  // Scoped tasks: Includes selected batch date PLUS active un-audited carryover tasks from previous days
   const scopedTasks = useMemo(() => {
     if (!selectedBatchDate || selectedBatchDate === 'ALL') return tasks;
-    return tasks.filter(t => getTaskBatchDateYMD(t) === selectedBatchDate);
-  }, [tasks, selectedBatchDate]);
+    return tasks.filter(t => {
+      const d = getTaskBatchDateYMD(t);
+      if (d === selectedBatchDate) return true;
+      if (includeCarryover) {
+        const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
+        return hasPhotos && !isTaskAlreadyAudited(t);
+      }
+      return false;
+    });
+  }, [tasks, selectedBatchDate, includeCarryover]);
 
   // Strictly filter unassigned tasks that HAVE AUDIT PHOTOS waiting for an auditor
   const unassignedPool = useMemo(() => {
@@ -214,7 +234,7 @@ export default function AutoAllocationRoster({
     return totalWeight > 0 ? Math.round(poolSize / totalWeight) : 0;
   }, [unassignedPool.length, pendingAuditablePool.length, activeAuditors]);
 
-  // Workload count per auditor for the active batch (accurately checks both ID and Name)
+  // Workload count per auditor for the active batch (accurately checks both ID and Name and highlights carryover)
   const auditorWorkloadMap = useMemo(() => {
     const map = {};
     roster.forEach(a => {
@@ -231,17 +251,22 @@ export default function AutoAllocationRoster({
         return matchId || matchName;
       });
 
+      const todayBatchAssigned = assigned.filter(t => getTaskBatchDateYMD(t) === selectedBatchDate);
+      const carryoverAssigned = assigned.filter(t => getTaskBatchDateYMD(t) !== selectedBatchDate && !isTaskAlreadyAudited(t));
+
       const pending = assigned.filter(t => !isTaskAlreadyAudited(t)).length;
       const completed = assigned.filter(t => isTaskAlreadyAudited(t)).length;
 
       map[a.id] = {
         total: assigned.length,
+        todayBatch: todayBatchAssigned.length,
+        carryover: carryoverAssigned.length,
         pending,
         completed
       };
     });
     return map;
-  }, [roster, scopedTasks]);
+  }, [roster, scopedTasks, selectedBatchDate]);
 
   // Shift status toggle & DB persistence
   const handleUpdateShift = async (auditorId, newStatus) => {
@@ -472,6 +497,50 @@ export default function AutoAllocationRoster({
     }
   };
 
+  // Dedicated handler to reallocate only the carryover D+1 overdue tasks among active on-duty auditors
+  const handleReallocateCarryoverTasks = async () => {
+    if (carryoverPendingTasks.length === 0) {
+      alert('No carryover pending tasks from previous days to reallocate.');
+      return;
+    }
+    if (activeAuditors.length === 0) {
+      alert('All auditors are marked on leave. Please mark at least one auditor as Available.');
+      return;
+    }
+
+    const confirmMsg = `Reallocate all ${carryoverPendingTasks.length} D+1 carryover tasks from previous days equally among ${activeAuditors.length} active on-duty auditor(s)?\n\nCompleted audits remain strictly untouched.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsAllocating(true);
+    try {
+      const result = runAutoAllocationAlgorithm({
+        tasks: carryoverPendingTasks,
+        rosterAuditors: activeAuditors
+      });
+
+      const allocMap = new Map((result.allocatedTasks || []).map(t => [String(t.id || t.taskId), t]));
+      const allUpdatedTasks = tasks.map(t => allocMap.get(String(t.id || t.taskId)) || t);
+
+      if (result.allocatedTasks && result.allocatedTasks.length > 0) {
+        await tasksApi.saveAllocations(result.allocatedTasks);
+      }
+
+      if (allocateCallback) {
+        allocateCallback(allUpdatedTasks);
+      }
+
+      setAllocationLog({
+        timestamp: new Date().toLocaleTimeString(),
+        assignedCount: result.newlyAssignedCount,
+        note: `Reallocated ${result.newlyAssignedCount} D+1 carryover tasks across ${activeAuditors.length} auditors`
+      });
+    } catch (err) {
+      alert(`Carryover reallocation error: ${err.message}`);
+    } finally {
+      setIsAllocating(false);
+    }
+  };
+
   // Emergency leave redistribution
   const handleReallocateLeaveAuditor = async (leaveAuditorId) => {
     const leaveAuditor = roster.find(a => a.id === leaveAuditorId);
@@ -608,21 +677,43 @@ export default function AutoAllocationRoster({
         <div className="flex flex-wrap items-center gap-2.5">
           {/* Active Shift Batch Selector */}
           {availableBatchDates.length > 0 && (
-            <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-1.5 shadow-sm">
-              <Calendar className="w-4 h-4 text-sky-400 shrink-0" />
-              <select
-                value={selectedBatchDate}
-                onChange={(e) => setSelectedBatchDate(e.target.value)}
-                className="bg-transparent text-xs text-sky-300 font-bold focus:outline-none cursor-pointer pr-1"
-                title="Select upload batch to focus allocation and workloads strictly on today's active shift"
-              >
-                <option value="ALL" className="bg-slate-800 text-white font-bold">All Batches ({tasks.length} cumulative)</option>
-                {availableBatchDates.map((b, idx) => (
-                  <option key={b.date} value={b.date} className="bg-slate-800 text-white font-semibold">
-                    Batch {b.date} {idx === 0 ? '★ Today / Latest' : ''} ({b.total} tasks • {b.pending} to audit)
-                  </option>
-                ))}
-              </select>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700/80 rounded-xl px-2.5 py-1.5 shadow-sm">
+                <Calendar className="w-4 h-4 text-sky-400 shrink-0" />
+                <select
+                  value={selectedBatchDate}
+                  onChange={(e) => setSelectedBatchDate(e.target.value)}
+                  className="bg-transparent text-xs text-sky-300 font-bold focus:outline-none cursor-pointer pr-1"
+                  title="Select upload batch to focus allocation and workloads strictly on today's active shift"
+                >
+                  <option value="ALL" className="bg-slate-800 text-white font-bold">All Batches ({tasks.length} cumulative)</option>
+                  {availableBatchDates.map((b, idx) => (
+                    <option key={b.date} value={b.date} className="bg-slate-800 text-white font-semibold">
+                      Batch {b.date} {idx === 0 ? '★ Today / Latest' : ''} ({b.total} tasks • {b.pending} to audit)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Include Carryover Toggle */}
+              {carryoverPendingTasks.length > 0 && selectedBatchDate !== 'ALL' && (
+                <label 
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-sm select-none ${
+                    includeCarryover 
+                      ? 'bg-amber-950/70 border-amber-500/60 text-amber-200' 
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                  title="Keep all pending tasks from previous days active in slots and available for allocation"
+                >
+                  <input
+                    type="checkbox"
+                    checked={includeCarryover}
+                    onChange={(e) => setIncludeCarryover(e.target.checked)}
+                    className="rounded border-amber-500/40 bg-slate-950 text-amber-500"
+                  />
+                  <span>Include {carryoverPendingTasks.length} D+1 Carryover</span>
+                </label>
+              )}
             </div>
           )}
 
@@ -726,6 +817,41 @@ export default function AutoAllocationRoster({
           </button>
         </div>
       </div>
+
+      {/* D+1 Carryover Backlog Alert Banner */}
+      {carryoverPendingTasks.length > 0 && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-red-950/80 via-amber-950/40 to-slate-900 border border-amber-500/50 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4 animate-in fade-in">
+          <div className="flex items-center gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center justify-center shrink-0 animate-pulse">
+              <Clock className="w-5 h-5 text-amber-400" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/40">
+                  D+1 Escalation Notice
+                </span>
+                <h3 className="text-white font-bold text-sm">
+                  {carryoverPendingTasks.length} Un-Audited Tasks from Previous Days Active in System
+                </h3>
+              </div>
+              <p className="text-slate-300 text-xs mt-0.5">
+                These visits have completed photos from previous dates that remain unaudited. They are actively escalated to <strong>Business Head (BH) & General Manager (GM)</strong> in the D+1 Console.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              onClick={handleReallocateCarryoverTasks}
+              disabled={isAllocating || activeAuditors.length === 0}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-600/30 flex items-center gap-2 transition-all cursor-pointer"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+              <span>Reallocate {carryoverPendingTasks.length} Carryover Tasks</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -865,13 +991,18 @@ export default function AutoAllocationRoster({
                     <div className="bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
                       <span className="text-[10px] text-amber-400 font-bold uppercase block">Pending</span>
                       <span className="font-extrabold text-amber-300 text-xs">{stats.pending} to do</span>
+                      {stats.carryover > 0 && (
+                        <span className="text-[9px] text-rose-400 font-mono block mt-0.5 font-bold">
+                          ({stats.carryover} D+1 overdue)
+                        </span>
+                      )}
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 uppercase block">Audited</span>
                       <span className="font-bold text-emerald-400">{stats.completed} done</span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-500 uppercase block">Batch Total</span>
+                      <span className="text-[10px] text-slate-500 uppercase block">Total Workload</span>
                       <span className="font-bold text-slate-300">{stats.total}</span>
                     </div>
                   </div>

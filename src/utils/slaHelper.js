@@ -2,11 +2,15 @@
  * SLA & D+1 Audit Escalation Engine for Locus Auditor
  * 
  * Business Rule:
- * Day D dispatches allocated to auditors must be audited within the same day.
- * Any audit allocated on Day D that remains PENDING into D+1 (>24 hours)
+ * Day D dispatches with photo evidence must be audited within the same day.
+ * Any completed audit from Day D that remains PENDING into D+1 (>24 hours or calendar day passed)
  * is an SLA breach and is automatically escalated to:
  * - Business Head (BH)
  * - General Manager (GM)
+ * 
+ * Unaudited tasks from previous days MUST be highlighted in both:
+ * 1. D+1 Escalations Console (for leadership visibility and intervention)
+ * 2. Auto-Allocation Roster (for immediate carryover reallocation to on-duty staff)
  */
 
 /**
@@ -27,16 +31,18 @@ export function parseTaskDate(dateStr) {
     if (!isNaN(d.getTime())) return d;
   }
 
-  // DD/MM/YYYY
+  // DD/MM/YYYY (e.g. 03/11/2026 or 03/11/2026 03:00 PM)
   if (/^\d{1,2}\/\d{1,2}\/\d{4}/.test(trimmed)) {
-    const [day, month, year] = trimmed.split('/');
+    const datePart = trimmed.split(' ')[0];
+    const [day, month, year] = datePart.split('/');
     const d = new Date(Number(year), Number(month) - 1, Number(day));
     if (!isNaN(d.getTime())) return d;
   }
 
   // DD-MM-YYYY
   if (/^\d{1,2}-\d{1,2}-\d{4}/.test(trimmed)) {
-    const [day, month, year] = trimmed.split('-');
+    const datePart = trimmed.split(' ')[0];
+    const [day, month, year] = datePart.split('-');
     const d = new Date(Number(year), Number(month) - 1, Number(day));
     if (!isNaN(d.getTime())) return d;
   }
@@ -48,11 +54,11 @@ export function parseTaskDate(dateStr) {
 
 /**
  * Determines SLA status for a task:
- * - Completed audits are closed out.
- * - Unassigned tasks are awaiting allocation.
- * - SLA is STRICTLY counted from the date/time the task was uploaded and allocated to the auditor (allocatedAt or uploadedAt).
- * - Lead/dispatch date in the field is NEVER used to calculate audit SLA.
- * - Assigned pending tasks >= 24 hours since allocation/upload are D+1 BREACHED.
+ * - Audited tasks (PASSED or FATAL) are closed out.
+ * - Tasks with auditStatus === 'PENDING' (or un-audited) whose field visit occurred on a previous date
+ *   or whose allocation/creation is >= 24h old are D+1 BREACHED.
+ * - Reallocating a task does NOT reset its D+1 breach clock.
+ * - Both assigned and unassigned carryover tasks are flagged for leadership escalation.
  */
 export function getTaskSLAStatus(task, referenceTime = new Date()) {
   if (!task) {
@@ -60,16 +66,60 @@ export function getTaskSLAStatus(task, referenceTime = new Date()) {
   }
 
   // Completed or fatal audits are already closed
-  if (task.auditStatus && task.auditStatus !== 'PENDING') {
+  const auditStatus = String(task.auditStatus || task.audit_status || 'PENDING').toUpperCase();
+  if (auditStatus === 'PASSED' || auditStatus === 'FATAL') {
     return {
       isOverdue: false,
       status: 'CLOSED',
-      auditStatus: task.auditStatus,
-      slaLabel: task.auditStatus === 'PASSED' ? 'Passed' : 'Fatal'
+      auditStatus,
+      slaLabel: auditStatus === 'PASSED' ? 'Passed' : 'Fatal'
     };
   }
 
-  // Unassigned tasks without an auditor
+  const now = referenceTime instanceof Date ? referenceTime : new Date(referenceTime);
+
+  // 1. Check dispatch date calendar day difference (Day D vs Today)
+  const dispatchDate = parseTaskDate(task.date || task.dispatch_date);
+  let daysDiff = 0;
+  if (dispatchDate) {
+    const dStart = new Date(dispatchDate.getFullYear(), dispatchDate.getMonth(), dispatchDate.getDate()).getTime();
+    const nStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    daysDiff = Math.max(0, Math.round((nStart - dStart) / (1000 * 60 * 60 * 24)));
+  }
+
+  // 2. Check time elapsed from ingestion / creation baseline
+  const baselineTimeStr = task.uploadedAt || task.created_at || task.createdAt || task.allocatedAt;
+  let baselineDate = baselineTimeStr ? new Date(baselineTimeStr) : null;
+  let elapsedHoursFromBaseline = 0;
+  if (baselineDate && !isNaN(baselineDate.getTime())) {
+    elapsedHoursFromBaseline = Math.floor((now.getTime() - baselineDate.getTime()) / (1000 * 60 * 60));
+  }
+
+  // D+1 SLA Breach Criteria:
+  // - Either dispatch calendar date was yesterday or earlier (daysDiff >= 1)
+  // - OR >= 24 hours have elapsed since ingestion/allocation
+  const isOverdue = daysDiff >= 1 || elapsedHoursFromBaseline >= 24;
+
+  if (isOverdue) {
+    const effectiveHours = Math.max(daysDiff * 24, elapsedHoursFromBaseline, 24);
+    const severity = (effectiveHours >= 48 || daysDiff >= 2) ? 'CRITICAL' : 'HIGH';
+    const isAssigned = Boolean(task.assignedAuditorId || task.assignedAuditorName);
+
+    return {
+      isOverdue: true,
+      status: 'BREACHED',
+      severity,
+      hoursOverdue: effectiveHours,
+      daysOverdue: Math.max(1, daysDiff),
+      slaLabel: `D+${Math.max(1, daysDiff)} Overdue (+${effectiveHours}h)${!isAssigned ? ' - Unassigned' : ''}`,
+      escalatedTo: 'Business Head (BH) & General Manager (GM)',
+      auditorName: isAssigned ? (task.assignedAuditorName || 'Assigned Auditor') : 'Unassigned (Backlog)',
+      auditorId: task.assignedAuditorId || null,
+      isUnassigned: !isAssigned
+    };
+  }
+
+  // Within SLA (On Track)
   const isAssigned = Boolean(task.assignedAuditorId || task.assignedAuditorName);
   if (!isAssigned) {
     return {
@@ -79,42 +129,7 @@ export function getTaskSLAStatus(task, referenceTime = new Date()) {
     };
   }
 
-  const now = referenceTime instanceof Date ? referenceTime : new Date(referenceTime);
-
-  // SLA is strictly measured from the date/time the task was uploaded and allocated to the auditor!
-  // NEVER from the lead / dispatch date.
-  const baselineTimeStr = task.allocatedAt || task.uploadedAt || task.createdAt || task.created_at;
-  let baselineDate = baselineTimeStr ? new Date(baselineTimeStr) : null;
-  if (!baselineDate || isNaN(baselineDate.getTime())) {
-    baselineDate = now;
-  }
-
-  const elapsedMs = Math.max(0, now.getTime() - baselineDate.getTime());
-  const elapsedHours = Math.floor(elapsedMs / (1000 * 60 * 60));
-
-  // D+1 SLA Breach Criteria:
-  // 24+ hours elapsed since allocation/upload to the auditor
-  const isOverdue = elapsedHours >= 24;
-
-  if (isOverdue) {
-    const effectiveHours = Math.max(elapsedHours, 24);
-    const severity = effectiveHours >= 48 ? 'CRITICAL' : 'HIGH';
-
-    return {
-      isOverdue: true,
-      status: 'BREACHED',
-      severity,
-      hoursOverdue: effectiveHours,
-      daysOverdue: Math.max(1, Math.floor(effectiveHours / 24)),
-      slaLabel: `D+1 Overdue (+${effectiveHours}h)`,
-      escalatedTo: 'Business Head (BH) & General Manager (GM)',
-      auditorName: task.assignedAuditorName || 'Unknown Auditor',
-      auditorId: task.assignedAuditorId || null
-    };
-  }
-
-  // Within SLA (On Track)
-  const remainingHours = Math.max(0, 24 - elapsedHours);
+  const remainingHours = Math.max(0, 24 - elapsedHoursFromBaseline);
   return {
     isOverdue: false,
     status: 'ON_TRACK',
@@ -133,7 +148,7 @@ export function filterDPlusOneOverdueTasks(tasks) {
 }
 
 /**
- * Summarize overdue breaches by Auditor
+ * Summarize overdue breaches by Auditor (including unassigned backlog group)
  */
 export function groupOverdueByAuditor(tasks) {
   const map = new Map();
@@ -142,13 +157,15 @@ export function groupOverdueByAuditor(tasks) {
     const sla = getTaskSLAStatus(t);
     if (!sla.isOverdue) return;
 
-    const auditorKey = t.assignedAuditorId || t.assignedAuditorName || 'Unassigned';
-    const auditorName = t.assignedAuditorName || t.assignedAuditorId || 'Unknown Auditor';
+    const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
+    const auditorKey = isUnassigned ? 'UNASSIGNED_BACKLOG' : (t.assignedAuditorId || t.assignedAuditorName);
+    const auditorName = isUnassigned ? 'Unassigned (Backlog)' : (t.assignedAuditorName || t.assignedAuditorId || 'Unknown Auditor');
 
     if (!map.has(auditorKey)) {
       map.set(auditorKey, {
-        auditorId: t.assignedAuditorId,
+        auditorId: isUnassigned ? null : t.assignedAuditorId,
         auditorName,
+        isUnassigned,
         tasks: [],
         count: 0,
         maxHoursOverdue: 0,

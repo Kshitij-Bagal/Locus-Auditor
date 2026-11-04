@@ -410,8 +410,16 @@ export default function App() {
     try {
       showToast(`Writing ${parsedTasks.length} dispatches to database...`, 'info');
       const res = await tasksApi.uploadDispatches(parsedTasks);
-      setTasks(parsedTasks);
-      showToast(`Write operation complete! Ingested ${parsedTasks.length} tasks.`, 'success');
+      
+      // Refresh full task dataset from database to ensure all previous pending/historical tasks remain present
+      const fresh = await tasksApi.getTasks();
+      if (fresh && fresh.length > 0) {
+        setTasks(fresh);
+      } else {
+        setTasks(prev => deduplicateTaskList([...parsedTasks, ...prev]));
+      }
+
+      showToast(`Write operation complete! Ingested ${parsedTasks.length} tasks. Total in system: ${fresh ? fresh.length : parsedTasks.length}`, 'success');
       return res;
     } catch (err) {
       showToast(`Upload write failed: ${err.message}`, 'error');

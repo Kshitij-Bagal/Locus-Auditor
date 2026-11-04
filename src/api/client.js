@@ -231,36 +231,67 @@ export const tasksApi = {
       return { count: parsedTasks.length, local: true };
     }
 
-    const rows = parsedTasks.map(t => ({
-      id: String(t.id || t.taskId),
-      task_id: String(t.taskId || t.id),
-      team_name: t.teamName || t.facilityCode || 'Ahmedabad',
-      facility_code: t.facilityCode || t.teamName || 'Ahmedabad',
-      zone: t.zone || 'Unknown Zone',
-      dispatch_date: t.date || '',
-      status: t.status || 'COMPLETED',
-      fe_name: t.feName || 'Unassigned',
-      fe_code: t.feCode || '',
-      fe_id: t.feId || '',
-      fe_email: t.feEmail || '',
-      customer_name: t.customerName || '',
-      customer_address: t.customerAddress || '',
-      pincode: t.pincode || '',
-      delivery_pin: t.pin || '',
-      cancellation_reason: t.reason || '',
-      image_urls: t.images || {},
-      image_count: t.imageCount || 0,
-      has_images: Boolean(t.hasImages),
-      assigned_auditor_id: t.assignedAuditorId || null,
-      assigned_auditor_name: t.assignedAuditorName || null,
-      allocated_at: t.allocatedAt || null,
-      allocation_batch_id: t.allocationBatchId || null,
-      audit_status: t.auditStatus || 'PENDING',
-      criteria_status: t.criteriaStatus || {},
-      failed_reasons: t.failedReasons || [],
-      replacements: t.replacements || [],
-      created_at: new Date().toISOString()
-    }));
+    // Pre-fetch any existing records for these IDs so we NEVER overwrite assigned auditors, allocation dates, or audit statuses
+    const ids = parsedTasks.map(t => String(t.id || t.taskId));
+    const existingMap = new Map();
+    const fetchChunkSize = 200;
+
+    for (let i = 0; i < ids.length; i += fetchChunkSize) {
+      const chunkIds = ids.slice(i, i + fetchChunkSize);
+      try {
+        const { data: existingRows } = await supabase
+          .from('tasks')
+          .select('id, assigned_auditor_id, assigned_auditor_name, allocated_at, allocation_batch_id, audit_status, audited_at, audited_by_name, audited_location, criteria_status, failed_reasons, replacements, auditor_remarks, warning_level, created_at')
+          .in('id', chunkIds);
+        
+        if (existingRows) {
+          existingRows.forEach(r => existingMap.set(String(r.id), r));
+        }
+      } catch (err) {
+        console.warn('Could not pre-fetch existing tasks during upload:', err.message);
+      }
+    }
+
+    const rows = parsedTasks.map(t => {
+      const existing = existingMap.get(String(t.id || t.taskId));
+      return {
+        id: String(t.id || t.taskId),
+        task_id: String(t.taskId || t.id),
+        team_name: t.teamName || t.facilityCode || 'Ahmedabad',
+        facility_code: t.facilityCode || t.teamName || 'Ahmedabad',
+        zone: t.zone || 'Unknown Zone',
+        dispatch_date: t.date || existing?.dispatch_date || '',
+        status: t.status || existing?.status || 'COMPLETED',
+        fe_name: t.feName || existing?.fe_name || 'Unassigned',
+        fe_code: t.feCode || existing?.fe_code || '',
+        fe_id: t.feId || existing?.fe_id || '',
+        fe_email: t.feEmail || existing?.fe_email || '',
+        customer_name: t.customerName || existing?.customer_name || '',
+        customer_address: t.customerAddress || existing?.customer_address || '',
+        pincode: t.pincode || existing?.pincode || '',
+        delivery_pin: t.pin || existing?.delivery_pin || '',
+        cancellation_reason: t.reason || existing?.cancellation_reason || '',
+        image_urls: t.images || existing?.image_urls || {},
+        image_count: t.imageCount !== undefined ? t.imageCount : (existing?.image_count || 0),
+        has_images: t.hasImages !== undefined ? Boolean(t.hasImages) : Boolean(existing?.has_images),
+        // PRESERVE ASSIGNMENT IF IT ALREADY EXISTED!
+        assigned_auditor_id: existing?.assigned_auditor_id || t.assignedAuditorId || null,
+        assigned_auditor_name: existing?.assigned_auditor_name || t.assignedAuditorName || null,
+        allocated_at: existing?.allocated_at || t.allocatedAt || null,
+        allocation_batch_id: existing?.allocation_batch_id || t.allocationBatchId || null,
+        // PRESERVE AUDIT STATUS IF ALREADY AUDITED OR IN PROGRESS!
+        audit_status: existing?.audit_status || t.auditStatus || 'PENDING',
+        audited_at: existing?.audited_at || null,
+        audited_by_name: existing?.audited_by_name || null,
+        audited_location: existing?.audited_location || null,
+        criteria_status: existing?.criteria_status || t.criteriaStatus || {},
+        failed_reasons: existing?.failed_reasons || t.failedReasons || [],
+        replacements: existing?.replacements || t.replacements || [],
+        auditor_remarks: existing?.auditor_remarks || null,
+        warning_level: existing?.warning_level || null,
+        created_at: existing?.created_at || new Date().toISOString()
+      };
+    });
 
     // Chunk in batches of 100 for network safety
     const chunkSize = 100;
