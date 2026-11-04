@@ -23,7 +23,9 @@ import {
   Maximize2,
   X,
   FileCheck,
-  Search
+  Search,
+  Sliders,
+  Moon
 } from 'lucide-react';
 import { 
   extractTaskImageItems, 
@@ -49,12 +51,18 @@ export default function ImageForensicsLab({
     return Array.from(dates).sort().reverse();
   }, [tasks]);
 
-  // Selected filters
+  // Selected filters & Examination Criteria
   const [selectedDate, setSelectedDate] = useState(() => availableDates[0] || 'ALL');
   const [selectedSlot, setSelectedSlot] = useState('ALL');
   const [selectedStatus, setSelectedStatus] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyCollusion, setOnlyCollusion] = useState(false);
+  
+  // Readjusted Examination Sensitivity (Hamming distance threshold):
+  // 4 = Strict (94%+ match)
+  // 7 = Balanced Recommended (89%+ match, captures crops & screenshots)
+  // 9 = Aggressive (86%+ match, captures angle & slight lighting shifts)
+  const [sensitivity, setSensitivity] = useState(7);
 
   // Scan state
   const [isScanning, setIsScanning] = useState(false);
@@ -62,8 +70,8 @@ export default function ImageForensicsLab({
   const [scanResults, setScanResults] = useState(null);
   const abortControllerRef = useRef(null);
 
-  // UI state
-  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'exact' | 'perceptual' | 'stale'
+  // UI state: 'all' | 'blank' | 'exact' | 'perceptual' | 'stale'
+  const [activeTab, setActiveTab] = useState('all');
   const [previewModalImage, setPreviewModalImage] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
   const [actionSuccessMessage, setActionSuccessMessage] = useState(null);
@@ -71,12 +79,10 @@ export default function ImageForensicsLab({
   // Filter tasks based on selected scope
   const filteredTasks = useMemo(() => {
     return tasks.filter(t => {
-      // Date filter
       if (selectedDate !== 'ALL') {
         const taskDate = (t.date || t.dispatch_date || '').split(' ')[0];
         if (taskDate !== selectedDate) return false;
       }
-      // Audit status filter
       if (selectedStatus !== 'ALL') {
         const status = t.auditStatus || t.audit_status || 'PENDING';
         if (status !== selectedStatus) return false;
@@ -116,7 +122,8 @@ export default function ImageForensicsLab({
             currentItem: prog.item
           });
         },
-        abortController.signal
+        abortController.signal,
+        { maxHamming: Number(sensitivity) }
       );
 
       setScanResults(results);
@@ -146,18 +153,39 @@ export default function ImageForensicsLab({
   };
 
   // One-click enforcement: Mark single task as FATAL
-  const handleMarkTaskFatal = async (taskId, reasonText) => {
+  const handleMarkTaskFatal = async (taskId, reasonText, violationCategory = 'Duplicate / recycled images detected') => {
     if (!onFatalTask) return;
     const confirm = window.confirm(`Mark Task #${taskId} as FATAL for "${reasonText}"?`);
     if (!confirm) return;
 
     await onFatalTask(taskId, {
-      reasons: ['Duplicate / recycled images detected'],
-      remarks: `FATAL: Image Forensics Anti-Fraud Engine detected fraudulent photo reuse (${reasonText}).`,
+      reasons: [violationCategory],
+      remarks: `FATAL: Image Forensics Engine flagged fraudulent submission (${reasonText}).`,
       location: currentUser?.facility_code || 'Central Forensics Lab'
     });
 
     setActionSuccessMessage(`Task #${taskId} successfully struck as FATAL.`);
+    setTimeout(() => setActionSuccessMessage(null), 3500);
+  };
+
+  // One-click enforcement: Mark all Blank / Black tasks as FATAL in one batch
+  const handleMarkAllBlankFatal = async () => {
+    if (!onFatalTask || !scanResults?.blankOrBlackPhotos?.length) return;
+    const taskIds = Array.from(new Set(scanResults.blankOrBlackPhotos.map(b => b.item.taskId)));
+    const confirm = window.confirm(
+      `Mark all ${taskIds.length} tasks with Blank / Black / Covered Camera photos as FATAL?\n\nTasks: ${taskIds.join(', ')}`
+    );
+    if (!confirm) return;
+
+    for (const tid of taskIds) {
+      await onFatalTask(tid, {
+        reasons: ['All images missing / blank / black'],
+        remarks: 'FATAL: Image Forensics detected fraudulent blank / pure black / covered camera photo upload.',
+        location: currentUser?.facility_code || 'Central Forensics Lab'
+      });
+    }
+
+    setActionSuccessMessage(`All ${taskIds.length} tasks with blank/black photos struck as FATAL.`);
     setTimeout(() => setActionSuccessMessage(null), 3500);
   };
 
@@ -213,8 +241,25 @@ export default function ImageForensicsLab({
     if (!scanResults) return;
 
     const rows = [
-      ['Incident Type', 'Severity', 'Task ID', 'FE Name', 'FE Code', 'City', 'Visit Date', 'Checklist Slot', 'Similarity %', 'SHA-256 / Hash', 'Recommendation']
+      ['Incident Type', 'Severity', 'Task ID', 'FE Name', 'FE Code', 'City', 'Visit Date', 'Checklist Slot', 'Similarity / Diagnostics', 'Hash / Details', 'Recommendation']
     ];
+
+    // Blank / Black photos
+    scanResults.blankOrBlackPhotos.forEach(b => {
+      rows.push([
+        'FRAUDULENT_BLANK_OR_BLACK',
+        b.severity,
+        b.item.taskId,
+        b.item.feName,
+        b.item.feCode,
+        b.item.city,
+        b.item.date,
+        b.item.slotLabel,
+        b.reason,
+        b.item.url,
+        b.recommendation
+      ]);
+    });
 
     // Exact clusters
     scanResults.exactClusters.forEach(c => {
@@ -228,7 +273,7 @@ export default function ImageForensicsLab({
           it.city,
           it.date,
           it.slotLabel,
-          '100%',
+          '100% Byte Match',
           c.sha256,
           c.recommendation
         ]);
@@ -246,7 +291,7 @@ export default function ImageForensicsLab({
         p.itemA.city,
         p.itemA.date,
         p.itemA.slotLabel,
-        `${p.similarityPct}%`,
+        `${p.similarityPct}% Match (Hamming ${p.hammingDistance})`,
         p.itemA.dHash?.hashHex || '',
         `Cloned with Task #${p.itemB.taskId}`
       ]);
@@ -259,7 +304,7 @@ export default function ImageForensicsLab({
         p.itemB.city,
         p.itemB.date,
         p.itemB.slotLabel,
-        `${p.similarityPct}%`,
+        `${p.similarityPct}% Match (Hamming ${p.hammingDistance})`,
         p.itemB.dHash?.hashHex || '',
         `Cloned with Task #${p.itemA.taskId}`
       ]);
@@ -276,7 +321,7 @@ export default function ImageForensicsLab({
         s.item.city,
         s.item.date,
         s.item.slotLabel,
-        'N/A',
+        'Date Mismatch',
         s.item.sha256 || '',
         `Captured on ${s.exifDate} (${s.cameraModel})`
       ]);
@@ -293,6 +338,20 @@ export default function ImageForensicsLab({
   };
 
   // Filtered views of scan results
+  const blankPhotosFiltered = useMemo(() => {
+    if (!scanResults) return [];
+    let list = scanResults.blankOrBlackPhotos || [];
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(b => 
+        b.item.taskId.toLowerCase().includes(q) || 
+        b.item.feName.toLowerCase().includes(q) || 
+        b.item.feCode.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [scanResults, searchQuery]);
+
   const exactClustersFiltered = useMemo(() => {
     if (!scanResults) return [];
     let list = scanResults.exactClusters || [];
@@ -342,8 +401,6 @@ export default function ImageForensicsLab({
     return list;
   }, [scanResults, searchQuery]);
 
-  const totalFilteredIncidents = exactClustersFiltered.length + perceptualPairsFiltered.length + stalePhotosFiltered.length;
-
   return (
     <div className="space-y-6 pb-20">
       
@@ -369,14 +426,14 @@ export default function ImageForensicsLab({
                 Field Image Forensics & Anti-Fraud Center
               </h1>
               <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                Active Scanner
+                Readjusted Criteria Active
               </span>
             </div>
             <p className="text-slate-400 text-sm max-w-3xl leading-relaxed">
-              Automated anti-fraud engine for audit checklist photos. Pulls remote task images and scans for 
-              <strong className="text-slate-200"> exact byte duplicates</strong>, 
-              <strong className="text-slate-200"> cropped/resized screenshots (dHash)</strong>, 
-              <strong className="text-slate-200"> old photos</strong>, and 
+              Automated anti-fraud engine for audit checklist photos. Analyzes content integrity for 
+              <strong className="text-rose-300"> blank/black/covered camera photos</strong>, 
+              <strong className="text-slate-200"> exact byte duplicates (SHA-256)</strong>, 
+              <strong className="text-slate-200"> resized/cropped clones (dHash)</strong>, and 
               <strong className="text-slate-200"> cross-FE collusion</strong>.
             </p>
           </div>
@@ -417,7 +474,7 @@ export default function ImageForensicsLab({
           </div>
         </div>
 
-        {/* SCOPE FILTERS BAR */}
+        {/* SCOPE FILTERS & EXAMINATION CRITERIA CONTROLS */}
         <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap items-center gap-3 text-xs">
           {/* Date Selector */}
           <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
@@ -455,19 +512,19 @@ export default function ImageForensicsLab({
             </select>
           </div>
 
-          {/* Task Audit Status */}
-          <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-slate-800">
-            <span className="text-slate-400 font-medium">Audit Status:</span>
+          {/* Readjusted Sensitivity Selector */}
+          <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-indigo-500/30">
+            <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="text-slate-300 font-medium">Deduplication Sensitivity:</span>
             <select
-              value={selectedStatus}
-              onChange={(e) => setSelectedStatus(e.target.value)}
+              value={sensitivity}
+              onChange={(e) => setSensitivity(Number(e.target.value))}
               disabled={isScanning}
-              className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+              className="bg-transparent text-indigo-300 font-semibold focus:outline-none cursor-pointer"
             >
-              <option value="ALL" className="bg-slate-900">All Tasks</option>
-              <option value="PENDING" className="bg-slate-900">Pending Audits</option>
-              <option value="PASSED" className="bg-slate-900">Passed Audits</option>
-              <option value="FATAL" className="bg-slate-900">Fatal Audits</option>
+              <option value={7} className="bg-slate-900">Balanced Recommended (Match ≥ 89%, Hamming ≤ 7)</option>
+              <option value={9} className="bg-slate-900">Aggressive / Angle Variants (Match ≥ 86%, Hamming ≤ 9)</option>
+              <option value={4} className="bg-slate-900">Strict Only (Match ≥ 94%, Hamming ≤ 4)</option>
             </select>
           </div>
 
@@ -485,7 +542,7 @@ export default function ImageForensicsLab({
             <div className="flex items-center gap-2.5">
               <RefreshCw className="w-4 h-4 text-indigo-400 animate-spin" />
               <span className="font-semibold text-slate-200">
-                Inspecting checklist images with SHA-256 byte & 64-bit dHash algorithms...
+                Inspecting photos for blank screens, covered lenses, byte duplicates, and perceptual clones...
               </span>
             </div>
             <div className="font-mono text-indigo-400 font-bold text-sm">
@@ -496,21 +553,19 @@ export default function ImageForensicsLab({
             </div>
           </div>
 
-          {/* Progress bar */}
           <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
             <div 
-              className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full transition-all duration-200"
+              className="bg-gradient-to-r from-blue-500 via-indigo-500 to-rose-500 h-full transition-all duration-200"
               style={{ width: `${(scanProgress.current / Math.max(1, scanProgress.total)) * 100}%` }}
             />
           </div>
 
-          {/* Current image details */}
           {scanProgress.currentItem && (
             <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
               <span className="truncate max-w-lg">
                 Inspecting: <strong className="text-slate-300">Task #{scanProgress.currentItem.taskId}</strong> • {scanProgress.currentItem.slotLabel} ({scanProgress.currentItem.feName})
               </span>
-              <span className="text-indigo-400/80 font-mono">0 Server Overhead (Client-Side)</span>
+              <span className="text-indigo-400/80 font-mono">Real-Time Client Analysis</span>
             </div>
           )}
         </div>
@@ -518,18 +573,25 @@ export default function ImageForensicsLab({
 
       {/* TOP KPI SUMMARY CARDS */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        {/* Scanned Count */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
+        
+        {/* Blank / Black Photos (High-Priority Fraud Indicator) */}
+        <div className={`border rounded-2xl p-4 shadow-lg transition-all ${
+          scanResults?.blankOrBlackPhotos?.length > 0 
+            ? 'bg-rose-950/30 border-rose-500/50 shadow-rose-950/20 ring-1 ring-rose-500/30' 
+            : 'bg-slate-900 border-slate-800'
+        }`}>
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-medium">Scanned Images</span>
-            <Eye className="w-4 h-4 text-sky-400" />
+            <span className="text-xs font-semibold text-rose-300 flex items-center gap-1.5">
+              <Moon className="w-3.5 h-3.5 text-rose-400" />
+              Blank / Black Photos
+            </span>
+            <AlertTriangle className="w-4 h-4 text-rose-400" />
           </div>
-          <div className="text-2xl font-bold text-white font-mono">
-            {scanResults ? scanResults.scannedCount : 0}
-            <span className="text-xs text-slate-500 font-normal ml-1.5">/ {imageQueue.length}</span>
+          <div className="text-2xl font-bold text-rose-400 font-mono">
+            {scanResults ? scanResults.blankOrBlackPhotos.length : 0}
           </div>
-          <p className="text-[11px] text-slate-500 mt-1">
-            {scanResults ? '< 12 ms per photo' : 'Ready to analyze'}
+          <p className="text-[11px] text-slate-400 mt-1">
+            Covered lens / zero evidence
           </p>
         </div>
 
@@ -565,7 +627,7 @@ export default function ImageForensicsLab({
             {scanResults ? scanResults.perceptualPairs.length : 0}
           </div>
           <p className="text-[11px] text-slate-400 mt-1">
-            dHash visual match ≥ 94%
+            dHash visual match ≥ 89%
           </p>
         </div>
 
@@ -624,6 +686,18 @@ export default function ImageForensicsLab({
                 }`}
               >
                 All Incidents ({scanResults.summary.totalViolations})
+              </button>
+
+              <button
+                onClick={() => setActiveTab('blank')}
+                className={`px-3 py-1.5 rounded-xl font-medium transition-colors flex items-center gap-1.5 ${
+                  activeTab === 'blank'
+                    ? 'bg-rose-600 text-white font-bold'
+                    : 'text-rose-400 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Moon className="w-3.5 h-3.5" />
+                Blank / Black Photos ({scanResults.blankOrBlackPhotos.length})
               </button>
 
               <button
@@ -696,15 +770,109 @@ export default function ImageForensicsLab({
                   <CheckCircle2 className="w-8 h-8" />
                 </div>
                 <h3 className="text-base font-bold text-white">
-                  Zero Image Duplications or Re-use Detected!
+                  Zero Image Duplications or Blank Uploads Detected!
                 </h3>
                 <p className="text-xs text-slate-400 max-w-md mx-auto">
-                  All {scanResults.scannedCount} checklist photos analyzed for this batch have verified unique cryptographic fingerprints and distinct visual framing.
+                  All {scanResults.scannedCount} checklist photos analyzed for this batch have verified unique photographic content and proper equipment evidence.
                 </p>
               </div>
             )}
 
-            {/* EXACT DUPLICATES CLUSTERS */}
+            {/* SECTION: FRAUDULENT BLANK / BLACK / COVERED CAMERA PHOTOS */}
+            {(activeTab === 'all' || activeTab === 'blank') && blankPhotosFiltered.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/40">
+                  <div className="flex items-center gap-2">
+                    <Moon className="w-4 h-4 text-rose-400" />
+                    <div>
+                      <h3 className="text-xs font-bold text-rose-300 uppercase tracking-wider">
+                        Fraudulent Blank / Black / Covered Camera Photos ({blankPhotosFiltered.length})
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        Zero equipment evidence uploaded: Camera was covered, obscured, or pure black/blank image submitted
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleMarkAllBlankFatal}
+                    className="px-3 py-1.5 text-xs font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5" />
+                    Mark All {blankPhotosFiltered.length} as FATAL Strike
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                  {blankPhotosFiltered.map((b) => (
+                    <div 
+                      key={b.id} 
+                      className="bg-slate-950 border border-rose-500/40 rounded-xl p-3 flex flex-col justify-between space-y-2.5 shadow-lg shadow-rose-950/20"
+                    >
+                      <div className="relative rounded-lg overflow-hidden bg-black aspect-video group border border-rose-900/50">
+                        <img
+                          src={b.item.url}
+                          alt="Blank/Black preview"
+                          className="w-full h-full object-cover cursor-pointer"
+                          onClick={() => setPreviewModalImage({ url: b.item.url, title: `Blank Photo (Task #${b.item.taskId})` })}
+                        />
+                        <button
+                          onClick={() => setPreviewModalImage({ url: b.item.url, title: `Blank Photo (Task #${b.item.taskId})` })}
+                          className="absolute top-1.5 right-1.5 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <Maximize2 className="w-3.5 h-3.5" />
+                        </button>
+                        <div className="absolute top-1 left-1 bg-rose-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded uppercase">
+                          BLANK / BLACK
+                        </div>
+                        <div className="absolute bottom-1 left-1 bg-slate-900/90 text-[10px] text-slate-300 px-1.5 py-0.5 rounded font-medium">
+                          {b.item.slotLabel}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-white font-mono">Task #{b.item.taskId}</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded font-bold bg-rose-500/20 text-rose-400">
+                            {b.item.task?.auditStatus || 'PENDING'}
+                          </span>
+                        </div>
+                        <div className="text-slate-300 truncate font-medium">
+                          {b.item.feName} <span className="text-slate-500 font-mono">({b.item.feCode})</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                          <span>{b.item.city}</span>
+                          <span>{b.item.date}</span>
+                        </div>
+                        <div className="p-1.5 rounded bg-rose-950/30 border border-rose-500/30 text-[10px] text-rose-300 font-mono">
+                          {b.reason}
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
+                        {onInspectTask && (
+                          <button
+                            onClick={() => onInspectTask(b.item.task)}
+                            className="flex-1 py-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg text-center transition-colors"
+                          >
+                            Inspect Task
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleMarkTaskFatal(b.item.taskId, b.reason, 'All images missing / blank / black')}
+                          className="py-1 px-2.5 text-[11px] font-bold text-rose-400 hover:bg-rose-500/20 rounded-lg transition-colors"
+                          title="Strike this task as Fatal"
+                        >
+                          Fatal
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* SECTION: EXACT DUPLICATES CLUSTERS */}
             {(activeTab === 'all' || activeTab === 'exact') && exactClustersFiltered.length > 0 && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -750,7 +918,6 @@ export default function ImageForensicsLab({
                           </div>
                         </div>
 
-                        {/* Cluster Action */}
                         <button
                           onClick={() => handleMarkClusterFatal(cluster)}
                           className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
@@ -833,7 +1000,7 @@ export default function ImageForensicsLab({
               </div>
             )}
 
-            {/* PERCEPTUAL CLONES / RESIZED / CROPPED PAIRS */}
+            {/* SECTION: PERCEPTUAL CLONES / RESIZED / CROPPED PAIRS */}
             {(activeTab === 'all' || activeTab === 'perceptual') && perceptualPairsFiltered.length > 0 && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -841,7 +1008,9 @@ export default function ImageForensicsLab({
                     <Layers className="w-4 h-4" />
                     Resized / Screenshotted Perceptual Clones ({perceptualPairsFiltered.length})
                   </h3>
-                  <span className="text-[11px] text-slate-400">dHash Visual Similarity ≥ 94%</span>
+                  <span className="text-[11px] text-slate-400">
+                    dHash Visual Similarity ≥ {Math.round(((64 - sensitivity) / 64) * 100)}% (Hamming ≤ {sensitivity})
+                  </span>
                 </div>
 
                 <div className="space-y-4">
@@ -850,7 +1019,6 @@ export default function ImageForensicsLab({
                       key={pair.id} 
                       className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg shadow-amber-950/10"
                     >
-                      {/* Pair Header */}
                       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
                         <div className="space-y-1">
                           <div className="flex items-center gap-2">
@@ -971,7 +1139,7 @@ export default function ImageForensicsLab({
               </div>
             )}
 
-            {/* STALE PHOTOS DATE MISMATCH */}
+            {/* SECTION: STALE PHOTOS DATE MISMATCH */}
             {(activeTab === 'all' || activeTab === 'stale') && stalePhotosFiltered.length > 0 && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -1064,9 +1232,9 @@ export default function ImageForensicsLab({
               Ready to Scan {imageQueue.length} Checklist Photos
             </h2>
             <p className="text-xs text-slate-400 max-w-lg mx-auto leading-relaxed">
-              Click <strong className="text-indigo-300">"Run Anti-Fraud Forensics Scan"</strong> above. 
-              The system will extract cryptographic fingerprints and perceptual hashes for all checklist photos in the selected batch, 
-              instantly highlighting duplicate uploads, screenshot reuse, and cross-FE collusion.
+              Click <strong className="text-indigo-300">"Run Anti-Fraud Forensics Scan"</strong>. 
+              The system will inspect image content integrity for <strong className="text-rose-300">blank/black covered camera photos</strong>, 
+              cryptographic byte duplicates, and perceptual visual clones.
             </p>
           </div>
           <button

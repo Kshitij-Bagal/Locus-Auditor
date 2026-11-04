@@ -3,11 +3,11 @@
  * 
  * Provides:
  * 1. Cryptographic SHA-256 Byte Fingerprinting (100% exact bit match)
- * 2. Perceptual Difference Hashing (dHash 64-bit) for visual clone & screenshot detection
- *    (resilient to re-compression, minor cropping, format changes, and brightness shifts)
- * 3. EXIF Metadata Extraction (DateTimeOriginal, Camera Make/Model, Software, GPS)
- * 4. Automated Batch Scanning across all field tasks with CORS proxy fallback
- * 5. Cluster & Collusion Detection (Identical Files, Resized/Cropped Clones, Stale Photos)
+ * 2. Perceptual Difference Hashing (dHash 64-bit) for visual clone, screenshot, & crop detection
+ * 3. Image Integrity & Fraudulent Blank / Black / Covered Camera Detection
+ * 4. EXIF Metadata Extraction (DateTimeOriginal, Camera Make/Model, Software, GPS)
+ * 5. Automated Batch Scanning across all field tasks with CORS proxy fallback
+ * 6. Cluster & Collusion Detection (Identical Files, Resized/Cropped Clones, Stale Photos)
  */
 
 // In-memory cache for downloaded buffers to avoid duplicate network roundtrips
@@ -69,13 +69,92 @@ export async function computeSHA256(buffer) {
 }
 
 /**
- * Computes 64-bit Perceptual Difference Hash (dHash) from an image element or canvas
- * Algorithm:
- * 1. Downsample image to 9x8 pixels
- * 2. Convert to grayscale luminance
- * 3. Compare adjacent horizontal pixels (P[x] > P[x+1] -> 1 else 0)
- * 4. Yields 8 rows * 8 comparisons = 64-bit binary fingerprint
+ * Analyzes Image Content Integrity:
+ * Detects Fraudulent Blank, Pure Black, Covered Lens, Solid Flat, and Undersized Photos
  * 
+ * @param {HTMLImageElement} img 
+ * @param {ArrayBuffer} buffer 
+ * @returns {object} Integrity diagnosis
+ */
+export function analyzeImageIntegrity(img, buffer) {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      return { isBlankOrBlack: false, reason: null, meanLuma: 128, stdDev: 50 };
+    }
+
+    ctx.drawImage(img, 0, 0, 32, 32);
+    const imgData = ctx.getImageData(0, 0, 32, 32).data;
+    const totalPixels = 32 * 32;
+
+    let sumLuma = 0;
+    let sumSqLuma = 0;
+    let darkPixelCount = 0;
+    let brightPixelCount = 0;
+
+    for (let i = 0; i < imgData.length; i += 4) {
+      const r = imgData[i];
+      const g = imgData[i + 1];
+      const b = imgData[i + 2];
+      const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+      sumLuma += luma;
+      sumSqLuma += luma * luma;
+
+      if (luma < 22) darkPixelCount++;
+      if (luma > 235) brightPixelCount++;
+    }
+
+    const meanLuma = sumLuma / totalPixels;
+    const variance = (sumSqLuma / totalPixels) - (meanLuma * meanLuma);
+    const stdDev = Math.sqrt(Math.max(0, variance));
+    const darkRatio = darkPixelCount / totalPixels;
+    const brightRatio = brightPixelCount / totalPixels;
+
+    // Fraudulent Blank / Black / Covered Lens rules:
+    // 1. Pure Black: average brightness < 20 and > 80% dark pixels
+    const isPureBlack = meanLuma < 20 && darkRatio > 0.80;
+    // 2. Covered camera (finger on lens, pitch black room, or facing desk)
+    const isCoveredCamera = (meanLuma < 30 && stdDev < 9) || (darkRatio > 0.88);
+    // 3. Flat uniform color / blank graphic
+    const isSolidFlatColor = stdDev < 5;
+    // 4. Pure white screenshot / blank sheet
+    const isAllWhite = meanLuma > 235 && brightRatio > 0.85;
+    // 5. Undersized corrupt or dummy file
+    const isUndersized = (buffer && buffer.byteLength < 1500) || (img.naturalWidth < 80 || img.naturalHeight < 80);
+
+    const isBlankOrBlack = isPureBlack || isCoveredCamera || isSolidFlatColor || isAllWhite || isUndersized;
+
+    let reason = null;
+    if (isPureBlack) {
+      reason = `Pure black / covered camera (${Math.round(darkRatio * 100)}% dark pixels, brightness ${meanLuma.toFixed(1)}/255)`;
+    } else if (isCoveredCamera) {
+      reason = `Obscured / covered lens (Zero contrast stdDev: ${stdDev.toFixed(1)})`;
+    } else if (isSolidFlatColor) {
+      reason = `Solid flat color / dummy screenshot (No visual variation stdDev: ${stdDev.toFixed(1)})`;
+    } else if (isAllWhite) {
+      reason = `Blank white screen (${Math.round(brightRatio * 100)}% white pixels)`;
+    } else if (isUndersized) {
+      reason = `Undersized dummy placeholder (${buffer ? (buffer.byteLength / 1024).toFixed(1) : 0} KB, ${img.naturalWidth}x${img.naturalHeight}px)`;
+    }
+
+    return {
+      isBlankOrBlack,
+      reason,
+      meanLuma: Math.round(meanLuma),
+      stdDev: Math.round(stdDev * 10) / 10,
+      darkRatio: Math.round(darkRatio * 100)
+    };
+  } catch (err) {
+    console.error('analyzeImageIntegrity failed:', err);
+    return { isBlankOrBlack: false, reason: null, meanLuma: 128, stdDev: 50 };
+  }
+}
+
+/**
+ * Computes 64-bit Perceptual Difference Hash (dHash) from an image element or canvas
  * @param {HTMLImageElement|ImageBitmap} img
  * @returns {{ hashHex: string, hashBinary: string, grid: number[][] }}
  */
@@ -322,98 +401,6 @@ function readIFD(view, tiffStart, dirStart, littleEndian, result) {
 }
 
 /**
- * Evaluates pairwise forensic relationship between two analyzed images
- * @param {object} imgA Analyzed image result
- * @param {object} imgB Analyzed image result
- * @returns {object} Detailed verdict & similarity
- */
-export function evaluatePairwiseForensics(imgA, imgB) {
-  if (!imgA || !imgB || !imgA.dHash || !imgB.dHash) {
-    return {
-      status: 'PENDING',
-      similarityPct: 0,
-      hammingDistance: 64,
-      verdict: 'Incomplete inspection data',
-      color: 'slate',
-      isExactByteDuplicate: false,
-      isPerceptualDuplicate: false
-    };
-  }
-
-  const isExactByteDuplicate = Boolean(imgA.sha256 && imgB.sha256 && imgA.sha256 === imgB.sha256);
-  const hammingDistance = calculateHammingDistance(imgA.dHash.hashBinary, imgB.dHash.hashBinary);
-  const similarityPct = Math.max(0, Math.min(100, Math.round(((64 - hammingDistance) / 64) * 100)));
-
-  if (isExactByteDuplicate) {
-    return {
-      status: 'EXACT_DUPLICATE',
-      similarityPct: 100,
-      hammingDistance: 0,
-      verdict: '🚨 100% Exact Bit Duplicate',
-      recommendation: 'FATAL STRIKE: Zero doubt. Identical file submitted across visits.',
-      color: 'rose',
-      badgeClass: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
-      isExactByteDuplicate: true,
-      isPerceptualDuplicate: true
-    };
-  }
-
-  if (hammingDistance <= 2) {
-    return {
-      status: 'PERCEPTUAL_CLONE',
-      similarityPct,
-      hammingDistance,
-      verdict: '🚨 Visual Clone (Resized / Screenshot)',
-      recommendation: 'FATAL STRIKE: Same photograph was cropped, screenshotted, or re-compressed.',
-      color: 'red',
-      badgeClass: 'bg-red-500/20 text-red-300 border-red-500/40',
-      isExactByteDuplicate: false,
-      isPerceptualDuplicate: true
-    };
-  }
-
-  if (hammingDistance <= 5) {
-    return {
-      status: 'HIGH_SIMILARITY',
-      similarityPct,
-      hammingDistance,
-      verdict: '⚠️ High Probability Reuse / Same Framing',
-      recommendation: 'FLAG FOR REVIEW: Extremely close angle/lighting. High likelihood of duplicate staging.',
-      color: 'amber',
-      badgeClass: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-      isExactByteDuplicate: false,
-      isPerceptualDuplicate: true
-    };
-  }
-
-  if (hammingDistance <= 10) {
-    return {
-      status: 'MODERATE_SIMILARITY',
-      similarityPct,
-      hammingDistance,
-      verdict: '🔍 Moderate Staging Similarity',
-      recommendation: 'ACCEPTABLE VARIANT: Common equipment setup, but distinct photo capture.',
-      color: 'yellow',
-      badgeClass: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/40',
-      isExactByteDuplicate: false,
-      isPerceptualDuplicate: false
-    };
-  }
-
-  return {
-    status: 'DISTINCT_AUTHENTIC',
-    similarityPct,
-    hammingDistance,
-    verdict: '✅ Distinct Authentic Photo',
-    recommendation: 'PASSED: Verified unique image. Zero visual or cryptographic overlap.',
-    color: 'emerald',
-    badgeClass: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
-    isExactByteDuplicate: false,
-    isPerceptualDuplicate: false
-  };
-}
-
-/**
  * Fully inspects a single image item
  * @param {object} item 
  * @returns {Promise<object>}
@@ -437,6 +424,7 @@ export async function inspectSingleImage(item) {
   });
 
   const dHash = computeDHash(img);
+  const integrity = analyzeImageIntegrity(img, buffer);
   const durationMs = Math.round(performance.now() - startTime);
 
   return {
@@ -447,6 +435,7 @@ export async function inspectSingleImage(item) {
     sha256,
     dHash,
     exif,
+    integrity,
     objectUrl,
     durationMs
   };
@@ -459,7 +448,6 @@ export async function inspectSingleImage(item) {
  */
 export function extractTaskImageItems(tasks = []) {
   const items = [];
-  const knownKeys = ['selfie', 'toolkit', 'torches', 'visionChart', 'frameDisplay'];
 
   for (const t of tasks) {
     const taskId = String(t.id || t.taskId);
@@ -507,21 +495,24 @@ function formatSlotLabel(key) {
 
 /**
  * Runs automated batch forensic scan across all task image items
- * Detects:
- * 1. Exact SHA-256 Byte Duplicates (Same file submitted to multiple tasks)
- * 2. Perceptual dHash Clones (Hamming Distance <= 4, e.g. screenshot or cropped reuse)
- * 3. Stale Photos (EXIF capture timestamp is older than visit dispatch date)
- * 4. Cross-FE Collusion (Different FEs sharing identical or cloned equipment photos)
+ * Readjusted Examination Criteria:
+ * 1. Fraudulent Blank / Black / Covered Camera Detection (Automatic Fatal Flag)
+ * 2. Exact SHA-256 Byte Duplicates (Same file submitted across visits)
+ * 3. Resized / Cropped / Filtered Perceptual Clones (Readjusted Hamming <= maxHamming, e.g. <= 7 for 89%+ match)
+ * 4. Stale Photos (EXIF capture timestamp is older than visit dispatch date)
+ * 5. Cross-FE Collusion (Different FEs sharing identical or cloned equipment photos)
  * 
  * @param {Array} imageItems Array from extractTaskImageItems
  * @param {Function} onProgress Callback ({ current, total, item, foundCount })
  * @param {object} abortSignal Optional AbortController signal
+ * @param {object} options Optional { maxHamming: number }
  * @returns {Promise<object>} Complete forensic cluster report
  */
-export async function runBatchForensicScan(imageItems, onProgress, abortSignal = null) {
+export async function runBatchForensicScan(imageItems, onProgress, abortSignal = null, options = {}) {
   const total = imageItems.length;
   const inspectedItems = [];
   const errors = [];
+  const maxHamming = typeof options.maxHamming === 'number' ? options.maxHamming : 7; // Readjusted from 4 to 7 (89%+ similarity)
 
   // 1. Process images with concurrency pool of 4
   const concurrency = 4;
@@ -555,9 +546,30 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
   const workers = Array.from({ length: Math.min(concurrency, total) }, () => worker());
   await Promise.all(workers);
 
-  // 2. Identify Exact Cryptographic Duplicates (SHA-256 Clusters)
-  const shaMap = new Map();
+  // 2. Identify Fraudulent Blank / Black / Covered Lens Photos
+  const blankOrBlackPhotos = [];
+  const validContentItems = [];
+
   for (const item of inspectedItems) {
+    if (item.integrity?.isBlankOrBlack) {
+      blankOrBlackPhotos.push({
+        id: `blank_${item.id}`,
+        type: 'FRAUDULENT_BLANK_OR_BLACK',
+        title: 'Fraudulent Blank / Black / Covered Camera Photo',
+        severity: 'CRITICAL',
+        item,
+        reason: item.integrity.reason,
+        recommendation: 'FATAL STRIKE: Zero equipment evidence uploaded (covered camera / pitch black photo).'
+      });
+    } else {
+      validContentItems.push(item);
+    }
+  }
+
+  // 3. Identify Exact Cryptographic Duplicates (SHA-256 Clusters)
+  // Only include items with valid visual content to avoid clustering blank black screens together
+  const shaMap = new Map();
+  for (const item of validContentItems) {
     if (!item.sha256) continue;
     if (!shaMap.has(item.sha256)) shaMap.set(item.sha256, []);
     shaMap.get(item.sha256).push(item);
@@ -565,7 +577,6 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
 
   const exactClusters = [];
   for (const [sha256, group] of shaMap.entries()) {
-    // Only flag if used across different tasks
     const uniqueTasks = new Set(group.map(g => g.taskId));
     if (uniqueTasks.size > 1) {
       const feCodes = Array.from(new Set(group.map(g => g.feCode)));
@@ -584,15 +595,15 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
     }
   }
 
-  // 3. Identify Perceptual Visual Clones & Resized/Cropped Photos (dHash Clustering)
-  // We compare photos within the same category/slotName or cross-task to catch visual reuse
+  // 4. Identify Perceptual Visual Clones & Resized/Cropped Photos (dHash Clustering)
+  // Readjusted criteria: Hamming Distance <= maxHamming (default 7, ~89%+ visual match)
   const perceptualPairs = [];
   const evaluatedPairs = new Set();
 
-  for (let i = 0; i < inspectedItems.length; i++) {
-    for (let j = i + 1; j < inspectedItems.length; j++) {
-      const a = inspectedItems[i];
-      const b = inspectedItems[j];
+  for (let i = 0; i < validContentItems.length; i++) {
+    for (let j = i + 1; j < validContentItems.length; j++) {
+      const a = validContentItems[i];
+      const b = validContentItems[j];
 
       // Skip comparing an image to itself or within the same task
       if (a.taskId === b.taskId) continue;
@@ -607,18 +618,25 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
       // Compare visual difference
       const dist = calculateHammingDistance(a.dHash.hashBinary, b.dHash.hashBinary);
 
-      // Hamming <= 4 means >= 93.75% identical visual structure (screenshot, re-compression, crop)
-      if (dist <= 4) {
+      if (dist <= maxHamming) {
         const similarityPct = Math.round(((64 - dist) / 64) * 100);
         const isCrossFE = a.feCode !== b.feCode;
+
+        let severity = 'CRITICAL';
+        let title = 'Exact Visual Clone (Screenshot / Re-compression)';
+        if (dist >= 4 && dist <= 6) {
+          severity = 'HIGH';
+          title = 'Resized / Cropped Image Reuse';
+        } else if (dist > 6) {
+          severity = 'MEDIUM';
+          title = 'High Probability Reuse / Identical Staging';
+        }
 
         perceptualPairs.push({
           id: `perc_${pairKey}`,
           type: 'PERCEPTUAL_CLONE',
-          title: dist <= 2 
-            ? 'Resized / Screenshotted Visual Clone' 
-            : 'Re-framed / High Similarity Equipment Reuse',
-          severity: dist <= 2 ? 'HIGH' : 'MEDIUM',
+          title,
+          severity,
           similarityPct,
           hammingDistance: dist,
           itemA: a,
@@ -626,23 +644,21 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
           isCrossFE,
           recommendation: isCrossFE 
             ? 'FATAL / COLLUSION: Different FEs sharing identical equipment photo.' 
-            : 'FATAL: FE recycled old equipment photo by re-saving or cropping.'
+            : 'FATAL: FE recycled old equipment photo with slight resizing or cropping.'
         });
       }
     }
   }
 
-  // 4. Identify Stale / Historical Photos via EXIF Date Mismatch
+  // 5. Identify Stale / Historical Photos via EXIF Date Mismatch
   const stalePhotoAlerts = [];
-  for (const item of inspectedItems) {
+  for (const item of validContentItems) {
     if (item.exif?.dateTimeOriginal && item.date) {
       try {
-        // Parse EXIF date "YYYY:MM:DD HH:MM:SS"
         const parts = item.exif.dateTimeOriginal.split(' ')[0].split(':');
         if (parts.length === 3) {
           const exifYMD = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
           
-          // Parse Task date (supports DD/MM/YYYY or YYYY-MM-DD)
           let taskYMD = null;
           if (item.date.includes('/')) {
             const dp = item.date.split(' ')[0].split('/');
@@ -673,6 +689,11 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
   const affectedTasks = new Set();
   const affectedFEs = new Set();
 
+  blankOrBlackPhotos.forEach(b => {
+    affectedTasks.add(b.item.taskId);
+    if (b.item.feCode) affectedFEs.add(b.item.feCode);
+  });
+
   exactClusters.forEach(c => {
     c.items.forEach(it => {
       affectedTasks.add(it.taskId);
@@ -696,11 +717,16 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
     scannedCount: inspectedItems.length,
     totalImages: total,
     errors,
+    blankOrBlackPhotos,
     exactClusters,
     perceptualPairs,
     stalePhotoAlerts,
     summary: {
-      totalViolations: exactClusters.length + perceptualPairs.length + stalePhotoAlerts.length,
+      totalViolations: blankOrBlackPhotos.length + exactClusters.length + perceptualPairs.length + stalePhotoAlerts.length,
+      blankOrBlackCount: blankOrBlackPhotos.length,
+      exactDuplicateCount: exactClusters.length,
+      perceptualCloneCount: perceptualPairs.length,
+      stalePhotoCount: stalePhotoAlerts.length,
       affectedTaskCount: affectedTasks.size,
       affectedFeCount: affectedFEs.size,
       affectedTaskIds: Array.from(affectedTasks),
