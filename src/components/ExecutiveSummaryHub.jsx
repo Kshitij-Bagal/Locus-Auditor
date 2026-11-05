@@ -103,8 +103,8 @@ export default function ExecutiveSummaryHub({
     return {
       allRegionalManagers: rms.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '')),
       allAreaManagers: ams.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '')),
-      amUserMap,
-      rmUserMap
+      amUserMap: amMap,
+      rmUserMap: rmMap
     };
   }, [users]);
 
