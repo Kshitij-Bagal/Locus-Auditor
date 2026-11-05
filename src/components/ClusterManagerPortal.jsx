@@ -4,7 +4,6 @@ import {
   ShieldAlert, 
   AlertTriangle, 
   CheckCircle2, 
-  Mail, 
   ExternalLink, 
   TrendingUp, 
   MapPin, 
@@ -26,9 +25,49 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parseRoles, displayRoleName } from '../utils/accessHelper.js';
-import DailyDigestManagerView from './DailyDigestManagerView.jsx';
 import DisputeObjectionModal from './DisputeObjectionModal.jsx';
 import { getDisputeWindowStatus } from '../utils/calendarHelper.js';
+
+// Phonetic and canonical name normalizer for robust manager matching
+export function normalizeManagerName(name) {
+  if (!name) return '';
+  return String(name)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/chaudhary|choudhary|choudhari/g, 'choudhary')
+    .replace(/santhosh|santosh/g, 'santosh')
+    .replace(/gerg|garg/g, 'garg');
+}
+
+export function matchManagerName(nameA, nameB) {
+  if (!nameA || !nameB) return false;
+  if (nameA === 'ALL' || nameB === 'ALL') return true;
+  const rawA = String(nameA).toLowerCase().trim();
+  const rawB = String(nameB).toLowerCase().trim();
+  if (rawA === rawB || rawA.includes(rawB) || rawB.includes(rawA)) return true;
+
+  const normA = normalizeManagerName(nameA);
+  const normB = normalizeManagerName(nameB);
+  if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA))) {
+    return true;
+  }
+
+  // Token matching for tokens of length >= 3
+  const tokensA = String(nameA).toLowerCase().split(/[\s,.-]+/).filter(t => t.length >= 3);
+  const tokensB = String(nameB).toLowerCase().split(/[\s,.-]+/).filter(t => t.length >= 3);
+  for (const ta of tokensA) {
+    for (const tb of tokensB) {
+      const nta = normalizeManagerName(ta);
+      const ntb = normalizeManagerName(tb);
+      if (nta === ntb || (nta.length >= 4 && ntb.length >= 4 && (nta.includes(ntb) || ntb.includes(nta)))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 export default function ClusterManagerPortal({
   tasks = [],
@@ -63,11 +102,49 @@ export default function ClusterManagerPortal({
   }, [users]);
 
   const allRegionalManagers = useMemo(() => {
-    return (users || []).filter(u => {
+    // 1. Direct RMs by role in users
+    const list = (users || []).filter(u => {
       const roles = parseRoles(u.roles || [u.role]);
-      return roles.includes('RM');
+      return roles.includes('RM') || (u.facility_code && String(u.facility_code).startsWith('RM'));
     });
-  }, [users]);
+
+    const seenNames = new Set(list.map(u => normalizeManagerName(u.full_name || u.name)));
+
+    // 2. Discover operational RMs referenced in user profiles (regional_manager_name) or tasks
+    (users || []).forEach(u => {
+      const rmName = u.regional_manager_name;
+      if (rmName && rmName !== 'Regional Manager') {
+        const norm = normalizeManagerName(rmName);
+        if (norm && !seenNames.has(norm)) {
+          seenNames.add(norm);
+          list.push({
+            id: u.regional_manager_id || `rm_${norm}`,
+            full_name: rmName,
+            email: u.regional_manager_email || '',
+            facility_code: u.facility_code || ''
+          });
+        }
+      }
+    });
+
+    (tasks || []).forEach(t => {
+      const rmName = t.rmName;
+      if (rmName && rmName !== 'Regional Manager') {
+        const norm = normalizeManagerName(rmName);
+        if (norm && !seenNames.has(norm)) {
+          seenNames.add(norm);
+          list.push({
+            id: `rm_task_${norm}`,
+            full_name: rmName,
+            email: t.rmEmail || '',
+            facility_code: t.facilityCode || ''
+          });
+        }
+      }
+    });
+
+    return list.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+  }, [users, tasks]);
 
   // Initial Filter State based on logged-in manager identity
   const [selectedAmFilter, setSelectedAmFilter] = useState(() => {
@@ -88,31 +165,88 @@ export default function ClusterManagerPortal({
   const feMasterList = useMemo(() => {
     const feMap = new Map();
 
+    // Map of AM users by id, email, and normalized name for fast hierarchy lookup
+    const amUserMap = new Map();
+    (users || []).forEach(u => {
+      const roles = parseRoles(u.roles || [u.role]);
+      if (roles.includes('AM')) {
+        if (u.id) amUserMap.set(String(u.id), u);
+        if (u.email) amUserMap.set(u.email.toLowerCase().trim(), u);
+        const norm = normalizeManagerName(u.full_name || u.name);
+        if (norm) amUserMap.set(norm, u);
+      }
+    });
+
     // Pass A: Seed FEs from users registry
     (users || []).forEach(u => {
       const roles = parseRoles(u.roles || [u.role]);
-      if (roles.includes('FE') || (u.employee_code && u.employee_code.startsWith('FE'))) {
+      if (roles.includes('FE') || (u.employee_code && String(u.employee_code).startsWith('FE'))) {
         const key = String(u.employee_code || u.person_id || u.email || u.id).trim().toLowerCase();
         
         // Find direct AM
         let amName = u.reporting_manager_name || '';
         let amEmail = u.reporting_manager_email || '';
-        if ((!amName || !amEmail) && u.reporting_manager_id) {
-          const amUser = users.find(m => m.id === u.reporting_manager_id);
-          if (amUser) {
-            amName = amUser.full_name;
-            amEmail = amUser.email;
+        let amUser = null;
+
+        if (u.reporting_manager_id && amUserMap.has(String(u.reporting_manager_id))) {
+          amUser = amUserMap.get(String(u.reporting_manager_id));
+        } else if (amEmail && amUserMap.has(amEmail.toLowerCase().trim())) {
+          amUser = amUserMap.get(amEmail.toLowerCase().trim());
+        } else if (amName) {
+          const normAm = normalizeManagerName(amName);
+          if (normAm && amUserMap.has(normAm)) {
+            amUser = amUserMap.get(normAm);
+          } else {
+            amUser = (users || []).find(m => matchManagerName(m.full_name || m.name, amName));
           }
+        }
+
+        if (amUser) {
+          amName = amUser.full_name || amUser.name || amName;
+          amEmail = amUser.email || amEmail;
         }
 
         // Find direct RM
         let rmName = u.regional_manager_name || '';
         let rmEmail = u.regional_manager_email || '';
-        if ((!rmName || !rmEmail) && u.regional_manager_id) {
-          const rmUser = users.find(m => m.id === u.regional_manager_id);
+        let rmId = u.regional_manager_id || '';
+
+        // If RM is missing on FE profile, inherit from reporting AM
+        if ((!rmName || rmName === 'Regional Manager') && amUser) {
+          rmName = amUser.regional_manager_name || rmName;
+          rmEmail = amUser.regional_manager_email || rmEmail;
+          rmId = amUser.regional_manager_id || rmId;
+        }
+
+        // If we have an rmId, look up RM profile in users
+        if (rmId && (!rmName || rmName === 'Regional Manager' || !rmEmail)) {
+          const rmUser = (users || []).find(m => String(m.id) === String(rmId));
           if (rmUser) {
-            rmName = rmUser.full_name;
-            rmEmail = rmUser.email;
+            rmName = rmUser.full_name || rmUser.name || rmName;
+            rmEmail = rmUser.email || rmEmail;
+          }
+        }
+
+        // If still no RM, try matching by city/hub
+        if (!rmName || rmName === 'Regional Manager') {
+          const hubTarget = u.facility_code || u.city;
+          if (hubTarget) {
+            const hubMatch = allRegionalManagers.find(rm => rm.facility_code && String(rm.facility_code).toLowerCase().includes(String(hubTarget).toLowerCase()));
+            if (hubMatch) {
+              rmName = hubMatch.full_name;
+              rmEmail = hubMatch.email;
+              rmId = hubMatch.id;
+            }
+          }
+        }
+
+        // Canonicalize RM name against allRegionalManagers
+        if (rmName && rmName !== 'Regional Manager') {
+          const canonicalRm = allRegionalManagers.find(r => matchManagerName(r.full_name || r.name, rmName) || (rmEmail && r.email && r.email.toLowerCase() === rmEmail.toLowerCase()));
+          if (canonicalRm) {
+            rmName = canonicalRm.full_name || canonicalRm.name;
+            if (!rmEmail) rmEmail = canonicalRm.email;
+            if (!rmId) rmId = canonicalRm.id;
           }
         }
 
@@ -131,6 +265,7 @@ export default function ClusterManagerPortal({
           amEmail: amEmail || 'am.operations@lenskart.in',
           rmName: rmName || 'Regional Manager',
           rmEmail: rmEmail || 'rm.quality@lenskart.in',
+          rmId: rmId || '',
           totalTasks: 0,
           completedTasks: 0,
           withImages: 0,
@@ -168,6 +303,20 @@ export default function ClusterManagerPortal({
 
       // If task FE not yet in map, create entry dynamically
       if (!matched) {
+        let taskAmName = task.amName || '';
+        let taskAmEmail = task.amEmail || '';
+        let taskRmName = task.rmName || '';
+        let taskRmEmail = task.rmEmail || '';
+
+        // Match canonical RM
+        if (taskRmName) {
+          const canonicalRm = allRegionalManagers.find(r => matchManagerName(r.full_name || r.name, taskRmName));
+          if (canonicalRm) {
+            taskRmName = canonicalRm.full_name || canonicalRm.name;
+            if (!taskRmEmail) taskRmEmail = canonicalRm.email;
+          }
+        }
+
         const dynamicKey = tCode || tId || tEmail || `fe_${Date.now()}`;
         matched = {
           key: dynamicKey,
@@ -180,10 +329,11 @@ export default function ClusterManagerPortal({
           hub: task.facilityCode || task.teamName || 'Ahmedabad',
           city: task.city || task.facilityCode || 'Ahmedabad',
           zone: task.zone || 'Central Zone',
-          amName: task.amName || 'Area Manager',
-          amEmail: task.amEmail || 'am.operations@lenskart.in',
-          rmName: task.rmName || 'Regional Manager',
-          rmEmail: task.rmEmail || 'rm.quality@lenskart.in',
+          amName: taskAmName || 'Area Manager',
+          amEmail: taskAmEmail || 'am.operations@lenskart.in',
+          rmName: taskRmName || 'Regional Manager',
+          rmEmail: taskRmEmail || 'rm.quality@lenskart.in',
+          rmId: '',
           totalTasks: 0,
           completedTasks: 0,
           withImages: 0,
@@ -216,25 +366,48 @@ export default function ClusterManagerPortal({
     });
 
     return Array.from(feMap.values());
-  }, [users, tasks]);
+  }, [users, tasks, allRegionalManagers]);
+
+  // Dynamic AM list scoped by selected RM (if an RM is selected)
+  const availableAreaManagers = useMemo(() => {
+    if (selectedRmFilter === 'ALL') {
+      return allAreaManagers;
+    }
+    const amsUnderRm = new Set();
+    feMasterList.forEach(fe => {
+      if (matchManagerName(fe.rmName, selectedRmFilter) || (fe.rmEmail && fe.rmEmail.toLowerCase().includes(selectedRmFilter.toLowerCase().trim()))) {
+        if (fe.amName && fe.amName !== 'Area Manager') amsUnderRm.add(normalizeManagerName(fe.amName));
+        if (fe.amEmail) amsUnderRm.add(fe.amEmail.toLowerCase().trim());
+      }
+    });
+
+    const filtered = allAreaManagers.filter(am => {
+      const norm = normalizeManagerName(am.full_name || am.name);
+      const email = (am.email || '').toLowerCase().trim();
+      return amsUnderRm.has(norm) || (email && amsUnderRm.has(email)) || matchManagerName(am.regional_manager_name, selectedRmFilter);
+    });
+
+    return filtered.length > 0 ? filtered : allAreaManagers;
+  }, [allAreaManagers, selectedRmFilter, feMasterList]);
 
   // 2. Filter FEs according to Manager Hierarchy Scope & UI Filters
   const scopedFEs = useMemo(() => {
     return feMasterList.filter(fe => {
       // AM Scope: If logged in user is AM (or AM filter selected)
       if (selectedAmFilter !== 'ALL') {
-        const amTarget = selectedAmFilter.toLowerCase().trim();
-        const matchAmName = fe.amName.toLowerCase().includes(amTarget);
-        const matchAmEmail = fe.amEmail.toLowerCase().includes(amTarget);
+        const amTarget = selectedAmFilter.trim();
+        const matchAmName = matchManagerName(fe.amName, amTarget);
+        const matchAmEmail = fe.amEmail && fe.amEmail.toLowerCase().includes(amTarget.toLowerCase());
         if (!matchAmName && !matchAmEmail) return false;
       }
 
       // RM Scope: If logged in user is RM (or RM filter selected)
       if (selectedRmFilter !== 'ALL') {
-        const rmTarget = selectedRmFilter.toLowerCase().trim();
-        const matchRmName = fe.rmName.toLowerCase().includes(rmTarget);
-        const matchRmEmail = fe.rmEmail.toLowerCase().includes(rmTarget);
-        if (!matchRmName && !matchRmEmail) return false;
+        const rmTarget = selectedRmFilter.trim();
+        const matchRmName = matchManagerName(fe.rmName, rmTarget);
+        const matchRmEmail = fe.rmEmail && fe.rmEmail.toLowerCase().includes(rmTarget.toLowerCase());
+        const matchRmId = fe.rmId && String(fe.rmId) === String(rmTarget);
+        if (!matchRmName && !matchRmEmail && !matchRmId) return false;
       }
 
       // Text search
@@ -310,7 +483,11 @@ export default function ClusterManagerPortal({
   const amComparisonData = useMemo(() => {
     const map = new Map();
 
-    feMasterList.forEach(fe => {
+    const pool = selectedRmFilter !== 'ALL'
+      ? feMasterList.filter(fe => matchManagerName(fe.rmName, selectedRmFilter) || (fe.rmEmail && fe.rmEmail.toLowerCase().includes(selectedRmFilter.toLowerCase().trim())))
+      : feMasterList;
+
+    pool.forEach(fe => {
       const amKey = fe.amEmail || fe.amName || 'Unassigned AM';
       if (!map.has(amKey)) {
         map.set(amKey, {
@@ -340,7 +517,7 @@ export default function ClusterManagerPortal({
         fatalRate: item.auditedVisits > 0 ? ((item.fatalCount / item.auditedVisits) * 100).toFixed(1) : 0
       }))
       .sort((a, b) => b.fatalCount - a.fatalCount || b.totalVisits - a.totalVisits);
-  }, [feMasterList]);
+  }, [feMasterList, selectedRmFilter]);
 
   // Export Cluster Quality Report to Excel
   const handleExportClusterExcel = () => {
@@ -428,13 +605,16 @@ export default function ClusterManagerPortal({
             <span className="text-[11px] text-slate-400 mr-2 font-medium">Regional RM:</span>
             <select
               value={selectedRmFilter}
-              onChange={(e) => setSelectedRmFilter(e.target.value)}
+              onChange={(e) => {
+                setSelectedRmFilter(e.target.value);
+                setSelectedAmFilter('ALL');
+              }}
               disabled={isRM && !isExecutive}
               className="bg-transparent text-xs text-white font-semibold focus:outline-none cursor-pointer"
             >
               <option value="ALL" className="bg-slate-800">All Regions</option>
               {allRegionalManagers.map(rm => (
-                <option key={rm.id || rm.email} value={rm.full_name || rm.email} className="bg-slate-800">
+                <option key={rm.id || rm.email || rm.full_name} value={rm.full_name || rm.email} className="bg-slate-800">
                   {rm.full_name || rm.email}
                 </option>
               ))}
@@ -451,8 +631,8 @@ export default function ClusterManagerPortal({
               className="bg-transparent text-xs text-white font-semibold focus:outline-none cursor-pointer"
             >
               <option value="ALL" className="bg-slate-800">All Area Managers</option>
-              {allAreaManagers.map(am => (
-                <option key={am.id || am.email} value={am.full_name || am.email} className="bg-slate-800">
+              {availableAreaManagers.map(am => (
+                <option key={am.id || am.email || am.full_name} value={am.full_name || am.email} className="bg-slate-800">
                   {am.full_name || am.email} ({am.facility_code || am.city || 'Hub'})
                 </option>
               ))}
@@ -547,18 +727,6 @@ export default function ClusterManagerPortal({
         >
           <ShieldAlert className="w-4 h-4" />
           <span>Fatal Incidents Feed ({scopedFatalTasks.length})</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('dailyDigest')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
-            activeTab === 'dailyDigest'
-              ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/20'
-              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <Mail className="w-4 h-4" />
-          <span>Daily Digest & Escalation</span>
         </button>
 
         {(isRM || isExecutive) && (
@@ -991,19 +1159,6 @@ export default function ClusterManagerPortal({
             ))}
           </div>
         </div>
-      )}
-
-      {/* TAB 4: DAILY QUALITY AUDIT DIGEST & ESCALATION SYSTEM */}
-      {activeTab === 'dailyDigest' && (
-        <DailyDigestManagerView
-          tasks={tasks}
-          users={users}
-          currentUser={currentUser}
-          scopedFEs={scopedFEs}
-          scopedFatalTasks={scopedFatalTasks}
-          onOpenEmailForTask={onOpenEmailForTask}
-          onNavigate={onNavigate}
-        />
       )}
 
     </div>
