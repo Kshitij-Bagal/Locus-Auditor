@@ -7,7 +7,6 @@ import FilterBar from './components/FilterBar.jsx';
 import TaskTable from './components/TaskTable.jsx';
 import TaskCardGrid from './components/TaskCardGrid.jsx';
 import AuditModal from './components/AuditModal.jsx';
-import EmailModal from './components/EmailModal.jsx';
 import CentralRuleStudio from './components/CentralRuleStudio.jsx';
 import AutoAllocationRoster from './components/AutoAllocationRoster.jsx';
 import AssetRequisitionDashboard from './components/AssetRequisitionDashboard.jsx';
@@ -37,6 +36,7 @@ import {
   isEligibleForAuditRoster,
   setLiveRolePresets
 } from './utils/accessHelper.js';
+import { checkAndRevokeTempAuditorIfComplete } from './utils/temporaryAuditorHelper.js';
 
 import { 
   Upload, 
@@ -151,7 +151,6 @@ export default function App() {
 
   // Modals
   const [inspectingTask, setInspectingTask] = useState(null);
-  const [emailingTask, setEmailingTask] = useState(null);
   const [toast, setToast] = useState(null);
   const [isReAuditMode, setIsReAuditMode] = useState(false);
 
@@ -337,6 +336,14 @@ export default function App() {
 
   // Security & UX guard: ONLY redirect if user is STRICTLY GM or BH without Auditor or SuperAdmin privilege
   useEffect(() => {
+    // Restrict access based on granular page permissions
+    if (activePage === 'audits' && !hasPageAccess(currentUser, 'audits')) {
+      const accessible = getUserEffectivePages(currentUser);
+      const fallback = accessible.find(p => p !== 'audits') || 'rules';
+      setActivePage(fallback);
+      return;
+    }
+
     const userRoles = Array.isArray(currentUser?.roles) && currentUser.roles.length > 0
       ? currentUser.roles
       : [currentUser?.role || 'Auditor'];
@@ -437,6 +444,36 @@ export default function App() {
     }
   };
 
+  // Temporary Auditor Lifecycle & Dynamic Revocation Check
+  // As soon as all assigned tasks are audited (pending === 0), access to the Audits Console is revoked
+  const handleCheckTemporaryAuditorLifecycle = (task, updatedTasks) => {
+    if (!task) return;
+    const auditorId = task.assignedAuditorId || task.assigned_auditor_id;
+    const auditorName = task.assignedAuditorName || task.assigned_auditor_name;
+    const auditorIdentifier = auditorId || auditorName || currentUser?.id;
+
+    const result = checkAndRevokeTempAuditorIfComplete(auditorIdentifier, updatedTasks);
+    if (result.wasRevoked && result.entry) {
+      showToast(`⚡ Surge quota completed by ${result.entry.name}! Audits Console access has been automatically revoked.`, 'info');
+
+      // If the currently active logged-in user was this temporary auditor, notify and redirect
+      const isCurrentUser = (
+        (currentUser?.id && String(currentUser.id).toLowerCase() === String(result.entry.id).toLowerCase()) ||
+        (currentUser?.email && String(currentUser.email).toLowerCase() === String(result.entry.email).toLowerCase()) ||
+        (currentUser?.full_name && String(currentUser.full_name).toLowerCase().trim() === String(result.entry.name).toLowerCase().trim())
+      );
+
+      if (isCurrentUser) {
+        showToast(`🎉 Great work! You have completed all assigned surge audits. Your temporary Audits access has concluded.`, 'success');
+        if (activePage === 'audits') {
+          const accessible = getUserEffectivePages(currentUser);
+          const fallback = accessible.find(p => p !== 'audits') || 'rules';
+          setActivePage(fallback);
+        }
+      }
+    }
+  };
+
   // Auditor Actions: PASS (Write directly to DB)
   const handlePassAudit = async (taskId, auditPayload) => {
     try {
@@ -452,20 +489,26 @@ export default function App() {
       });
 
       // Update local state
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            auditStatus: 'PASSED',
-            auditedAt: new Date().toISOString(),
-            auditedBy: currentUser?.full_name || 'Auditor',
-            remarks: auditPayload.remarks,
-            criteriaStatus: auditPayload.criteriaStatus,
-            replacements: auditPayload.replacements || []
-          };
-        }
-        return t;
-      }));
+      let updatedList = [];
+      setTasks(prev => {
+        updatedList = prev.map(t => {
+          if (t.id === taskId) {
+            return {
+              ...t,
+              auditStatus: 'PASSED',
+              auditedAt: new Date().toISOString(),
+              auditedBy: currentUser?.full_name || 'Auditor',
+              remarks: auditPayload.remarks,
+              criteriaStatus: auditPayload.criteriaStatus,
+              replacements: auditPayload.replacements || []
+            };
+          }
+          return t;
+        });
+        return updatedList;
+      });
+
+      handleCheckTemporaryAuditorLifecycle(target, updatedList);
 
       showToast(`Task #${taskId} PASSED and saved to database!`, 'success');
 
@@ -565,23 +608,29 @@ export default function App() {
       });
 
       // Update state
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            auditStatus: 'FATAL',
-            audit_status: 'FATAL',
-            auditedAt: new Date().toISOString(),
-            auditedBy: currentUser?.full_name || 'Auditor',
-            failedReasons: auditPayload.failedReasons || [],
-            remarks: auditPayload.remarks || '',
-            emailSent: false,
-            email_notified: false,
-            replacements: auditPayload.replacements || []
-          };
-        }
-        return t;
-      }));
+      let updatedList = [];
+      setTasks(prev => {
+        updatedList = prev.map(t => {
+          if (t.id === taskId) {
+            return {
+              ...t,
+              auditStatus: 'FATAL',
+              audit_status: 'FATAL',
+              auditedAt: new Date().toISOString(),
+              auditedBy: currentUser?.full_name || 'Auditor',
+              failedReasons: auditPayload.failedReasons || [],
+              remarks: auditPayload.remarks || '',
+              emailSent: false,
+              email_notified: false,
+              replacements: auditPayload.replacements || []
+            };
+          }
+          return t;
+        });
+        return updatedList;
+      });
+
+      handleCheckTemporaryAuditorLifecycle(target, updatedList);
 
       // Update replacement orders if any flagged
       if (auditPayload.replacements && auditPayload.replacements.length > 0) {
@@ -606,63 +655,6 @@ export default function App() {
     } catch (err) {
       console.error('Failed to mark fatal audit:', err);
       showToast(`Failed to record fatal audit: ${err.message}`, 'error');
-    }
-  };
-
-  // Email Modal Confirm & Dispatch Callback
-  const handleConfirmEmailAndFatal = async (taskId, { feEmail, amEmail, rmEmail, body }) => {
-    try {
-      const target = emailingTask || tasks.find(t => t.id === taskId);
-      
-      showToast('Dispatching email notice to FE, AM, RM & recording strike...', 'info');
-
-      await tasksApi.failAudit({
-        taskId,
-        taskData: target,
-        failedReasons: target.failedReasons || ['SOP non-compliance'],
-        remarks: target.remarks || '',
-        criteriaStatus: target.criteriaStatus || {},
-        replacements: target.replacements || [],
-        auditorName: currentUser?.full_name || 'Central Auditor',
-        auditorLocation: currentUser?.facility_code || 'Ahmedabad Hub',
-        feEmail,
-        amEmail,
-        rmEmail,
-        improvementTips: [
-          'Wear official Lenskart polo uniform with employee photo ID clearly visible',
-          'Mount vision chart on telescoping standee at patient seated eye-level (never tape to walls)',
-          'Ensure both Blue and Yellow ophthalmic penlights are powered and tested',
-          'Organize all 6 clinical tools in clean condition inside kit tray',
-          'Display optical frame trays neatly on living room flat surface'
-        ]
-      });
-
-      // Update state
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            auditStatus: 'FATAL',
-            auditedAt: new Date().toISOString(),
-            auditedBy: currentUser?.full_name || 'Auditor',
-            failedReasons: target.failedReasons || [],
-            remarks: target.remarks || '',
-            emailSent: true,
-            emailSentAt: new Date().toISOString(),
-            replacements: target.replacements || []
-          };
-        }
-        return t;
-      }));
-
-      setEmailingTask(null);
-      showToast(`FATAL recorded! Formal notice dispatched to FE, AM & RM.`, 'error');
-
-      // Next task
-      const nextTask = tasks.find(t => t.id !== taskId && t.hasImages && t.auditStatus === 'PENDING');
-      if (nextTask) setInspectingTask(nextTask);
-    } catch (err) {
-      showToast(`Error recording fatal audit: ${err.message}`, 'error');
     }
   };
 
@@ -1476,7 +1468,6 @@ export default function App() {
             tasks={tasks}
             users={users}
             currentUser={currentUser}
-            onOpenEmailForTask={(task) => setEmailingTask(task)}
             onNavigate={setActivePage}
             onRaiseDispute={handleRaiseDispute}
             onFilterFE={(feCode) => {
@@ -1581,16 +1572,6 @@ export default function App() {
           auditorName={currentUser.full_name}
           auditorLocation={currentUser.facility_code}
           rules={rules}
-        />
-      )}
-
-      {/* TRI-PARTY AUDIT FAILURE NOTICE EMAIL MODAL (FE, AM, RM) */}
-      {emailingTask && (
-        <EmailModal
-          task={emailingTask}
-          onClose={() => setEmailingTask(null)}
-          onSendEmail={handleConfirmEmailAndFatal}
-          auditorName={currentUser.full_name}
         />
       )}
 

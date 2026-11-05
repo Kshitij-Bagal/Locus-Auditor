@@ -867,11 +867,10 @@ export function buildFeFatalWarningEmailHtml({ feDigest, portalBaseUrl = 'https:
 
         <div style="padding: 24px;">
           
-          <!-- Addressee & CC Box -->
+          <!-- Addressee Box -->
           <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; font-size: 12px; line-height: 1.6;">
             <div><strong>TO (Field Executive):</strong> ${feName} &lt;${feEmail}&gt;</div>
-            <div style="margin-top: 4px;"><strong>CC (Area Manager):</strong> ${amName} &lt;${amEmail}&gt; (Kit review & in-person coaching)</div>
-            <div style="margin-top: 4px;"><strong>CC (Regional Manager):</strong> ${rmName} &lt;${rmEmail}&gt; (Regional compliance ledger)</div>
+            <div style="margin-top: 4px; color: #64748B;"><strong>Hub / Cluster:</strong> ${hub} &bull; <strong>Direct AM:</strong> ${amName || 'Assigned AM'}</div>
           </div>
 
           <p style="font-size: 14px; color: #334155; line-height: 1.5; margin: 0 0 16px 0;">
@@ -906,22 +905,22 @@ export function buildFeFatalWarningEmailHtml({ feDigest, portalBaseUrl = 'https:
             ${fatalTasksHtml}
           </div>
 
-          <!-- MANDATORY ACTION / REPLY-ALL INSTRUCTIONS (CRITICAL CORPORATE THREAD) -->
+          <!-- MANDATORY ACTION INSTRUCTIONS -->
           <div style="background-color: #FEF2F2; border: 2px solid #DC2626; border-radius: 10px; padding: 18px; margin-bottom: 24px;">
             <div style="font-size: 14px; font-weight: 800; color: #991B1B; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-              <span>&#9888;</span> MANDATORY SUPERVISORY ACTIONS & EXPLANATION REQUIRED
+              <span>&#9888;</span> MANDATORY ACTIONS REQUIRED BEFORE NEXT SHIFT
             </div>
             
             <p style="font-size: 13px; color: #7F1D1D; line-height: 1.5; margin: 0 0 10px 0;">
-              <strong>1. Written Response (Reply-All):</strong> You must <strong>REPLY ALL to this email thread</strong> before your next scheduled shift providing your explanation for each identified non-compliance.
+              <strong>1. Written Clarification:</strong> You must submit a written reply explaining the root cause of each identified SOP non-compliance before your next scheduled customer visit.
             </p>
 
             <p style="font-size: 13px; color: #7F1D1D; line-height: 1.5; margin: 0 0 10px 0;">
-              <strong>2. Area Manager Kit Review:</strong> Your Area Manager (<strong>${amName}</strong>) is instructed to review your diagnostic kit (torches, trial frame, near vision chart, standee, and uniform) prior to shift dispatch.
+              <strong>2. Mandatory In-Person Kit Review:</strong> Present your equipment kit (torches, trial frame, near vision chart, standee, and uniform) to your Area Manager (<strong>${amName}</strong>) for physical inspection prior to departure.
             </p>
 
             <p style="font-size: 13px; color: #7F1D1D; line-height: 1.5; margin: 0;">
-              <strong>3. Escalation Trail:</strong> Regional Manager (<strong>${rmName}</strong>) is in copy. Accumulating 2 or more strikes in a 7-day period triggers formal regional escalation and shift suspension.
+              <strong>3. Quality Escalation:</strong> Accumulating 2 or more strikes within a 7-day period triggers formal review and temporary route suspension under Lenskart DLC governance policy.
             </p>
           </div>
 
@@ -978,10 +977,9 @@ Review URL: ${ft.portalUrl}
 Date: ${digestDate}
 Field Executive: ${feName} (${feCode})
 Hub: ${hub}
+Direct Reporting AM: ${amName || 'Assigned Area Manager'}
 
 TO: ${feEmail}
-CC: Area Manager: ${amName} (${amEmail})
-CC: Regional Manager: ${rmName} (${rmEmail})
 
 ============================================================
 DAY'S AUDIT SUMMARY:
@@ -996,14 +994,320 @@ FATAL OCCURRENCES DETAILS:
 ${fatalDetails}
 
 ============================================================
-MANDATORY SUPERVISORY ACTIONS & EXPLANATION REQUIRED:
+MANDATORY ACTIONS REQUIRED:
 ============================================================
-1. REPLY ALL: Please REPLY ALL to this email thread with your written explanation for each non-compliance before your next shift.
-2. AM KIT REVIEW: Your Area Manager (${amName}) will perform a kit inspection before your next dispatch.
-3. REGIONAL RECORD: This strike has been officially logged in the compliance registry overseen by Regional Manager (${rmName}).
+1. Submit written explanation for each non-compliance before your next shift.
+2. Complete mandatory in-person kit inspection with your Area Manager (${amName}).
+3. Re-read SOP guidelines for all failed checkpoints.
 
 Lenskart Central Quality & Governance Division
 Portal: ${portalBaseUrl}`;
+}
+
+// ====================================================================
+// CONSOLIDATED TEAM QUALITY DIGEST FOR AREA MANAGERS (AM) & REGIONAL MANAGERS (RM)
+// Consolidates all FEs with fatal strikes under their supervision into 1 single email
+// ====================================================================
+
+/**
+ * Aggregates all FEs with fatal strikes grouped by Area Manager (AM) and Regional Manager (RM)
+ * @param {object} params
+ * @param {Array} params.feDigests Array of FE fatal digests from aggregateFeFatalDigests
+ * @param {string|Date} params.targetDate Target date string or Date object
+ * @returns {object} { ams: Array, rms: Array, allManagers: Array, totalAmCount: number, totalRmCount: number, targetDate: string }
+ */
+export function aggregateTeamFatalSummaries({ feDigests = [], targetDate = new Date() }) {
+  const targetDateStr = normalizeDateToYMD(targetDate);
+  const amMap = new Map();
+  const rmMap = new Map();
+
+  feDigests.forEach(fe => {
+    // 1. Group by Area Manager (AM)
+    const amKey = (fe.amEmail || '').toLowerCase().trim() || `am_${(fe.amName || 'unassigned').toLowerCase().replace(/\s+/g, '_')}`;
+    if (!amMap.has(amKey)) {
+      amMap.set(amKey, {
+        id: `am_${amKey}`,
+        role: 'AM',
+        roleTitle: 'Area Manager',
+        managerName: fe.amName || 'Area Manager',
+        managerEmail: fe.amEmail || '',
+        hub: fe.hub || 'Central Hub',
+        rmName: fe.rmName || '',
+        rmEmail: fe.rmEmail || '',
+        targetDate: targetDateStr,
+        fes: [],
+        totalFatalStrikes: 0,
+        totalTasksAudited: 0,
+        totalPassed: 0
+      });
+    }
+    const amEntry = amMap.get(amKey);
+    amEntry.fes.push(fe);
+    amEntry.totalFatalStrikes += (fe.fatalCount || 0);
+    amEntry.totalTasksAudited += (fe.totalAudited || 0);
+    amEntry.totalPassed += (fe.passedCount || 0);
+
+    // 2. Group by Regional Manager (RM)
+    const rmKey = (fe.rmEmail || '').toLowerCase().trim() || `rm_${(fe.rmName || 'unassigned').toLowerCase().replace(/\s+/g, '_')}`;
+    if (!rmMap.has(rmKey)) {
+      rmMap.set(rmKey, {
+        id: `rm_${rmKey}`,
+        role: 'RM',
+        roleTitle: 'Regional Manager',
+        managerName: fe.rmName || 'Regional Manager',
+        managerEmail: fe.rmEmail || '',
+        hub: fe.hub || 'Region',
+        targetDate: targetDateStr,
+        fes: [],
+        totalFatalStrikes: 0,
+        totalTasksAudited: 0,
+        totalPassed: 0
+      });
+    }
+    const rmEntry = rmMap.get(rmKey);
+    rmEntry.fes.push(fe);
+    rmEntry.totalFatalStrikes += (fe.fatalCount || 0);
+    rmEntry.totalTasksAudited += (fe.totalAudited || 0);
+    rmEntry.totalPassed += (fe.passedCount || 0);
+  });
+
+  const ams = Array.from(amMap.values()).sort((a, b) => b.totalFatalStrikes - a.totalFatalStrikes);
+  const rms = Array.from(rmMap.values()).sort((a, b) => b.totalFatalStrikes - a.totalFatalStrikes);
+
+  return {
+    ams,
+    rms,
+    allManagers: [...ams, ...rms],
+    totalAmCount: ams.length,
+    totalRmCount: rms.length,
+    targetDate: targetDateStr
+  };
+}
+
+/**
+ * Builds high-impact, professional consolidated HTML team digest email for AM or RM
+ */
+export function buildAmRmConsolidatedTeamDigestHtml({ managerSummary, portalBaseUrl = 'https://locus-auditor.vercel.app' }) {
+  const {
+    managerName,
+    managerEmail,
+    role,
+    roleTitle,
+    hub,
+    targetDate,
+    fes = [],
+    totalFatalStrikes,
+    totalTasksAudited,
+    totalPassed
+  } = managerSummary;
+
+  const dateFormatted = new Date(targetDate).toLocaleDateString('en-IN', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  });
+
+  const portalLink = portalBaseUrl.replace(/\/$/, '');
+
+  const feCardsHtml = fes.map((fe, feIdx) => {
+    const tasksHtml = (fe.fatalTasks || []).map((t, tIdx) => `
+      <div style="background-color: #FEF2F2; border-left: 3px solid #DC2626; padding: 10px 12px; margin-bottom: 8px; border-radius: 4px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <span style="font-family: monospace; font-size: 12px; font-weight: 700; color: #991B1B;">
+            Incident #${tIdx + 1} &bull; Task ID #${t.taskId}
+          </span>
+          <a href="${t.portalUrl}" target="_blank" style="background-color: #DC2626; color: #FFFFFF; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 3px; text-decoration: none;">
+            Inspect Photos &rarr;
+          </a>
+        </div>
+        <ul style="margin: 0; padding-left: 16px; color: #B91C1C; font-size: 12px;">
+          ${(t.failedReasons || []).map(r => `<li><strong>${r}</strong></li>`).join('')}
+        </ul>
+        ${t.remarks ? `
+          <div style="margin-top: 6px; font-size: 11px; color: #78350F; background: #FFFBEB; padding: 4px 8px; border-radius: 4px;">
+            Auditor note: "${t.remarks}"
+          </div>
+        ` : ''}
+      </div>
+    `).join('');
+
+    return `
+      <div style="background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid #F1F5F9; padding-bottom: 10px; margin-bottom: 12px;">
+          <div>
+            <div style="font-size: 15px; font-weight: 800; color: #0F172A;">
+              ${feIdx + 1}. ${fe.feName} <span style="font-family: monospace; font-size: 12px; color: #64748B;">(${fe.feCode})</span>
+            </div>
+            <div style="font-size: 11px; color: #64748B; margin-top: 2px;">
+              Email: ${fe.feEmail} &bull; Hub: ${fe.hub}
+            </div>
+          </div>
+          <span style="background-color: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 12px;">
+            ${fe.fatalCount} Fatal Strike${fe.fatalCount > 1 ? 's' : ''}
+          </span>
+        </div>
+        <div>
+          ${tasksHtml}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Consolidated Team Quality Audit Digest - Lenskart DLC</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #F1F5F9; margin: 0; padding: 20px; color: #1E293B; }
+      </style>
+    </head>
+    <body style="background-color: #F1F5F9; padding: 20px 10px; margin: 0;">
+      <div style="max-width: 680px; margin: 0 auto; background-color: #FFFFFF; border-radius: 12px; overflow: hidden; border: 1px solid #E2E8F0; box-shadow: 0 4px 20px rgba(0,0,0,0.06);">
+        
+        <!-- Header Banner -->
+        <div style="background: linear-gradient(135deg, #1E1B4B 0%, #312E81 100%); color: #FFFFFF; padding: 24px;">
+          <div style="display: inline-block; background-color: rgba(255,255,255,0.15); padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+            CONSOLIDATED TEAM QUALITY DIGEST &bull; ${roleTitle.toUpperCase()}
+          </div>
+          <h1 style="margin: 0; font-size: 20px; font-weight: 800; color: #FFFFFF;">
+            Team Quality Audit Summary &bull; ${fes.length} FE${fes.length > 1 ? 's' : ''} Flagged
+          </h1>
+          <p style="margin: 6px 0 0 0; font-size: 13px; color: #E0E7FF;">
+            ${roleTitle}: <strong>${managerName}</strong> &bull; ${hub} &bull; ${dateFormatted}
+          </p>
+        </div>
+
+        <div style="padding: 24px;">
+          
+          <!-- Recipient info box -->
+          <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 12px; color: #475569;">
+            <div><strong>Addressed TO (${roleTitle}):</strong> ${managerName} &lt;${managerEmail}&gt;</div>
+            <div style="margin-top: 3px; font-size: 11px; color: #64748B;">This consolidated digest replaces individual FE notification CCs to protect your inbox.</div>
+          </div>
+
+          <p style="font-size: 14px; color: #334155; line-height: 1.5; margin: 0 0 16px 0;">
+            Dear <strong>${managerName}</strong>,
+            <br/>
+            Central Quality Auditing has finalized all photo audits for visits completed on <strong>${dateFormatted}</strong>. Under your supervision, <strong>${fes.length} Field Executive${fes.length > 1 ? 's have' : ' has'}</strong> incurred <strong>${totalFatalStrikes} fatal non-compliance strike${totalFatalStrikes > 1 ? 's' : ''}</strong> today.
+          </p>
+
+          <!-- Metric Cards -->
+          <table style="width: 100%; border-collapse: separate; border-spacing: 8px; margin-bottom: 24px;">
+            <tr>
+              <td style="background-color: #FEF2F2; border: 1px solid #FECACA; border-radius: 8px; padding: 12px; text-align: center; width: 33%;">
+                <div style="font-size: 11px; color: #991B1B; font-weight: 700;">Flagged FEs</div>
+                <div style="font-size: 24px; font-weight: 900; color: #DC2626; margin-top: 2px;">${fes.length}</div>
+              </td>
+              <td style="background-color: #FFF1F2; border: 1px solid #FDA4AF; border-radius: 8px; padding: 12px; text-align: center; width: 33%;">
+                <div style="font-size: 11px; color: #9F1239; font-weight: 700;">Total Strikes</div>
+                <div style="font-size: 24px; font-weight: 900; color: #E11D48; margin-top: 2px;">${totalFatalStrikes}</div>
+              </td>
+              <td style="background-color: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 8px; padding: 12px; text-align: center; width: 33%;">
+                <div style="font-size: 11px; color: #166534; font-weight: 700;">Team Audits Passed</div>
+                <div style="font-size: 24px; font-weight: 900; color: #16A34A; margin-top: 2px;">${totalPassed}</div>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Breakdown per FE -->
+          <div style="margin-bottom: 24px;">
+            <h3 style="font-size: 13px; font-weight: 800; text-transform: uppercase; color: #0F172A; letter-spacing: 0.5px; margin: 0 0 12px 0;">
+              Field Executive Breakdown &amp; Incidents:
+            </h3>
+            ${feCardsHtml}
+          </div>
+
+          <!-- Mandatory Manager Action Box -->
+          <div style="background-color: #FEF2F2; border: 2px solid #DC2626; border-radius: 10px; padding: 18px; margin-bottom: 24px;">
+            <div style="font-size: 14px; font-weight: 800; color: #991B1B; margin-bottom: 8px;">
+              &#9888; MANDATORY ${roleTitle.toUpperCase()} SUPERVISORY ACTIONS
+            </div>
+            <ol style="margin: 0; padding-left: 18px; color: #7F1D1D; font-size: 13px; line-height: 1.6;">
+              <li style="margin-bottom: 6px;">
+                <strong>Morning Kit &amp; Standee Inspection:</strong> Physically inspect the diagnostic equipment (torches, trial lenses, near vision chart, standee, and uniform) for all flagged FEs before shift departure.
+              </li>
+              <li style="margin-bottom: 6px;">
+                <strong>Collect Written Explanations:</strong> Ensure each flagged FE has submitted their root cause clarification.
+              </li>
+              <li>
+                <strong>Escalate Repeat Strikes:</strong> FEs with 2 or more strikes within 7 days must be reviewed for temporary route suspension.
+              </li>
+            </ol>
+          </div>
+
+          <!-- CTA to Portal -->
+          <div style="text-align: center; margin-top: 20px;">
+            <a href="${portalLink}/manager" target="_blank" style="display: inline-block; background-color: #0F172A; color: #FFFFFF; font-weight: 700; font-size: 13px; padding: 10px 24px; border-radius: 8px; text-decoration: none;">
+              Open Cluster Manager Portal &rarr;
+            </a>
+          </div>
+
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 16px 24px; font-size: 11px; color: #94A3B8; text-align: center;">
+          <strong>Lenskart Solutions Pvt. Ltd. &bull; DLC Home Eye Test Quality &amp; Governance Division</strong><br/>
+          Automated corporate team digest dispatched strictly via Central Mail Dispatch.
+        </div>
+
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+/**
+ * Builds plain text counterpart for the consolidated team digest email
+ */
+export function buildAmRmConsolidatedTeamDigestText({ managerSummary, portalBaseUrl = 'https://locus-auditor.vercel.app' }) {
+  const {
+    managerName,
+    managerEmail,
+    roleTitle,
+    hub,
+    targetDate,
+    fes = [],
+    totalFatalStrikes,
+    totalPassed
+  } = managerSummary;
+
+  const feListText = fes.map((fe, i) => `
+${i + 1}. ${fe.feName} (${fe.feCode}) - ${fe.fatalCount} Fatal Strike(s)
+   Email: ${fe.feEmail} | Hub: ${fe.hub}
+   Incidents:
+${(fe.fatalTasks || []).map(t => `   - Task #${t.taskId}: ${t.failedReasons.join(', ')} (Review: ${t.portalUrl})`).join('\n')}
+`).join('\n----------------------------------------\n');
+
+  return `LENSKART DLC & HTO - CONSOLIDATED TEAM QUALITY AUDIT DIGEST
+Date: ${targetDate}
+${roleTitle}: ${managerName} (${managerEmail})
+Hub/Region: ${hub}
+
+============================================================
+TEAM QUALITY SUMMARY:
+============================================================
+Flagged FEs with Strikes: ${fes.length}
+Total Fatal Strikes:     ${totalFatalStrikes}
+Visits Passed:           ${totalPassed}
+
+============================================================
+FLAGGED FIELD EXECUTIVES BREAKDOWN:
+============================================================
+${feListText}
+
+============================================================
+MANDATORY SUPERVISORY ACTIONS:
+============================================================
+1. Physically inspect diagnostic kit & standee for each flagged FE before morning dispatch.
+2. Confirm each FE has provided root cause clarification.
+3. Review 7-day strike threshold for repeat non-compliance.
+
+Cluster Manager Portal: ${portalBaseUrl}/manager
+Lenskart Central Quality & Governance Division`;
 }
 
 // ====================================================================

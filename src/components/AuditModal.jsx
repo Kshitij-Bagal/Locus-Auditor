@@ -60,16 +60,18 @@ export default function AuditModal({
   const [showFatalPicker, setShowFatalPicker] = useState(false);
   const [selectedViolations, setSelectedViolations] = useState([]);
   const [customRemark, setCustomRemark] = useState('');
+  const [selectedRemarkPreset, setSelectedRemarkPreset] = useState('');
   const [criteriaStatus, setCriteriaStatus] = useState({});
 
   // Speedrun Zones & Keyboard Traversal State
-  const [activeZone, setActiveZone] = useState('verdict'); // 'image' | 'verdict' | 'criteria' | 'tools'
+  const [activeZone, setActiveZone] = useState('verdict'); // 'remarks' | 'verdict' | 'criteria' | 'tools'
   const [showBlanketFatalModal, setShowBlanketFatalModal] = useState(false);
   const [blanketReasonIndex, setBlanketReasonIndex] = useState(0);
   const [highlightedFailureIndex, setHighlightedFailureIndex] = useState(0);
   const [highlightedToolIndex, setHighlightedToolIndex] = useState(0);
   const [verdictLeaderActive, setVerdictLeaderActive] = useState(false);
   const verdictTimeoutRef = useRef(null);
+  const remarksSelectRef = useRef(null);
 
   // Equipment Replacements Requisition State
   const [replacements, setReplacements] = useState([]);
@@ -80,6 +82,9 @@ export default function AuditModal({
 
   useEffect(() => {
     if (task) {
+      // Strictly reset item sequence to the 1st checklist item for each new task
+      setActiveCriterionIndex(0);
+      setSelectedRemarkPreset('');
       setCriteriaStatus(task.criteriaStatus || {});
       setSelectedViolations(task.failedReasons || []);
       setCustomRemark(task.remarks || '');
@@ -98,7 +103,26 @@ export default function AuditModal({
 
   const currentCriterion = rules[activeCriterionIndex] || rules[0] || INITIAL_CENTRAL_RULES[0];
   const fieldKey = currentCriterion.field || currentCriterion.imageKey;
-  const originalUrl = task.images?.[fieldKey] || '';
+  
+  // Fast normalize Locus URLs to CDN to eliminate 302 redirects & relative path mismatches
+  const rawImgUrl = task.images?.[fieldKey] || '';
+  const originalUrl = (() => {
+    if (!rawImgUrl || typeof rawImgUrl !== 'string') return '';
+    let u = rawImgUrl.trim();
+    if (!u.startsWith('http://') && !u.startsWith('https://') && !u.startsWith('data:') && !u.startsWith('blob:')) {
+      const stripped = u.replace(/^\/+/, '');
+      if (stripped.startsWith('v1/client/')) {
+        u = `https://assets.locus-api.com/${stripped}`;
+      } else {
+        u = `https://assets.locus-api.com/v1/client/lenskart-dlc/task/${task.id || task.taskId}/file/${stripped}`;
+      }
+    }
+    u = u.replace(/^http:\/\/locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+    u = u.replace(/^https:\/\/locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+    u = u.replace(/^http:\/\/api\.locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+    u = u.replace(/^https:\/\/api\.locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+    return u;
+  })();
 
   const handleZoomIn = () => setZoomLevel(prev => Math.min(prev + 0.5, 3));
   const handleZoomOut = () => setZoomLevel(prev => Math.max(prev - 0.5, 0.75));
@@ -167,8 +191,28 @@ export default function AuditModal({
     onUpdateReplacements?.(task.id, updated);
   };
 
+  // Helper to determine if a specific rule/checkpoint is passed
+  const isRulePassed = (r) => {
+    const key = r.id;
+    const altKey = r.field || r.imageKey;
+    return criteriaStatus[key] === 'PASS' || (altKey && criteriaStatus[altKey] === 'PASS');
+  };
+
+  // Count checkpoints marked as PASS
+  const passedCheckpointsCount = useMemo(() => {
+    return rules.filter(isRulePassed).length;
+  }, [rules, criteriaStatus]);
+
+  // All checkpoints must be passed before "PASS AUDIT (P)" can be submitted
+  const allItemsPassed = rules.length > 0 && passedCheckpointsCount === rules.length;
+
   // Immediate Quick Pass Execution
   const handlePassClick = () => {
+    if (!allItemsPassed) {
+      alert(`Cannot Pass Audit: Only ${passedCheckpointsCount} of ${rules.length} items have been passed. Every item must be audited and marked PASS before completing the audit.`);
+      return;
+    }
+
     const allPassedCriteria = {};
     rules.forEach(r => {
       allPassedCriteria[r.id || r.imageKey] = 'PASS';
@@ -291,10 +335,21 @@ export default function AuditModal({
       }
 
       // 2. Zone Switches & [v + p] / [v + c] Verdict Combinations
-      if (e.key === 'i' || e.key === 'I') {
+      if (e.key === 'r' || e.key === 'R') {
         e.preventDefault();
-        setActiveZone('image');
+        setActiveZone('remarks');
+        setRightPanelTab('sop');
         setVerdictLeaderActive(false);
+        setTimeout(() => {
+          if (remarksSelectRef.current) {
+            remarksSelectRef.current.focus();
+            try {
+              if (typeof remarksSelectRef.current.showPicker === 'function') {
+                remarksSelectRef.current.showPicker();
+              }
+            } catch (err) {}
+          }
+        }, 40);
         return;
       }
       if (e.key === 'v' || e.key === 'V') {
@@ -426,7 +481,12 @@ export default function AuditModal({
           return;
         }
 
-        // Standalone [p] outside verdict mode: Quick Pass entire audit
+        // Standalone [p] outside verdict mode: Quick Pass entire audit (Only if all items passed)
+        if (!allItemsPassed) {
+          // Strictly prevent accidental quick pass until every item is marked PASS
+          return;
+        }
+
         handlePassClick();
         if (hasNext) onNextTask();
         else onClose();
@@ -463,7 +523,8 @@ export default function AuditModal({
     hasNext, 
     hasPrev, 
     currentCriterion,
-    verdictLeaderActive
+    verdictLeaderActive,
+    allItemsPassed
   ]);
 
   return (
@@ -559,8 +620,12 @@ export default function AuditModal({
               <Zap className="w-3.5 h-3.5" /> Fast Auditing Hotkeys:
             </span>
             <div className="flex items-center gap-1.5 font-mono">
-              <span className={`px-1.5 py-0.5 rounded border ${activeZone === 'image' ? 'bg-sky-500/20 text-sky-300 border-sky-400 font-bold' : 'bg-slate-900 border-slate-800'}`}>
-                [i] Image
+              <span className={`px-1.5 py-0.5 rounded border transition-all ${
+                activeZone === 'remarks' 
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-400 font-bold' 
+                  : 'bg-slate-900 border-slate-800'
+              }`}>
+                [r] Remarks
               </span>
               <span className={`px-1.5 py-0.5 rounded border transition-all ${
                 verdictLeaderActive 
@@ -582,6 +647,8 @@ export default function AuditModal({
 
           <div className="flex items-center gap-3 font-mono text-[10px]">
             <span>[1-5] Jump Photo</span>
+            <span>&bull;</span>
+            <span className="text-purple-400 font-bold">[r] Remarks</span>
             <span>&bull;</span>
             <span className="text-emerald-400 font-bold">[v+p] Item Pass</span>
             <span>&bull;</span>
@@ -629,6 +696,22 @@ export default function AuditModal({
             const isCurrent = idx === activeCriterionIndex;
             const status = criteriaStatus[crit.id || fieldKey];
 
+            // Color titles background directly instead of inserting icons to eliminate layout jumping / sizing jumps
+            let tabStyle = '';
+            if (status === 'PASS') {
+              tabStyle = isCurrent
+                ? 'bg-emerald-600 text-white shadow-md ring-1 ring-emerald-400/60'
+                : 'bg-emerald-950/70 text-emerald-300 border border-emerald-500/50 hover:bg-emerald-900/60';
+            } else if (status === 'FAIL') {
+              tabStyle = isCurrent
+                ? 'bg-rose-600 text-white shadow-md ring-1 ring-rose-400/60'
+                : 'bg-rose-950/70 text-rose-300 border border-rose-500/50 hover:bg-rose-900/60';
+            } else {
+              tabStyle = isCurrent
+                ? 'bg-blue-600 text-white shadow-md ring-1 ring-blue-400/60'
+                : 'bg-slate-900/60 text-slate-400 hover:text-white hover:bg-slate-700/60 border border-slate-800';
+            }
+
             return (
               <button
                 key={crit.id}
@@ -636,17 +719,10 @@ export default function AuditModal({
                   setActiveCriterionIndex(idx);
                   handleResetView();
                 }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
-                  isCurrent
-                    ? 'bg-blue-600 text-white shadow-md'
-                    : 'bg-slate-900/60 text-slate-400 hover:text-white hover:bg-slate-700/60'
-                }`}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${tabStyle}`}
               >
                 <span className="font-mono text-[11px] opacity-75">[{idx + 1}]</span>
                 <span>{crit.label || crit.title}</span>
-                {status === 'PASS' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
-                {status === 'FAIL' && <AlertTriangle className="w-3.5 h-3.5 text-red-400" />}
-                {!status && hasMedia && <span className="w-2 h-2 rounded-full bg-sky-400"></span>}
                 {!hasMedia && <span className="text-[10px] text-slate-500">(No URL)</span>}
               </button>
             );
@@ -654,14 +730,12 @@ export default function AuditModal({
         </div>
 
         {/* Modal Main Content */}
-        <div className="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-12 min-h-0">
+        <div className="flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-12 min-h-0">
           
-          {/* Left Column: Image Viewer (7 cols) */}
-          <div className={`lg:col-span-7 bg-slate-950 p-4 flex flex-col justify-between border-b lg:border-b-0 lg:border-r transition-all ${
-            activeZone === 'image' ? 'border-sky-500/60 ring-1 ring-sky-500/30' : 'border-slate-800'
-          }`}>
+          {/* Left Column: Image Viewer (7 cols) - Fixed Height, Static Coordinates, No Scroll */}
+          <div className="lg:col-span-7 bg-slate-950 p-4 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-slate-800 overflow-hidden h-full min-h-0">
             {/* Criterion brief & itemized pass/fail buttons */}
-            <div className={`mt-1 p-3 bg-slate-900/60 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs transition-all ${
+            <div className={`shrink-0 mt-1 p-3 bg-slate-900/60 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs transition-all ${
               verdictLeaderActive
                 ? 'border-emerald-400 bg-emerald-950/30 ring-2 ring-emerald-500/40 shadow-lg'
                 : activeZone === 'verdict'
@@ -722,10 +796,18 @@ export default function AuditModal({
             </div>
             
             {/* Image Toolbar */}
-            <div className="flex items-center justify-between my-2 text-xs">
+            <div className="shrink-0 flex items-center justify-between my-2 text-xs">
               <div className="flex items-center space-x-2">
                 <span className="text-slate-400 font-medium">Viewing:</span>
-                <span className="font-semibold text-white">{currentCriterion.title}</span>
+                <span className={`font-semibold px-2 py-0.5 rounded transition-colors ${
+                  criteriaStatus[currentCriterion.id] === 'PASS'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    : criteriaStatus[currentCriterion.id] === 'FAIL'
+                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                    : 'text-white'
+                }`}>
+                  {currentCriterion.title}
+                </span>
                 {originalUrl ? (
                   <a
                     href={originalUrl}
@@ -759,17 +841,18 @@ export default function AuditModal({
               </div>
             </div>
 
-            {/* Image Stage */}
-            <div className="relative flex-1 min-h-[300px] max-h-[420px] bg-slate-900/90 rounded-xl border border-slate-800 overflow-hidden flex items-center justify-center p-2 group">
+            {/* Image Stage - Stable Fixed Coordinates, Zero Scroll */}
+            <div className="relative flex-1 min-h-0 w-full bg-slate-900/90 rounded-xl border border-slate-800 overflow-hidden flex items-center justify-center p-2 group select-none">
               {originalUrl ? (
                 <div 
-                  className="transition-transform duration-200 flex items-center justify-center"
+                  className="w-full h-full flex items-center justify-center overflow-hidden transition-transform duration-200 select-none"
                   style={{ transform: `scale(${zoomLevel}) rotate(${rotation}deg)` }}
                 >
                   <img
                     src={originalUrl}
                     alt={currentCriterion.title}
-                    className="max-h-[380px] w-auto object-contain rounded shadow-lg select-none"
+                    referrerPolicy="no-referrer"
+                    className="max-h-full max-w-full object-contain rounded shadow-lg select-none"
                   />
                 </div>
               ) : (
@@ -801,12 +884,12 @@ export default function AuditModal({
 
           </div>
 
-          {/* Right Column: 2 Switchable Tabs - SOP Checklist vs Equipment Replacement Zone */}
-          <div className="lg:col-span-5 p-5 flex flex-col justify-between bg-slate-850">
+          {/* Right Column: Independent Scrollable Content for SOP, Criterias, Remarks & POS Orders */}
+          <div className="lg:col-span-5 flex flex-col h-full min-h-0 overflow-hidden bg-slate-850">
             
-            <div>
-              {/* Tab Switcher for Right Panel */}
-              <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-700/80 mb-4">
+            {/* Pinned Tab Switcher Header at Top */}
+            <div className="shrink-0 px-5 pt-4 pb-2 border-b border-slate-700/60 bg-slate-850">
+              <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-700/80">
                 <button
                   onClick={() => {
                     setRightPanelTab('sop');
@@ -821,6 +904,7 @@ export default function AuditModal({
                   <ShieldAlert className="w-3.5 h-3.5" />
                   SOP & Fatals [v/c]
                 </button>
+
                 <button
                   onClick={() => {
                     setRightPanelTab('replacements');
@@ -832,10 +916,14 @@ export default function AuditModal({
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  <Wrench className="w-3.5 h-3.5 text-sky-400" />
-                  City POS Orders ({replacements.length}) [o]
+                  <Wrench className="w-3.5 h-3.5" />
+                  City Admin POS Equipment ({replacements.length})
                 </button>
               </div>
+            </div>
+
+            {/* Scrollable Middle Container: SOP, Criterias, Remarks, POS Orders */}
+            <div className="flex-1 overflow-y-auto px-5 py-3 space-y-4 min-h-0">
 
               {/* TAB 1: SOP Checklist & Fatal Violations */}
               {rightPanelTab === 'sop' && (
@@ -906,18 +994,148 @@ export default function AuditModal({
                     </div>
                   </div>
 
-                  {/* Auditor Remarks */}
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                      Auditor Remarks & Feedback to FE:
-                    </label>
-                    <textarea
-                      value={customRemark}
-                      onChange={(e) => setCustomRemark(e.target.value)}
-                      rows={2}
-                      placeholder="Enter specific audit remarks or instructions for Field Executive..."
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
+                  {/* Auditor Remarks with Fast Multi-Select Accumulator */}
+                  <div className={`space-y-1.5 p-2 rounded-xl transition-all ${
+                    activeZone === 'remarks' 
+                      ? 'border border-purple-500/50 bg-purple-950/20 ring-1 ring-purple-500/30' 
+                      : 'border border-transparent'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        Auditor Remarks & Feedback to FE:
+                        {activeZone === 'remarks' && (
+                          <span className="px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 font-mono text-[10px] font-bold border border-purple-500/40">
+                            Zone [r]
+                          </span>
+                        )}
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {customRemark && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomRemark('');
+                              setSelectedRemarkPreset('');
+                            }}
+                            className="text-[10px] text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+                            title="Clear all remarks"
+                          >
+                            Clear All
+                          </button>
+                        )}
+                        <span className="text-[10px] text-sky-400 font-medium">+ Multi-Select [r]</span>
+                      </div>
+                    </div>
+
+                    {/* Preselected Remarks Dropdown (Appends on select without overwriting) */}
+                    <select
+                      ref={remarksSelectRef}
+                      value={selectedRemarkPreset}
+                      onFocus={() => setActiveZone('remarks')}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) return;
+                        if (val === 'custom') {
+                          setSelectedRemarkPreset('custom');
+                          return;
+                        }
+                        // Append new remark line without overwriting previous items' remarks
+                        setCustomRemark(prev => {
+                          const trimmed = prev ? prev.trim() : '';
+                          if (!trimmed) return val;
+                          const lines = trimmed.split('\n').map(l => l.trim());
+                          if (lines.includes(val)) return trimmed; // Avoid duplicate lines
+                          return `${trimmed}\n${val}`;
+                        });
+                        // Reset dropdown back to placeholder so next item remark can be picked immediately
+                        setSelectedRemarkPreset('');
+                      }}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                    >
+                      <option value="">+ Add Pre-set Remark to List...</option>
+                      <option value={`Wrong / Blank Image for ${currentCriterion.label || currentCriterion.title || 'Current Item'}`}>
+                        Wrong / Blank Image for {currentCriterion.label || currentCriterion.title || 'Current Item'}
+                      </option>
+                      <option value="Repeated / recycled image uploaded">
+                        Repeated image
+                      </option>
+                      <option value="All images missing / blank / black">
+                        All images missing / blank / black
+                      </option>
+                      <option value="Missing required equipment from toolkit">
+                        Missing required equipment from toolkit
+                      </option>
+                      <option value="Blurry / unreadable photo uploaded">
+                        Blurry / unreadable photo uploaded
+                      </option>
+                      <option value="Incomplete equipment kit displayed">
+                        Incomplete equipment kit displayed
+                      </option>
+                      <option value="custom">
+                        Custom remark (type below)...
+                      </option>
+                    </select>
+
+                    {/* Removable chips for accumulated multi-item remarks */}
+                    {customRemark && customRemark.trim().split('\n').filter(Boolean).length > 1 && (
+                      <div className="flex flex-wrap gap-1 py-0.5">
+                        {customRemark.trim().split('\n').filter(Boolean).map((line, idx) => (
+                          <span 
+                            key={idx} 
+                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-950 border border-slate-700/80 text-[10px] text-slate-300 shadow-sm"
+                          >
+                            <span className="truncate max-w-[240px] font-medium">{line}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const remaining = customRemark
+                                  .trim()
+                                  .split('\n')
+                                  .filter(Boolean)
+                                  .filter((_, i) => i !== idx)
+                                  .join('\n');
+                                setCustomRemark(remaining);
+                              }}
+                              className="text-slate-500 hover:text-rose-400 font-bold ml-0.5 cursor-pointer"
+                              title="Remove this remark"
+                            >
+                              &times;
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Custom Remark Textarea: Display is BLOCK only when 'custom' is selected, otherwise NONE (hidden) */}
+                    <div className={selectedRemarkPreset === 'custom' ? 'block space-y-1.5 pt-1' : 'hidden'}>
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span className="font-medium text-slate-300">Custom Auditor Remark:</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedRemarkPreset('')}
+                          className="text-[10px] text-slate-500 hover:text-slate-300 underline cursor-pointer"
+                        >
+                          Hide Box
+                        </button>
+                      </div>
+                      <textarea
+                        value={customRemark}
+                        onChange={(e) => setCustomRemark(e.target.value)}
+                        rows={3}
+                        placeholder="Type custom auditor remark here..."
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 font-sans leading-relaxed"
+                      />
+                    </div>
+
+                    {selectedRemarkPreset !== 'custom' && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedRemarkPreset('custom')}
+                        className="text-[11px] text-sky-400 hover:text-sky-300 underline flex items-center gap-1 cursor-pointer pt-0.5"
+                      >
+                        + Type custom remark...
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -1087,15 +1305,34 @@ export default function AuditModal({
 
             </div>
 
-            {/* Bottom Decision Actions */}
-            <div className="pt-4 border-t border-slate-700/80 flex items-center gap-3">
+            {/* Pinned Bottom Decision Actions */}
+            <div className="shrink-0 p-4 border-t border-slate-700/80 bg-slate-850 flex items-center gap-3">
               <button
                 type="button"
                 onClick={handlePassClick}
-                className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                disabled={!allItemsPassed}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                  allItemsPassed
+                    ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-lg shadow-emerald-500/20 cursor-pointer'
+                    : 'bg-slate-800 text-slate-500 border border-slate-700/60 cursor-not-allowed opacity-60 shadow-none'
+                }`}
+                title={
+                  allItemsPassed
+                    ? 'All checklist items verified and passed! Click or press [p] to submit Pass Audit.'
+                    : `Disabled: Review & pass all ${rules.length} items to enable Pass Audit (${passedCheckpointsCount}/${rules.length} passed)`
+                }
               >
-                <CheckCircle2 className="w-4 h-4" />
-                PASS AUDIT (P)
+                <CheckCircle2 className={`w-4 h-4 ${allItemsPassed ? 'text-white' : 'text-slate-500'}`} />
+                <span>PASS AUDIT (P)</span>
+                {allItemsPassed ? (
+                  <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-white/20 text-white font-mono">
+                    All Passed
+                  </span>
+                ) : (
+                  <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-900 border border-slate-700 text-slate-400">
+                    {passedCheckpointsCount}/{rules.length} Passed
+                  </span>
+                )}
               </button>
 
               <button

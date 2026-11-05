@@ -746,16 +746,6 @@ export default function ClusterManagerPortal({
                                   View {fe.fatalTasks} Fatals
                                 </button>
                               )}
-
-                              {fe.fatalTasksList.length > 0 && onOpenEmailForTask && (
-                                <button
-                                  onClick={() => onOpenEmailForTask(fe.fatalTasksList[0])}
-                                  className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
-                                  title="Draft warning notice to FE, AM and RM"
-                                >
-                                  <Mail className="w-3.5 h-3.5 text-sky-400" />
-                                </button>
-                              )}
                             </div>
                           </td>
 
@@ -815,15 +805,6 @@ export default function ClusterManagerPortal({
 
                     <div className="text-xs text-slate-400 flex items-center gap-2">
                       <span>Auditor: <strong className="text-white">{task.auditedBy || 'Central Auditor'}</strong></span>
-                      {onOpenEmailForTask && (
-                        <button
-                          onClick={() => onOpenEmailForTask(task)}
-                          className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-1.5 transition-colors cursor-pointer"
-                        >
-                          <Mail className="w-3 h-3" />
-                          <span>Dispatch / Resend Notice</span>
-                        </button>
-                      )}
                     </div>
                   </div>
 

@@ -411,14 +411,13 @@ export default function DailyDigestManagerView({
                     <td className="p-2.5 text-center whitespace-nowrap">
                       <button
                         onClick={() => {
-                          const taskObj = tasks.find(t => t.id === fi.taskId || t.taskId === fi.taskId);
-                          if (taskObj && onOpenEmailForTask) {
-                            onOpenEmailForTask(taskObj);
+                          if (onNavigate) {
+                            onNavigate('audits');
                           }
                         }}
                         className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-semibold border border-slate-700 transition-colors cursor-pointer"
                       >
-                        Inspect & Email
+                        Inspect Task
                       </button>
                     </td>
                   </tr>

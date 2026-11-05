@@ -465,6 +465,8 @@ export function runAutoAllocationAlgorithm({
   // 3. Workload buckets for each active auditor
   const auditorWorkloads = {};
   activeAuditors.forEach(a => {
+    const isTemporary = Boolean(a.isTemporary);
+    const targetQuota = Math.max(0, parseInt(a.targetQuota ?? a.quota ?? 0, 10));
     // Weight: 0.5 for HALF_DAY, 1.0 for AVAILABLE / full day
     const weight = a.shiftStatus === 'HALF_DAY' ? 0.5 : 1.0;
     const alreadyAssigned = tasks.filter(t => 
@@ -473,36 +475,63 @@ export function runAutoAllocationAlgorithm({
 
     auditorWorkloads[a.id] = {
       auditor: a,
+      isTemporary,
+      targetQuota,
       weight,
       alreadyAssigned,
       newlyAssigned: []
     };
   });
 
-  // 4. Pure Equal Distribution (Assigns every single task in queue)
   const batchId = `ALLOC_${Date.now()}`;
   const unassignedQueue = [...actionablePool];
   let newlyAssignedCount = 0;
 
-  while (unassignedQueue.length > 0) {
-    // Sort auditors by lowest current assigned workload to ensure perfectly even distribution
-    const sortedAuditorIds = Object.keys(auditorWorkloads).sort((idA, idB) => {
-      const loadA = (auditorWorkloads[idA].alreadyAssigned + auditorWorkloads[idA].newlyAssigned.length) / auditorWorkloads[idA].weight;
-      const loadB = (auditorWorkloads[idB].alreadyAssigned + auditorWorkloads[idB].newlyAssigned.length) / auditorWorkloads[idB].weight;
-      return loadA - loadB;
-    });
+  // Separate temporary surge auditors from permanent City Admin / Quality auditors
+  const tempAuditors = activeAuditors.filter(a => a.isTemporary);
+  const permanentAuditors = activeAuditors.filter(a => !a.isTemporary);
 
-    const nextAuditorId = sortedAuditorIds[0];
-    const taskToAssign = unassignedQueue.shift();
+  // STEP 4A: Allocate EXACT Input Quota to Temporary Auditors First
+  // Deduct these exact tasks from the actionable pool so temp auditors only do what's entered in their input
+  for (const tempAuditor of tempAuditors) {
+    const quota = Math.max(0, parseInt(tempAuditor.targetQuota ?? tempAuditor.quota ?? 0, 10));
+    const tasksToAssignCount = Math.min(quota, unassignedQueue.length);
 
-    taskToAssign.assignedAuditorId = auditorWorkloads[nextAuditorId].auditor.id;
-    taskToAssign.assignedAuditorName = auditorWorkloads[nextAuditorId].auditor.full_name || auditorWorkloads[nextAuditorId].auditor.name;
-    taskToAssign.assignedAuditorEmail = auditorWorkloads[nextAuditorId].auditor.email || null;
-    taskToAssign.allocatedAt = new Date().toISOString();
-    taskToAssign.allocationBatchId = batchId;
+    for (let i = 0; i < tasksToAssignCount; i++) {
+      const taskToAssign = unassignedQueue.shift();
+      taskToAssign.assignedAuditorId = tempAuditor.id;
+      taskToAssign.assignedAuditorName = tempAuditor.full_name || tempAuditor.name;
+      taskToAssign.assignedAuditorEmail = tempAuditor.email || null;
+      taskToAssign.allocatedAt = new Date().toISOString();
+      taskToAssign.allocationBatchId = batchId;
 
-    auditorWorkloads[nextAuditorId].newlyAssigned.push(taskToAssign.id);
-    newlyAssignedCount++;
+      auditorWorkloads[tempAuditor.id].newlyAssigned.push(taskToAssign.id);
+      newlyAssignedCount++;
+    }
+  }
+
+  // STEP 4B: Pure Equal Distribution of ALL Remaining Tasks Among Permanent City Admins / Auditors
+  if (permanentAuditors.length > 0) {
+    while (unassignedQueue.length > 0) {
+      // Sort permanent auditors by lowest current assigned workload weighted by shift
+      const sortedAuditorIds = permanentAuditors.map(a => a.id).sort((idA, idB) => {
+        const loadA = (auditorWorkloads[idA].alreadyAssigned + auditorWorkloads[idA].newlyAssigned.length) / auditorWorkloads[idA].weight;
+        const loadB = (auditorWorkloads[idB].alreadyAssigned + auditorWorkloads[idB].newlyAssigned.length) / auditorWorkloads[idB].weight;
+        return loadA - loadB;
+      });
+
+      const nextAuditorId = sortedAuditorIds[0];
+      const taskToAssign = unassignedQueue.shift();
+
+      taskToAssign.assignedAuditorId = auditorWorkloads[nextAuditorId].auditor.id;
+      taskToAssign.assignedAuditorName = auditorWorkloads[nextAuditorId].auditor.full_name || auditorWorkloads[nextAuditorId].auditor.name;
+      taskToAssign.assignedAuditorEmail = auditorWorkloads[nextAuditorId].auditor.email || null;
+      taskToAssign.allocatedAt = new Date().toISOString();
+      taskToAssign.allocationBatchId = batchId;
+
+      auditorWorkloads[nextAuditorId].newlyAssigned.push(taskToAssign.id);
+      newlyAssignedCount++;
+    }
   }
 
   // 5. Update complete tasks list

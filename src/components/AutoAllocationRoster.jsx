@@ -19,12 +19,22 @@ import {
   ShieldAlert, 
   ShieldCheck, 
   Loader2, 
-  Info 
+  Info,
+  Zap,
+  Key,
+  Trash2,
+  Plus
 } from 'lucide-react';
 import { runAutoAllocationAlgorithm } from '../lib/supabase.js';
 import { rosterApi, tasksApi } from '../api/client.js';
 import { parseRoles, hasAccess, displayRoleName, isEligibleForAuditRoster } from '../utils/accessHelper.js';
 import { getTaskBatchDateYMD } from '../utils/dailyDigestHelper.js';
+import { 
+  getTempAuditorsRegistry, 
+  registerTempAuditor, 
+  updateTempAuditorQuota, 
+  removeTempAuditor 
+} from '../utils/temporaryAuditorHelper.js';
 
 export default function AutoAllocationRoster({
   tasks = [],
@@ -72,6 +82,8 @@ export default function AutoAllocationRoster({
   const [isAutoFatalling, setIsAutoFatalling] = useState(false);
   const [showAddAuditorModal, setShowAddAuditorModal] = useState(false);
   const [selectedStaffToPromote, setSelectedStaffToPromote] = useState('');
+  const [isAddTempAuditor, setIsAddTempAuditor] = useState(true);
+  const [tempQuotaInput, setTempQuotaInput] = useState(15);
 
   // Sync roster with real users and fetch persisted shift statuses from Supabase
   useEffect(() => {
@@ -88,7 +100,9 @@ export default function AutoAllocationRoster({
         employeeCode: u.employee_code || u.person_id || '',
         role: u.role || 'Auditor',
         roles: parseRoles(u.roles || [u.role]),
-        shiftStatus: 'AVAILABLE'
+        shiftStatus: 'AVAILABLE',
+        isTemporary: false,
+        targetQuota: null
       }));
 
       // 2. Fetch today's persistent shifts from Supabase auditor_roster
@@ -110,6 +124,44 @@ export default function AutoAllocationRoster({
         console.warn('Could not sync today shifts from database:', err.message);
       }
 
+      // 3. Merge active temporary surge auditors from registry
+      const tempReg = getTempAuditorsRegistry();
+      const tempEntries = Object.values(tempReg).filter(Boolean);
+      const seenIds = new Set(baseRoster.map(b => String(b.id).toLowerCase()));
+
+      tempEntries.forEach(entry => {
+        const entryIdKey = String(entry.id).toLowerCase();
+        if (!seenIds.has(entryIdKey)) {
+          seenIds.add(entryIdKey);
+          baseRoster.push({
+            id: entry.id,
+            auth_user_id: entry.userId || entry.id,
+            full_name: entry.name || entry.full_name || 'Temporary Auditor',
+            email: entry.email,
+            hub: entry.hub || 'Surge Shift',
+            employeeCode: entry.employeeCode || '',
+            role: entry.role || 'Temporary Auditor',
+            roles: [entry.role || 'Temporary Auditor'],
+            shiftStatus: 'AVAILABLE',
+            isTemporary: true,
+            targetQuota: entry.targetQuota || 15,
+            accessStatus: entry.accessStatus || 'ACTIVE'
+          });
+        } else {
+          baseRoster = baseRoster.map(b => {
+            if (String(b.id).toLowerCase() === entryIdKey) {
+              return {
+                ...b,
+                isTemporary: true,
+                targetQuota: entry.targetQuota || 15,
+                accessStatus: entry.accessStatus || 'ACTIVE'
+              };
+            }
+            return b;
+          });
+        }
+      });
+
       if (isMounted) {
         setRoster(baseRoster);
       }
@@ -117,8 +169,30 @@ export default function AutoAllocationRoster({
 
     initRoster();
 
+    // Listen for temporary auditor updates from across components
+    const handleTempChanged = () => {
+      const tempReg = getTempAuditorsRegistry();
+      setRoster(prev => {
+        return prev.map(a => {
+          const entry = tempReg[String(a.id).toLowerCase()] || (a.email ? tempReg[String(a.email).toLowerCase()] : null);
+          if (entry) {
+            return {
+              ...a,
+              isTemporary: true,
+              targetQuota: entry.targetQuota,
+              accessStatus: entry.accessStatus
+            };
+          }
+          return a;
+        });
+      });
+    };
+
+    window.addEventListener('locus_temp_auditor_changed', handleTempChanged);
+
     return () => {
       isMounted = false;
+      window.removeEventListener('locus_temp_auditor_changed', handleTempChanged);
     };
   }, [actualAuditorsFromUsers]);
 
@@ -226,13 +300,21 @@ export default function AutoAllocationRoster({
     return roster.filter(a => a.shiftStatus !== 'ON_LEAVE');
   }, [roster]);
 
-  // Estimate tasks per auditor for the active batch
+  const tempAuditors = useMemo(() => activeAuditors.filter(a => a.isTemporary), [activeAuditors]);
+  const permanentAuditors = useMemo(() => activeAuditors.filter(a => !a.isTemporary), [activeAuditors]);
+  const tempTotalQuota = useMemo(() => {
+    return tempAuditors.reduce((sum, a) => sum + (Math.max(0, parseInt(a.targetQuota ?? a.quota ?? 15, 10))), 0);
+  }, [tempAuditors]);
+
+  // Estimate tasks per permanent auditor for the active batch after deducting temp auditor exact quotas
   const expectedSharePerAuditor = useMemo(() => {
     const poolSize = unassignedPool.length > 0 ? unassignedPool.length : pendingAuditablePool.length;
     if (activeAuditors.length === 0 || poolSize === 0) return 0;
-    const totalWeight = activeAuditors.reduce((sum, a) => sum + (a.shiftStatus === 'HALF_DAY' ? 0.5 : 1), 0);
-    return totalWeight > 0 ? Math.round(poolSize / totalWeight) : 0;
-  }, [unassignedPool.length, pendingAuditablePool.length, activeAuditors]);
+    const remainingForPermanent = Math.max(0, poolSize - tempTotalQuota);
+    if (permanentAuditors.length === 0) return 0;
+    const permWeight = permanentAuditors.reduce((sum, a) => sum + (a.shiftStatus === 'HALF_DAY' ? 0.5 : 1), 0);
+    return permWeight > 0 ? Math.round(remainingForPermanent / permWeight) : 0;
+  }, [unassignedPool.length, pendingAuditablePool.length, activeAuditors.length, tempTotalQuota, permanentAuditors]);
 
   // Workload count per auditor for the active batch (accurately checks both ID and Name and highlights carryover)
   const auditorWorkloadMap = useMemo(() => {
@@ -612,30 +694,89 @@ export default function AutoAllocationRoster({
     }
   };
 
+  // Update quota for temporary auditor
+  const handleUpdateAuditorQuota = (auditorId, newQuota) => {
+    const cleanQuota = Math.max(1, parseInt(newQuota, 10) || 15);
+    updateTempAuditorQuota(auditorId, cleanQuota);
+    setRoster(prev => prev.map(a => a.id === auditorId ? { ...a, targetQuota: cleanQuota } : a));
+  };
+
+  // Re-activate a temporary auditor whose quota was completed
+  const handleReactivateTempAuditor = (auditorId) => {
+    const aud = roster.find(a => a.id === auditorId);
+    const newQuota = window.prompt(`Enter additional task quota to assign to ${aud?.full_name || 'auditor'}:`, '15');
+    if (!newQuota) return;
+    const cleanQuota = Math.max(1, parseInt(newQuota, 10) || 15);
+    updateTempAuditorQuota(auditorId, cleanQuota);
+    setRoster(prev => prev.map(a => a.id === auditorId ? { ...a, targetQuota: cleanQuota, accessStatus: 'ACTIVE' } : a));
+  };
+
+  // Remove temporary auditor
+  const handleRemoveTempAuditor = (auditorId) => {
+    if (!window.confirm('Remove this temporary auditor from surge roster and revoke Audits page access?')) return;
+    removeTempAuditor(auditorId);
+    setRoster(prev => prev.filter(a => a.id !== auditorId));
+  };
+
   // Add staff member to allocation roster without modifying their system role
   const handlePromoteStaff = () => {
     if (!selectedStaffToPromote) return;
     const targetUser = users.find(u => u.id === selectedStaffToPromote);
     if (!targetUser) return;
 
-    // Preserve exact user role in the system - no role mutation
-    setRoster(prev => [
-      ...prev,
-      {
-        id: targetUser.id,
-        auth_user_id: targetUser.auth_user_id || targetUser.id,
-        full_name: targetUser.full_name || targetUser.name,
+    if (isAddTempAuditor) {
+      const cleanQuota = Math.max(1, parseInt(tempQuotaInput, 10) || 15);
+      registerTempAuditor({
+        userId: targetUser.id,
         email: targetUser.email,
-        hub: targetUser.facility_code || targetUser.city || 'National',
-        employeeCode: targetUser.employee_code || targetUser.person_id || '',
+        name: targetUser.full_name || targetUser.name,
         role: targetUser.role,
-        roles: parseRoles(targetUser.roles || [targetUser.role]),
-        shiftStatus: 'AVAILABLE'
-      }
-    ]);
+        hub: targetUser.facility_code || targetUser.city || 'Surge Shift',
+        employeeCode: targetUser.employee_code || targetUser.person_id || '',
+        targetQuota: cleanQuota
+      });
+
+      setRoster(prev => [
+        ...prev.filter(p => p.id !== targetUser.id),
+        {
+          id: targetUser.id,
+          auth_user_id: targetUser.auth_user_id || targetUser.id,
+          full_name: targetUser.full_name || targetUser.name,
+          email: targetUser.email,
+          hub: targetUser.facility_code || targetUser.city || 'Surge Shift',
+          employeeCode: targetUser.employee_code || targetUser.person_id || '',
+          role: targetUser.role,
+          roles: parseRoles(targetUser.roles || [targetUser.role]),
+          shiftStatus: 'AVAILABLE',
+          isTemporary: true,
+          targetQuota: cleanQuota,
+          accessStatus: 'ACTIVE'
+        }
+      ]);
+    } else {
+      // Standard permanent auditor promotion
+      setRoster(prev => [
+        ...prev.filter(p => p.id !== targetUser.id),
+        {
+          id: targetUser.id,
+          auth_user_id: targetUser.auth_user_id || targetUser.id,
+          full_name: targetUser.full_name || targetUser.name,
+          email: targetUser.email,
+          hub: targetUser.facility_code || targetUser.city || 'National',
+          employeeCode: targetUser.employee_code || targetUser.person_id || '',
+          role: targetUser.role,
+          roles: parseRoles(targetUser.roles || [targetUser.role]),
+          shiftStatus: 'AVAILABLE',
+          isTemporary: false,
+          targetQuota: null
+        }
+      ]);
+    }
 
     setShowAddAuditorModal(false);
     setSelectedStaffToPromote('');
+    setIsAddTempAuditor(true);
+    setTempQuotaInput(15);
   };
 
   // Staff members eligible to be added to auditor team
@@ -853,7 +994,7 @@ export default function AutoAllocationRoster({
         </div>
       )}
 
-      {/* KPI Cards */}
+        {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
@@ -862,7 +1003,11 @@ export default function AutoAllocationRoster({
             <Layers className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-black text-emerald-400">{unassignedPool.length}</div>
-          <p className="text-[11px] text-slate-500 mt-0.5">With photos • Waiting for auditor</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            {tempTotalQuota > 0 
+              ? `Exact ${tempTotalQuota} temp quota + ${Math.max(0, unassignedPool.length - tempTotalQuota)} permanent` 
+              : 'With photos • Waiting for auditor'}
+          </p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
@@ -880,24 +1025,30 @@ export default function AutoAllocationRoster({
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">Active Auditors</span>
+            <span className="text-xs font-semibold">On-Duty Auditors</span>
             <Users className="w-4 h-4 text-sky-400" />
           </div>
           <div className="text-2xl font-black text-white">
             {activeAuditors.length} <span className="text-xs font-normal text-slate-400">/ {roster.length} registered</span>
           </div>
-          <p className="text-[11px] text-slate-500 mt-0.5">Available for day's dispatches</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            {tempAuditors.length > 0 
+              ? `${permanentAuditors.length} permanent + ${tempAuditors.length} temporary surge`
+              : 'Available for day dispatches'}
+          </p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">Share Per Auditor</span>
+            <span className="text-xs font-semibold">Permanent Share</span>
             <TrendingUp className="w-4 h-4 text-blue-400" />
           </div>
           <div className="text-2xl font-black text-blue-400">
             ~{expectedSharePerAuditor} <span className="text-xs font-normal text-slate-400">tasks</span>
           </div>
-          <p className="text-[11px] text-slate-500 mt-0.5">Equal photo task distribution</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            {tempTotalQuota > 0 ? `After ${tempTotalQuota} surge quota deduction` : 'Equal photo task distribution'}
+          </p>
         </div>
 
       </div>
@@ -944,18 +1095,26 @@ export default function AutoAllocationRoster({
               const stats = auditorWorkloadMap[auditor.id] || { total: 0, pending: 0, completed: 0 };
               const isLeave = auditor.shiftStatus === 'ON_LEAVE';
               const isHalfDay = auditor.shiftStatus === 'HALF_DAY';
+              const isTemp = Boolean(auditor.isTemporary);
+              const isQuotaCompleted = isTemp && stats.pending === 0 && stats.completed > 0;
 
               return (
                 <div 
                   key={auditor.id}
                   className={`p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
-                    isLeave ? 'bg-slate-950/40 opacity-70' : 'hover:bg-slate-850/50'
+                    isLeave 
+                      ? 'bg-slate-950/40 opacity-70' 
+                      : isTemp
+                      ? 'bg-amber-950/10 hover:bg-amber-950/20'
+                      : 'hover:bg-slate-850/50'
                   }`}
                 >
                   {/* Auditor Info */}
                   <div className="flex items-center space-x-3">
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xs ${
-                      isLeave 
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xs shrink-0 ${
+                      isTemp
+                        ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                        : isLeave 
                         ? 'bg-red-500/10 text-red-400 border border-red-500/20' 
                         : isHalfDay
                         ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
@@ -966,15 +1125,43 @@ export default function AutoAllocationRoster({
                     <div>
                       <div className="font-bold text-white text-xs flex items-center gap-2 flex-wrap">
                         <span>{auditor.full_name}</span>
-                        <span className={`text-[10px] px-2 py-0.5 rounded font-bold font-mono ${
-                          auditor.role === 'City Admin' || auditor.role === 'Admin'
-                            ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
-                            : auditor.role === 'Central Ops'
-                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                            : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                        }`}>
-                          {displayRoleName(auditor.role) || 'Auditor'}
-                        </span>
+
+                        {isTemp ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded font-black font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1 shadow-sm">
+                            <Zap className="w-3 h-3 text-amber-400 fill-amber-400" />
+                            <span>TEMPORARY AUDITOR</span>
+                          </span>
+                        ) : (
+                          <span className={`text-[10px] px-2 py-0.5 rounded font-bold font-mono ${
+                            auditor.role === 'City Admin' || auditor.role === 'Admin'
+                              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                              : auditor.role === 'Central Ops'
+                              ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                              : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                          }`}>
+                            {displayRoleName(auditor.role) || 'Auditor'}
+                          </span>
+                        )}
+
+                        {/* Access status for temporary auditor */}
+                        {isTemp && (
+                          isQuotaCompleted ? (
+                            <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              <span>Quota Done • Access Revoked</span>
+                            </span>
+                          ) : stats.pending > 0 ? (
+                            <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1">
+                              <Key className="w-3 h-3 text-sky-400" />
+                              <span>Audits Access Active</span>
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-2 py-0.5 rounded font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+                              <span>Ready for Allocation</span>
+                            </span>
+                          )
+                        )}
+
                         {auditor.employeeCode && (
                           <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-sky-400 font-mono">
                             {auditor.employeeCode}
@@ -986,8 +1173,29 @@ export default function AutoAllocationRoster({
                     </div>
                   </div>
 
-                  {/* Current Assigned Counts */}
-                  <div className="flex items-center gap-3.5 text-xs">
+                  {/* Temporary Auditor Quota Input OR Current Assigned Counts */}
+                  <div className="flex items-center gap-3.5 text-xs flex-wrap">
+                    
+                    {/* Exact Quota Input Field for Temporary Auditors */}
+                    {isTemp && (
+                      <div className="flex items-center gap-1.5 bg-slate-950/80 border border-amber-500/40 rounded-xl px-2.5 py-1.5 shadow-inner">
+                        <span className="text-[11px] font-bold text-amber-300 flex items-center gap-1">
+                          <Zap className="w-3 h-3 text-amber-400" />
+                          <span>Exact Quota:</span>
+                        </span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="500"
+                          value={auditor.targetQuota ?? 15}
+                          onChange={(e) => handleUpdateAuditorQuota(auditor.id, e.target.value)}
+                          className="w-14 px-1.5 py-0.5 bg-slate-900 border border-amber-500/60 text-amber-200 font-mono font-black text-xs rounded text-center focus:outline-none focus:ring-1 focus:ring-amber-400"
+                          title="Exact number of tasks to assign to this temporary auditor in the allocation run"
+                        />
+                        <span className="text-[11px] text-slate-400">tasks</span>
+                      </div>
+                    )}
+
                     <div className="bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
                       <span className="text-[10px] text-amber-400 font-bold uppercase block">Pending</span>
                       <span className="font-extrabold text-amber-300 text-xs">{stats.pending} to do</span>
@@ -1007,41 +1215,65 @@ export default function AutoAllocationRoster({
                     </div>
                   </div>
 
-                  {/* Shift Selector Buttons */}
+                  {/* Shift Selector Buttons OR Temporary Auditor Actions */}
                   <div className="flex items-center gap-1.5 self-start sm:self-auto">
-                    <button
-                      onClick={() => handleUpdateShift(auditor.id, 'AVAILABLE')}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                        auditor.shiftStatus === 'AVAILABLE'
-                          ? 'bg-emerald-600 text-white shadow-sm'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      Available
-                    </button>
+                    {isTemp ? (
+                      <div className="flex items-center gap-2">
+                        {isQuotaCompleted && (
+                          <button
+                            onClick={() => handleReactivateTempAuditor(auditor.id)}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer flex items-center gap-1 shadow-sm"
+                            title="Assign more tasks and re-grant Audits access"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Assign More</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleRemoveTempAuditor(auditor.id)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 border border-slate-700 transition-colors cursor-pointer"
+                          title="Remove from Temporary Auditor Roster"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleUpdateShift(auditor.id, 'AVAILABLE')}
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            auditor.shiftStatus === 'AVAILABLE'
+                              ? 'bg-emerald-600 text-white shadow-sm'
+                              : 'bg-slate-800 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Available
+                        </button>
 
-                    <button
-                      onClick={() => handleUpdateShift(auditor.id, 'HALF_DAY')}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                        auditor.shiftStatus === 'HALF_DAY'
-                          ? 'bg-amber-600 text-white shadow-sm'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      Half Day
-                    </button>
+                        <button
+                          onClick={() => handleUpdateShift(auditor.id, 'HALF_DAY')}
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            auditor.shiftStatus === 'HALF_DAY'
+                              ? 'bg-amber-600 text-white shadow-sm'
+                              : 'bg-slate-800 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          Half Day
+                        </button>
 
-                    <button
-                      onClick={() => handleReallocateLeaveAuditor(auditor.id)}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                        auditor.shiftStatus === 'ON_LEAVE'
-                          ? 'bg-red-600 text-white shadow-sm'
-                          : 'bg-slate-800 text-slate-400 hover:text-white'
-                      }`}
-                      title="Mark on leave and redistribute pending tasks to active team in Supabase"
-                    >
-                      On Leave
-                    </button>
+                        <button
+                          onClick={() => handleReallocateLeaveAuditor(auditor.id)}
+                          className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            auditor.shiftStatus === 'ON_LEAVE'
+                              ? 'bg-red-600 text-white shadow-sm'
+                              : 'bg-slate-800 text-slate-400 hover:text-white'
+                          }`}
+                          title="Mark on leave and redistribute pending tasks to active team in Supabase"
+                        >
+                          On Leave
+                        </button>
+                      </>
+                    )}
                   </div>
 
                 </div>
@@ -1069,12 +1301,12 @@ export default function AutoAllocationRoster({
             </div>
 
             <p className="text-xs text-slate-400">
-              Select an existing staff member to add to the quality auditor team and enable task allocations.
+              Select an existing staff member to add to the audit roster for photo compliance checks.
             </p>
 
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Select Employee:
+                Select Staff Member:
               </label>
               <select
                 value={selectedStaffToPromote}
@@ -1090,6 +1322,47 @@ export default function AutoAllocationRoster({
               </select>
             </div>
 
+            {/* Temporary Surge Auditor Option */}
+            <div className="p-3.5 bg-amber-950/25 border border-amber-500/30 rounded-xl space-y-3">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={isAddTempAuditor}
+                  onChange={(e) => setIsAddTempAuditor(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-amber-500 bg-slate-800"
+                />
+                <div>
+                  <span className="text-xs font-bold text-amber-200 flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
+                    <span>Add as Temporary Auditor (Surge Capacity)</span>
+                  </span>
+                  <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                    This staff member will be granted immediate access to the <strong>Audits Console</strong> for their surge shift. Once all their assigned tasks are audited, their Audits page access is <strong>automatically revoked</strong>.
+                  </p>
+                </div>
+              </label>
+
+              {isAddTempAuditor && (
+                <div className="pt-2.5 border-t border-amber-500/20 flex items-center justify-between gap-3">
+                  <label className="text-xs font-semibold text-slate-300">
+                    Exact Tasks to Allocate (Quota):
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min="1"
+                      max="300"
+                      value={tempQuotaInput}
+                      onChange={(e) => setTempQuotaInput(e.target.value)}
+                      className="w-20 px-2 py-1 bg-slate-900 border border-amber-500/50 rounded-lg text-xs font-bold text-center text-amber-200 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                      title="Number of tasks this temporary auditor will audit"
+                    />
+                    <span className="text-xs text-slate-400">tasks</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 onClick={() => setShowAddAuditorModal(false)}
@@ -1102,7 +1375,7 @@ export default function AutoAllocationRoster({
                 disabled={!selectedStaffToPromote}
                 className="px-4 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white transition-colors cursor-pointer shadow-md"
               >
-                Add as Auditor
+                {isAddTempAuditor ? 'Add as Temp Auditor' : 'Add as Permanent Auditor'}
               </button>
             </div>
           </div>

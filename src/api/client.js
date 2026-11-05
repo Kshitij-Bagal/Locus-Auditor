@@ -2054,6 +2054,43 @@ export const feFatalDigestApi = {
       throw new Error(data.error || 'Failed to dispatch GM & BH executive summary');
     }
     return data;
+  },
+
+  // Dispatch Consolidated Team Digest to AMs & RMs
+  async dispatchTeamDigest({ date, managerEmail, role, dryRun = false, tasks, users }) {
+    const gatewayConfig = emailApi.getGatewayConfig();
+
+    const response = await fetch('/api/cron/daily-fe-fatal-digest', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-requested-by': 'locus-portal'
+      },
+      body: JSON.stringify({
+        action: 'send_team_digest',
+        date,
+        managerEmail,
+        role,
+        dryRun,
+        tasks,
+        users,
+        credentials: {
+          brevoApiKey: gatewayConfig.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
+          resendApiKey: gatewayConfig.resendApiKey,
+          smtpHost: gatewayConfig.smtpHost,
+          smtpPort: gatewayConfig.smtpPort,
+          smtpUser: gatewayConfig.smtpUser,
+          smtpPass: gatewayConfig.smtpPass,
+          fromAddress: gatewayConfig.fromAddress
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to dispatch team digest');
+    }
+    return data;
   }
 };
 

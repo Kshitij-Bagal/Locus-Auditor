@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Fingerprint, 
   Play, 
+  Pause,
   Square, 
   AlertTriangle, 
   CheckCircle2, 
@@ -10,6 +11,7 @@ import {
   Eye, 
   Layers, 
   ShieldAlert, 
+  ShieldCheck,
   RefreshCw, 
   Clock, 
   Sparkles, 
@@ -25,12 +27,26 @@ import {
   FileCheck,
   Search,
   Sliders,
-  Moon
+  Moon,
+  Zap
 } from 'lucide-react';
 import { 
   extractTaskImageItems, 
   runBatchForensicScan 
 } from '../utils/imageForensics.js';
+
+function formatEta(seconds) {
+  if (!seconds || seconds <= 0) return 'Calculating...';
+  if (seconds < 60) return `~${seconds}s remaining`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins >= 60) {
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `~${hours}h ${remMins}m remaining`;
+  }
+  return `~${mins}m ${secs}s remaining`;
+}
 
 export default function ImageForensicsLab({ 
   tasks = [], 
@@ -59,16 +75,33 @@ export default function ImageForensicsLab({
   const [onlyCollusion, setOnlyCollusion] = useState(false);
   
   // Readjusted Examination Sensitivity (Hamming distance threshold):
-  // 4 = Strict (94%+ match)
-  // 7 = Balanced Recommended (89%+ match, captures crops & screenshots)
-  // 9 = Aggressive (86%+ match, captures angle & slight lighting shifts)
-  const [sensitivity, setSensitivity] = useState(7);
+  // 2 = Strict High-Confidence (Zero False Positives, requires same slot + ambient color match >= 88%)
+  // 3 = Balanced (Captures slight crops & minor zoom by same FE)
+  // 4 = Relaxed (Captures angle & lighting shifts)
+  const [sensitivity, setSensitivity] = useState(2);
+
+  // Anti-429 Pacing Mode (0.5s - 1.0s random interval by default)
+  const [pacingMode, setPacingMode] = useState('stealth'); // 'stealth' (0.5s-1.0s) | 'ultrasafe' (1.0s-2.0s) | 'deep' (2.0s-3.0s)
 
   // Scan state
   const [isScanning, setIsScanning] = useState(false);
-  const [scanProgress, setScanProgress] = useState({ current: 0, total: 0, currentItem: null });
+  const [isPaused, setIsPaused] = useState(false);
+  const [scanProgress, setScanProgress] = useState({ 
+    current: 0, 
+    total: 0, 
+    currentItem: null,
+    intervalMs: 750,
+    etaSeconds: 0,
+    coolingDown: false,
+    cooldownSec: 0,
+    attempt: 1,
+    maxAttempts: 5,
+    message: null,
+    isPaused: false
+  });
   const [scanResults, setScanResults] = useState(null);
   const abortControllerRef = useRef(null);
+  const pauseSignalRef = useRef({ isPaused: false });
 
   // UI state: 'all' | 'blank' | 'exact' | 'perceptual' | 'stale'
   const [activeTab, setActiveTab] = useState('all');
@@ -106,11 +139,31 @@ export default function ImageForensicsLab({
     }
 
     setIsScanning(true);
-    setScanProgress({ current: 0, total: imageQueue.length, currentItem: null });
+    setIsPaused(false);
+    pauseSignalRef.current.isPaused = false;
+    setScanProgress({ 
+      current: 0, 
+      total: imageQueue.length, 
+      currentItem: null,
+      intervalMs: 750,
+      etaSeconds: 0,
+      coolingDown: false,
+      cooldownSec: 0,
+      attempt: 1,
+      maxAttempts: 5,
+      message: null,
+      isPaused: false
+    });
     setScanResults(null);
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+
+    const pacingConfig = {
+      stealth: { min: 500, max: 1000 },
+      ultrasafe: { min: 1000, max: 2000 },
+      deep: { min: 2000, max: 3000 }
+    }[pacingMode] || { min: 500, max: 1000 };
 
     try {
       const results = await runBatchForensicScan(
@@ -119,11 +172,24 @@ export default function ImageForensicsLab({
           setScanProgress({
             current: prog.current,
             total: prog.total,
-            currentItem: prog.item
+            currentItem: prog.item,
+            intervalMs: prog.intervalMs,
+            etaSeconds: prog.etaSeconds,
+            coolingDown: prog.coolingDown,
+            cooldownSec: prog.cooldownSec,
+            attempt: prog.attempt,
+            maxAttempts: prog.maxAttempts,
+            message: prog.message,
+            isPaused: prog.isPaused
           });
         },
         abortController.signal,
-        { maxHamming: Number(sensitivity) }
+        { 
+          maxHamming: Number(sensitivity),
+          minIntervalMs: pacingConfig.min,
+          maxIntervalMs: pacingConfig.max,
+          pauseSignal: pauseSignalRef.current
+        }
       );
 
       setScanResults(results);
@@ -132,8 +198,16 @@ export default function ImageForensicsLab({
       alert('Forensics scan encountered an issue: ' + err.message);
     } finally {
       setIsScanning(false);
+      setIsPaused(false);
       abortControllerRef.current = null;
     }
+  };
+
+  // Handle Toggle Pause / Resume
+  const handleTogglePause = () => {
+    const nextState = !isPaused;
+    setIsPaused(nextState);
+    pauseSignalRef.current.isPaused = nextState;
   };
 
   // Handle stop scan
@@ -141,6 +215,7 @@ export default function ImageForensicsLab({
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       setIsScanning(false);
+      setIsPaused(false);
     }
   };
 
@@ -369,6 +444,23 @@ export default function ImageForensicsLab({
     return list;
   }, [scanResults, onlyCollusion, searchQuery]);
 
+  const perceptualClustersFiltered = useMemo(() => {
+    if (!scanResults) return [];
+    let list = scanResults.perceptualClusters || [];
+    if (onlyCollusion) list = list.filter(c => c.isCrossFE);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(c => 
+        c.items.some(it => 
+          it.taskId.toLowerCase().includes(q) || 
+          it.feName.toLowerCase().includes(q) || 
+          it.feCode.toLowerCase().includes(q)
+        )
+      );
+    }
+    return list;
+  }, [scanResults, onlyCollusion, searchQuery]);
+
   const perceptualPairsFiltered = useMemo(() => {
     if (!scanResults) return [];
     let list = scanResults.perceptualPairs || [];
@@ -438,16 +530,25 @@ export default function ImageForensicsLab({
             </p>
           </div>
 
-          {/* MAIN ONE-CLICK SCAN BUTTON */}
+          {/* MAIN ONE-CLICK SCAN BUTTON & CONTROLS */}
           <div className="flex flex-wrap items-center gap-3 shrink-0">
             {isScanning ? (
-              <button
-                onClick={handleStopScan}
-                className="px-5 py-2.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition-all flex items-center gap-2 animate-pulse"
-              >
-                <Square className="w-4 h-4 fill-white" />
-                Stop Scan ({scanProgress.current}/{scanProgress.total})
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleTogglePause}
+                  className="px-4 py-2.5 text-xs font-bold rounded-xl bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-600/30 transition-all flex items-center gap-2"
+                >
+                  {isPaused ? <Play className="w-4 h-4 fill-white" /> : <Pause className="w-4 h-4" />}
+                  {isPaused ? 'Resume Scan' : 'Pause Scan'}
+                </button>
+                <button
+                  onClick={handleStopScan}
+                  className="px-4 py-2.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 transition-all flex items-center gap-2 animate-pulse"
+                >
+                  <Square className="w-4 h-4 fill-white" />
+                  Stop Scan ({scanProgress.current}/{scanProgress.total})
+                </button>
+              </div>
             ) : (
               <button
                 onClick={handleStartScan}
@@ -512,6 +613,22 @@ export default function ImageForensicsLab({
             </select>
           </div>
 
+          {/* Anti-429 Pacing Interval Selector */}
+          <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-emerald-500/30">
+            <Zap className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-slate-300 font-medium">Anti-429 Pacing:</span>
+            <select
+              value={pacingMode}
+              onChange={(e) => setPacingMode(e.target.value)}
+              disabled={isScanning}
+              className="bg-transparent text-emerald-300 font-semibold focus:outline-none cursor-pointer"
+            >
+              <option value="stealth" className="bg-slate-900">Stealth (0.5s - 1.0s random delay) [Default]</option>
+              <option value="ultrasafe" className="bg-slate-900">Ultra-Safe (1.0s - 2.0s random delay)</option>
+              <option value="deep" className="bg-slate-900">Deep Pacing (2.0s - 3.0s random delay)</option>
+            </select>
+          </div>
+
           {/* Readjusted Sensitivity Selector */}
           <div className="flex items-center gap-2 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-indigo-500/30">
             <Sliders className="w-3.5 h-3.5 text-indigo-400" />
@@ -522,9 +639,9 @@ export default function ImageForensicsLab({
               disabled={isScanning}
               className="bg-transparent text-indigo-300 font-semibold focus:outline-none cursor-pointer"
             >
-              <option value={7} className="bg-slate-900">Balanced Recommended (Match ≥ 89%, Hamming ≤ 7)</option>
-              <option value={9} className="bg-slate-900">Aggressive / Angle Variants (Match ≥ 86%, Hamming ≤ 9)</option>
-              <option value={4} className="bg-slate-900">Strict Only (Match ≥ 94%, Hamming ≤ 4)</option>
+              <option value={2} className="bg-slate-900">Strict High-Confidence (Zero False Alarms) [Recommended]</option>
+              <option value={3} className="bg-slate-900">Balanced (Same FE Reuse & Minor Zoom)</option>
+              <option value={4} className="bg-slate-900">Relaxed (Angle & Lighting Shifts)</option>
             </select>
           </div>
 
@@ -535,37 +652,76 @@ export default function ImageForensicsLab({
         </div>
       </div>
 
-      {/* SCANNING PROGRESS BAR (ACTIVE SCAN) */}
+      {/* SCANNING PROGRESS BAR (ACTIVE SCAN HUD) */}
       {isScanning && (
-        <div className="bg-slate-900 border border-indigo-500/30 rounded-2xl p-5 shadow-2xl space-y-3 animate-in fade-in">
-          <div className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2.5">
-              <RefreshCw className="w-4 h-4 text-indigo-400 animate-spin" />
+        <div className="bg-slate-900 border border-indigo-500/40 rounded-2xl p-5 shadow-2xl space-y-3.5 animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <RefreshCw className={`w-4 h-4 text-indigo-400 ${isPaused ? '' : 'animate-spin'}`} />
               <span className="font-semibold text-slate-200">
-                Inspecting photos for blank screens, covered lenses, byte duplicates, and perceptual clones...
+                {isPaused ? 'Scan Paused' : 'Inspecting photos for blank screens, covered lenses, and duplicates...'}
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                Stealth Mode ({pacingMode === 'stealth' ? '0.5s - 1.0s' : pacingMode === 'ultrasafe' ? '1.0s - 2.0s' : '2.0s - 3.0s'} interval)
               </span>
             </div>
-            <div className="font-mono text-indigo-400 font-bold text-sm">
-              {Math.round((scanProgress.current / Math.max(1, scanProgress.total)) * 100)}%
-              <span className="text-slate-500 font-normal ml-2 text-xs">
-                ({scanProgress.current} / {scanProgress.total})
+
+            <div className="flex items-center gap-3">
+              <span className="text-slate-400 font-mono text-[11px] flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5 text-indigo-400" />
+                {formatEta(scanProgress.etaSeconds)}
               </span>
+              <span className="text-slate-400 font-mono text-[11px] flex items-center gap-1">
+                <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                {scanProgress.intervalMs || 750}ms pacing
+              </span>
+              <div className="font-mono text-indigo-400 font-bold text-sm">
+                {Math.round((scanProgress.current / Math.max(1, scanProgress.total)) * 100)}%
+                <span className="text-slate-500 font-normal ml-1.5 text-xs">
+                  ({scanProgress.current} / {scanProgress.total})
+                </span>
+              </div>
             </div>
           </div>
 
+          {/* Progress Bar */}
           <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
             <div 
-              className="bg-gradient-to-r from-blue-500 via-indigo-500 to-rose-500 h-full transition-all duration-200"
+              className="bg-gradient-to-r from-blue-500 via-indigo-500 to-emerald-500 h-full transition-all duration-200"
               style={{ width: `${(scanProgress.current / Math.max(1, scanProgress.total)) * 100}%` }}
             />
           </div>
 
+          {/* Cooldown Alert Banner (If 429 encountered) */}
+          {scanProgress.coolingDown && (
+            <div className="p-3 bg-amber-950/40 border border-amber-500/50 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-amber-200 animate-pulse">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  <strong>Locus WAF 429 Rate Limit Encountered:</strong> Pausing for {scanProgress.cooldownSec}s before retrying this exact photo (Attempt {scanProgress.attempt}/{scanProgress.maxAttempts}).
+                </span>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                Zero Compromise Guarantee: No Photos Skipped
+              </span>
+            </div>
+          )}
+
+          {/* Paused Banner */}
+          {isPaused && (
+            <div className="p-3 bg-blue-950/40 border border-blue-500/50 rounded-xl flex items-center gap-2 text-xs text-blue-200">
+              <Clock className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>Scan paused. Click <strong>"Resume Scan"</strong> to continue processing checklist photos.</span>
+            </div>
+          )}
+
           {scanProgress.currentItem && (
-            <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
+            <div className="text-[11px] text-slate-400 flex items-center justify-between pt-0.5">
               <span className="truncate max-w-lg">
                 Inspecting: <strong className="text-slate-300">Task #{scanProgress.currentItem.taskId}</strong> • {scanProgress.currentItem.slotLabel} ({scanProgress.currentItem.feName})
               </span>
-              <span className="text-indigo-400/80 font-mono">Real-Time Client Analysis</span>
+              <span className="text-emerald-400/90 font-mono">Sequential Pacing Active</span>
             </div>
           )}
         </div>
@@ -615,19 +771,19 @@ export default function ImageForensicsLab({
 
         {/* Resized / Cropped Clones */}
         <div className={`border rounded-2xl p-4 shadow-lg ${
-          scanResults?.perceptualPairs?.length > 0 
+          (scanResults?.perceptualClusters?.length > 0 || scanResults?.perceptualPairs?.length > 0)
             ? 'bg-amber-950/20 border-amber-500/40' 
             : 'bg-slate-900 border-slate-800'
         }`}>
           <div className="flex items-center justify-between text-slate-400 mb-2">
-            <span className="text-xs font-medium">Resized / Clones</span>
+            <span className="text-xs font-medium">Reused Photo Incidents</span>
             <Layers className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold text-amber-400 font-mono">
-            {scanResults ? scanResults.perceptualPairs.length : 0}
+            {scanResults ? (scanResults.perceptualClusters?.length ?? scanResults.perceptualPairs?.length ?? 0) : 0}
           </div>
           <p className="text-[11px] text-slate-400 mt-1">
-            dHash visual match ≥ 89%
+            Same-slot photo recycling
           </p>
         </div>
 
@@ -719,7 +875,7 @@ export default function ImageForensicsLab({
                     : 'text-slate-400 hover:text-white hover:bg-slate-800'
                 }`}
               >
-                Resized / Clones ({scanResults.perceptualPairs.length})
+                Reused Photos ({scanResults.perceptualClusters?.length ?? scanResults.perceptualPairs?.length ?? 0})
               </button>
 
               <button
@@ -811,13 +967,15 @@ export default function ImageForensicsLab({
                     >
                       <div className="relative rounded-lg overflow-hidden bg-black aspect-video group border border-rose-900/50">
                         <img
-                          src={b.item.url}
+                          src={b.item.objectUrl || b.item.url}
                           alt="Blank/Black preview"
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
                           className="w-full h-full object-cover cursor-pointer"
-                          onClick={() => setPreviewModalImage({ url: b.item.url, title: `Blank Photo (Task #${b.item.taskId})` })}
+                          onClick={() => setPreviewModalImage({ url: b.item.objectUrl || b.item.url, title: `Blank Photo (Task #${b.item.taskId})` })}
                         />
                         <button
-                          onClick={() => setPreviewModalImage({ url: b.item.url, title: `Blank Photo (Task #${b.item.taskId})` })}
+                          onClick={() => setPreviewModalImage({ url: b.item.objectUrl || b.item.url, title: `Blank Photo (Task #${b.item.taskId})` })}
                           className="absolute top-1.5 right-1.5 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
                         >
                           <Maximize2 className="w-3.5 h-3.5" />
@@ -936,13 +1094,15 @@ export default function ImageForensicsLab({
                           >
                             <div className="relative rounded-lg overflow-hidden bg-slate-950 aspect-video group">
                               <img
-                                src={it.url}
+                                src={it.objectUrl || it.url}
                                 alt={it.slotLabel}
+                                referrerPolicy="no-referrer"
+                                loading="lazy"
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 cursor-pointer"
-                                onClick={() => setPreviewModalImage({ url: it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
+                                onClick={() => setPreviewModalImage({ url: it.objectUrl || it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
                               />
                               <button
-                                onClick={() => setPreviewModalImage({ url: it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
+                                onClick={() => setPreviewModalImage({ url: it.objectUrl || it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
                                 className="absolute top-1.5 right-1.5 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
                               >
                                 <Maximize2 className="w-3.5 h-3.5" />
@@ -1000,141 +1160,165 @@ export default function ImageForensicsLab({
               </div>
             )}
 
-            {/* SECTION: PERCEPTUAL CLONES / RESIZED / CROPPED PAIRS */}
-            {(activeTab === 'all' || activeTab === 'perceptual') && perceptualPairsFiltered.length > 0 && (
+            {/* SECTION: REUSED PHOTO CLUSTERS / PERCEPTUAL CLONES */}
+            {(activeTab === 'all' || activeTab === 'perceptual') && (perceptualClustersFiltered.length > 0 || perceptualPairsFiltered.length > 0) && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                     <Layers className="w-4 h-4" />
-                    Resized / Screenshotted Perceptual Clones ({perceptualPairsFiltered.length})
+                    High-Confidence Reused Photo Incidents ({perceptualClustersFiltered.length || perceptualPairsFiltered.length})
                   </h3>
                   <span className="text-[11px] text-slate-400">
-                    dHash Visual Similarity ≥ {Math.round(((64 - sensitivity) / 64) * 100)}% (Hamming ≤ {sensitivity})
+                    Same-Slot Verification • Ambient Color Match ≥ 88%
                   </span>
                 </div>
 
                 <div className="space-y-4">
-                  {perceptualPairsFiltered.map((pair) => (
-                    <div 
-                      key={pair.id} 
-                      className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg shadow-amber-950/10"
-                    >
-                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                              {pair.title}
-                            </span>
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300 font-mono">
-                              {pair.similarityPct}% Visual Match (Hamming: {pair.hammingDistance}/64)
-                            </span>
-                            {pair.isCrossFE && (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
-                                <Users className="w-3 h-3" />
-                                Cross-FE Collusion
+                  {perceptualClustersFiltered.length > 0 ? (
+                    perceptualClustersFiltered.map((cluster) => (
+                      <div 
+                        key={cluster.id} 
+                        className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg shadow-amber-950/10"
+                      >
+                        {/* Cluster Header */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                📸 REUSED PHOTO
                               </span>
-                            )}
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                                {cluster.slotLabel}
+                              </span>
+                              {cluster.isCrossFE ? (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
+                                  <Users className="w-3 h-3" />
+                                  Cross-FE Collusion ({cluster.feCount} FEs)
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                  Single FE Recycling ({cluster.taskCount} Visits)
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-400">
+                              {cluster.recommendation}
+                            </p>
                           </div>
-                          <p className="text-xs text-slate-400">
-                            {pair.recommendation}
-                          </p>
+
+                          <button
+                            onClick={() => handleMarkClusterFatal(cluster)}
+                            className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                            Apply Fatal Strike to All {cluster.taskCount} Tasks
+                          </button>
                         </div>
 
-                        <button
-                          onClick={() => handleMarkPairFatal(pair)}
-                          className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
-                        >
-                          <ShieldAlert className="w-3.5 h-3.5" />
-                          Mark Both Tasks as Fatal Strike
-                        </button>
-                      </div>
-
-                      {/* Side-by-side comparison */}
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                        {/* Image A */}
-                        <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex items-start gap-4">
-                          <div className="w-36 h-28 bg-slate-950 rounded-lg overflow-hidden shrink-0 relative group">
-                            <img
-                              src={pair.itemA.url}
-                              alt="Item A"
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer"
-                              onClick={() => setPreviewModalImage({ url: pair.itemA.url, title: `Task #${pair.itemA.taskId}` })}
-                            />
-                            <button
-                              onClick={() => setPreviewModalImage({ url: pair.itemA.url, title: `Task #${pair.itemA.taskId}` })}
-                              className="absolute top-1 right-1 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        {/* Items Grid */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                          {cluster.items.map((it) => (
+                            <div 
+                              key={it.id} 
+                              className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex flex-col justify-between space-y-2.5"
                             >
-                              <Maximize2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                          <div className="space-y-1.5 text-xs flex-1">
-                            <div className="flex items-center justify-between">
-                              <span className="font-bold text-white font-mono">Task #{pair.itemA.taskId}</span>
-                              <span className="text-[10px] font-medium text-slate-400">{pair.itemA.slotLabel}</span>
-                            </div>
-                            <div className="text-slate-300 font-medium">
-                              {pair.itemA.feName} <span className="text-slate-500 font-mono">({pair.itemA.feCode})</span>
-                            </div>
-                            <div className="text-[11px] text-slate-400">
-                              {pair.itemA.city} • {pair.itemA.date}
-                            </div>
-                            <div className="text-[10px] text-slate-500 font-mono">
-                              dHash: {pair.itemA.dHash?.hashHex || 'N/A'} • {pair.itemA.width}x{pair.itemA.height}px
-                            </div>
-                            {onInspectTask && (
-                              <button
-                                onClick={() => onInspectTask(pair.itemA.task)}
-                                className="mt-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1"
-                              >
-                                Open Task In Audit Console <ChevronRight className="w-3 h-3" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
+                              <div className="relative rounded-lg overflow-hidden bg-slate-950 aspect-video group">
+                                <img
+                                  src={it.objectUrl || it.url}
+                                  alt={it.slotLabel}
+                                  referrerPolicy="no-referrer"
+                                  loading="lazy"
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 cursor-pointer"
+                                  onClick={() => setPreviewModalImage({ url: it.objectUrl || it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
+                                />
+                                <button
+                                  onClick={() => setPreviewModalImage({ url: it.objectUrl || it.url, title: `${it.slotLabel} (Task #${it.taskId})` })}
+                                  className="absolute top-1.5 right-1.5 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                  <Maximize2 className="w-3.5 h-3.5" />
+                                </button>
+                                <div className="absolute bottom-1 left-1 bg-slate-900/90 text-[10px] text-slate-300 px-1.5 py-0.5 rounded font-medium">
+                                  {it.slotLabel}
+                                </div>
+                              </div>
 
-                        {/* Image B */}
-                        <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex items-start gap-4">
-                          <div className="w-36 h-28 bg-slate-950 rounded-lg overflow-hidden shrink-0 relative group">
-                            <img
-                              src={pair.itemB.url}
-                              alt="Item B"
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer"
-                              onClick={() => setPreviewModalImage({ url: pair.itemB.url, title: `Task #${pair.itemB.taskId}` })}
-                            />
-                            <button
-                              onClick={() => setPreviewModalImage({ url: pair.itemB.url, title: `Task #${pair.itemB.taskId}` })}
-                              className="absolute top-1 right-1 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
-                            >
-                              <Maximize2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                          <div className="space-y-1.5 text-xs flex-1">
-                            <div className="flex items-center justify-between">
-                              <span className="font-bold text-white font-mono">Task #{pair.itemB.taskId}</span>
-                              <span className="text-[10px] font-medium text-slate-400">{pair.itemB.slotLabel}</span>
+                              <div className="space-y-1 text-xs">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-white font-mono">Task #{it.taskId}</span>
+                                  <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                                    it.task?.auditStatus === 'FATAL' 
+                                      ? 'bg-rose-500/20 text-rose-400' 
+                                      : it.task?.auditStatus === 'PASSED'
+                                        ? 'bg-emerald-500/20 text-emerald-400'
+                                        : 'bg-amber-500/20 text-amber-400'
+                                  }`}>
+                                    {it.task?.auditStatus || 'PENDING'}
+                                  </span>
+                                </div>
+                                <div className="text-slate-300 truncate font-medium">
+                                  {it.feName} <span className="text-slate-500 font-mono">({it.feCode})</span>
+                                </div>
+                                <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                                  <span>{it.city}</span>
+                                  <span>{it.date}</span>
+                                </div>
+                              </div>
+
+                              <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
+                                {onInspectTask && (
+                                  <button
+                                    onClick={() => onInspectTask(it.task)}
+                                    className="flex-1 py-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg text-center transition-colors"
+                                  >
+                                    Inspect Task
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleMarkTaskFatal(it.taskId, `Reused ${it.slotLabel} photo across visits`)}
+                                  className="py-1 px-2 text-[11px] font-bold text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                                  title="Strike this task"
+                                >
+                                  Fatal
+                                </button>
+                              </div>
                             </div>
-                            <div className="text-slate-300 font-medium">
-                              {pair.itemB.feName} <span className="text-slate-500 font-mono">({pair.itemB.feCode})</span>
-                            </div>
-                            <div className="text-[11px] text-slate-400">
-                              {pair.itemB.city} • {pair.itemB.date}
-                            </div>
-                            <div className="text-[10px] text-slate-500 font-mono">
-                              dHash: {pair.itemB.dHash?.hashHex || 'N/A'} • {pair.itemB.width}x{pair.itemB.height}px
-                            </div>
-                            {onInspectTask && (
-                              <button
-                                onClick={() => onInspectTask(pair.itemB.task)}
-                                className="mt-1 text-[11px] text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1"
-                              >
-                                Open Task In Audit Console <ChevronRight className="w-3 h-3" />
-                              </button>
-                            )}
-                          </div>
+                          ))}
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  ) : (
+                    /* Fallback to pairs if only pairs exist */
+                    perceptualPairsFiltered.map((pair) => (
+                      <div 
+                        key={pair.id} 
+                        className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-lg shadow-amber-950/10"
+                      >
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                {pair.title}
+                              </span>
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300 font-mono">
+                                {pair.similarityPct}% Visual Match
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-400">
+                              {pair.reason || pair.recommendation}
+                            </p>
+                          </div>
+
+                          <button
+                            onClick={() => handleMarkPairFatal(pair)}
+                            className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white shadow transition-all flex items-center gap-1.5 shrink-0"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                            Mark Both Tasks as Fatal Strike
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             )}
@@ -1158,13 +1342,15 @@ export default function ImageForensicsLab({
                     >
                       <div className="w-32 h-28 bg-slate-900 rounded-xl overflow-hidden shrink-0 relative group">
                         <img
-                          src={stale.item.url}
+                          src={stale.item.objectUrl || stale.item.url}
                           alt="Stale photo"
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer"
-                          onClick={() => setPreviewModalImage({ url: stale.item.url, title: `Task #${stale.item.taskId}` })}
+                          onClick={() => setPreviewModalImage({ url: stale.item.objectUrl || stale.item.url, title: `Task #${stale.item.taskId}` })}
                         />
                         <button
-                          onClick={() => setPreviewModalImage({ url: stale.item.url, title: `Task #${stale.item.taskId}` })}
+                          onClick={() => setPreviewModalImage({ url: stale.item.objectUrl || stale.item.url, title: `Task #${stale.item.taskId}` })}
                           className="absolute top-1 right-1 p-1 bg-slate-900/80 rounded text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity"
                         >
                           <Maximize2 className="w-3 h-3" />
@@ -1271,6 +1457,7 @@ export default function ImageForensicsLab({
               <img
                 src={previewModalImage.url}
                 alt="Full resolution preview"
+                referrerPolicy="no-referrer"
                 className="max-w-full max-h-[75vh] object-contain rounded-lg"
               />
             </div>

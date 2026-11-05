@@ -13,7 +13,8 @@ import {
   Check,
   XCircle,
   HelpCircle,
-  UserCheck
+  UserCheck,
+  ShieldAlert
 } from 'lucide-react';
 
 export default function TaskTable({ 
@@ -295,14 +296,13 @@ export default function TaskTable({
                       </button>
 
                       {isFatal ? (
-                        <button
-                          onClick={() => handleEmail(task)}
-                          className="px-2 py-1 rounded-md text-xs font-semibold bg-red-600/30 hover:bg-red-600/50 text-red-200 border border-red-500/40 flex items-center gap-1 transition-colors cursor-pointer"
-                          title="Open or resend Fatal warning notice email"
+                        <span
+                          className="px-2 py-1 rounded-md text-xs font-semibold bg-red-500/10 text-red-400 border border-red-500/20 flex items-center gap-1 select-none"
+                          title="Fatal strike recorded. Email notices dispatched strictly via Mail Dispatch."
                         >
-                          <Mail className="w-3 h-3 text-red-400" />
-                          Mail
-                        </button>
+                          <ShieldAlert className="w-3 h-3 text-red-400" />
+                          Fatal
+                        </span>
                       ) : (
                         <>
                           <button

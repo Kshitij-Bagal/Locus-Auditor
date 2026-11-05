@@ -500,6 +500,28 @@ export function hasAccess(profile, pageName) {
     return true;
   }
 
+  // Temporary Auditor Dynamic Access Control for 'audits' Console
+  // Revokes access immediately once quota is completed, or grants access while active
+  if (targetId === 'audits') {
+    try {
+      const savedTemp = localStorage.getItem('locus_temp_auditors_registry_v1');
+      if (savedTemp) {
+        const tempReg = JSON.parse(savedTemp);
+        const uId = profile.id ? String(profile.id).toLowerCase() : '';
+        const uEmail = profile.email ? String(profile.email).toLowerCase() : '';
+        const entry = tempReg[uId] || tempReg[uEmail];
+        if (entry && entry.isTemporary) {
+          if (entry.accessStatus === 'QUOTA_COMPLETED' || entry.accessStatus === 'REVOKED') {
+            return false; // Dynamic revocation: quota completed
+          }
+          if (entry.accessStatus === 'ACTIVE') {
+            return true; // Active temporary surge auditor
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
   // 1. Check Live Role Presets for primary role and multi-roles
   const livePresets = getLiveRolePresets();
   const rolesToCheck = parseRoles(profile.roles || [profile.role]);

@@ -10,8 +10,28 @@ import {
   User, 
   Camera, 
   ExternalLink,
-  UserCheck
+  UserCheck,
+  ShieldAlert
 } from 'lucide-react';
+
+// Fast normalize Locus URLs to CDN to eliminate 302 redirects
+function normalizeImageUrl(rawUrl, taskId) {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  let url = rawUrl.trim();
+  if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('data:') && !url.startsWith('blob:')) {
+    const stripped = url.replace(/^\/+/, '');
+    if (stripped.startsWith('v1/client/')) {
+      url = `https://assets.locus-api.com/${stripped}`;
+    } else if (taskId) {
+      url = `https://assets.locus-api.com/v1/client/lenskart-dlc/task/${taskId}/file/${stripped}`;
+    }
+  }
+  url = url.replace(/^http:\/\/locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+  url = url.replace(/^https:\/\/locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+  url = url.replace(/^http:\/\/api\.locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+  url = url.replace(/^https:\/\/api\.locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
+  return url;
+}
 
 export default function TaskCardGrid({ 
   tasks, 
@@ -148,8 +168,11 @@ export default function TaskCardGrid({
                   >
                     {task.images?.selfie ? (
                       <img 
-                        src={task.images.selfie} 
+                        src={normalizeImageUrl(task.images.selfie, task.id || task.taskId)} 
                         alt="Selfie" 
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover transition-transform group-hover/img:scale-110"
                         onError={(e) => { e.target.style.display = 'none'; }}
                       />
@@ -168,8 +191,11 @@ export default function TaskCardGrid({
                   >
                     {task.images?.torches ? (
                       <img 
-                        src={task.images.torches} 
+                        src={normalizeImageUrl(task.images.torches, task.id || task.taskId)} 
                         alt="Torches" 
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover transition-transform group-hover/img:scale-110"
                         onError={(e) => { e.target.style.display = 'none'; }}
                       />
@@ -188,8 +214,11 @@ export default function TaskCardGrid({
                   >
                     {task.images?.visionChart ? (
                       <img 
-                        src={task.images.visionChart} 
+                        src={normalizeImageUrl(task.images.visionChart, task.id || task.taskId)} 
                         alt="Vision Chart" 
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover transition-transform group-hover/img:scale-110"
                         onError={(e) => { e.target.style.display = 'none'; }}
                       />
@@ -208,8 +237,11 @@ export default function TaskCardGrid({
                   >
                     {task.images?.toolkit ? (
                       <img 
-                        src={task.images.toolkit} 
+                        src={normalizeImageUrl(task.images.toolkit, task.id || task.taskId)} 
                         alt="Toolkit" 
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover transition-transform group-hover/img:scale-110"
                         onError={(e) => { e.target.style.display = 'none'; }}
                       />
@@ -228,8 +260,11 @@ export default function TaskCardGrid({
                   >
                     {task.images?.frameDisplay ? (
                       <img 
-                        src={task.images.frameDisplay} 
+                        src={normalizeImageUrl(task.images.frameDisplay, task.id || task.taskId)} 
                         alt="Frame Display" 
+                        loading="lazy"
+                        decoding="async"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover transition-transform group-hover/img:scale-110"
                         onError={(e) => { e.target.style.display = 'none'; }}
                       />
@@ -294,14 +329,13 @@ export default function TaskCardGrid({
               </button>
 
               {isFatal ? (
-                <button
-                  onClick={() => handleEmail(task)}
-                  className="py-1.5 px-3 rounded-lg text-xs font-semibold bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 flex items-center gap-1 transition-colors cursor-pointer"
-                  title="View or send warning email"
+                <span
+                  className="py-1.5 px-3 rounded-lg text-xs font-semibold bg-red-500/10 text-red-400 border border-red-500/20 flex items-center gap-1 select-none"
+                  title="Fatal strike recorded. Email notices dispatched strictly via Mail Dispatch."
                 >
-                  <Mail className="w-3.5 h-3.5 text-red-400" />
-                  Notice
-                </button>
+                  <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+                  Fatal
+                </span>
               ) : (
                 <div className="flex items-center space-x-1">
                   <button

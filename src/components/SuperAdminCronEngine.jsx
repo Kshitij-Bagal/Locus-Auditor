@@ -29,6 +29,8 @@ import {
   getTaskBatchDateYMD,
   aggregateFeFatalDigests, 
   buildFeFatalWarningEmailHtml,
+  aggregateTeamFatalSummaries,
+  buildAmRmConsolidatedTeamDigestHtml,
   aggregateGmBhExecutiveSummary,
   buildGmBhExecutiveSummaryHtml
 } from '../utils/dailyDigestHelper.js';
@@ -83,6 +85,15 @@ export default function SuperAdminCronEngine({
   const [executiveDispatchResult, setExecutiveDispatchResult] = useState(null);
   const [dispatchingFeKey, setDispatchingFeKey] = useState(null);
 
+  // Top Tabs: 'team' (AM & RM Consolidated) | 'fes' (Individual FE Notices) | 'leadership' (GM, BH & SuperAdmin)
+  const [dispatchTab, setDispatchTab] = useState('team');
+  const [managerRoleFilter, setManagerRoleFilter] = useState('ALL'); // 'ALL' | 'AM' | 'RM'
+  const [previewTeamDigest, setPreviewTeamDigest] = useState(null);
+  const [isDispatchingTeam, setIsDispatchingTeam] = useState(false);
+  const [teamDispatchResult, setTeamDispatchResult] = useState(null);
+  const [dispatchingManagerEmail, setDispatchingManagerEmail] = useState(null);
+  const [expandedManager, setExpandedManager] = useState(null);
+
   // Compute FE Fatal aggregation for selected date
   const portalBaseUrl = window.location.origin;
   const feDigests = useMemo(() => {
@@ -94,6 +105,30 @@ export default function SuperAdminCronEngine({
       portalBaseUrl
     });
   }, [tasks, users, targetDate, portalBaseUrl]);
+
+  // Compute Consolidated Team Summaries for AMs & RMs
+  const teamSummaries = useMemo(() => {
+    return aggregateTeamFatalSummaries({
+      feDigests,
+      targetDate
+    });
+  }, [feDigests, targetDate]);
+
+  // Filtered managers for Team tab
+  const filteredManagers = useMemo(() => {
+    let list = teamSummaries.allManagers;
+    if (managerRoleFilter === 'AM') list = teamSummaries.ams;
+    else if (managerRoleFilter === 'RM') list = teamSummaries.rms;
+
+    if (!searchQuery.trim()) return list;
+    const q = searchQuery.toLowerCase().trim();
+    return list.filter(m =>
+      m.managerName.toLowerCase().includes(q) ||
+      m.managerEmail.toLowerCase().includes(q) ||
+      m.hub.toLowerCase().includes(q) ||
+      m.fes.some(fe => fe.feName.toLowerCase().includes(q) || fe.feCode.toLowerCase().includes(q))
+    );
+  }, [teamSummaries, managerRoleFilter, searchQuery]);
 
   // Compute Executive Summary for GM, BH & SuperAdmin
   const executiveSummary = useMemo(() => {
@@ -236,10 +271,10 @@ export default function SuperAdminCronEngine({
     }
   };
 
-  // Handle Single FE Dispatch (Strictly targets ONLY 1 FE)
+  // Handle Single FE Dispatch (Strictly targets ONLY 1 FE directly)
   const handleSingleFeDispatch = async (fe) => {
     const feTargetIdentifier = fe.feCode && fe.feCode !== 'N/A' ? fe.feCode : (fe.feEmail || fe.feKey);
-    const confirmMsg = `Send official compliance warning notice ONLY to:\n\nField Executive: ${fe.feName} (${fe.feCode || 'Code N/A'})\nEmail: ${fe.feEmail}\nCC: ${fe.amEmail} (AM), ${fe.rmEmail} (RM)\nIncidents: ${fe.fatalCount} fatal strike(s)\n\nBatch for other FEs will NOT be sent. Proceed?`;
+    const confirmMsg = `Send official compliance warning notice directly to:\n\nField Executive: ${fe.feName} (${fe.feCode || 'Code N/A'})\nEmail: ${fe.feEmail}\nIncidents: ${fe.fatalCount} fatal strike(s)\n\nNote: AM and RM are not CC'd to avoid flooding their inboxes; they receive a consolidated Team Digest.\n\nProceed?`;
 
     if (!window.confirm(confirmMsg)) {
       return;
@@ -257,7 +292,7 @@ export default function SuperAdminCronEngine({
       });
 
       if (result.success && result.sentCount > 0) {
-        alert(`Success! Warning notice email dispatched ONLY to ${fe.feName} (${fe.feEmail}). CC delivered to direct AM & RM.`);
+        alert(`Success! Warning notice email dispatched directly to ${fe.feName} (${fe.feEmail}).`);
       } else if (result.skippedCount > 0) {
         alert(`Notice for ${fe.feName} was skipped: ${result.results?.[0]?.reason || 'Already dispatched today.'}`);
       } else {
@@ -268,6 +303,61 @@ export default function SuperAdminCronEngine({
       alert(`Single FE Dispatch Error: ${err.message}`);
     } finally {
       setDispatchingFeKey(null);
+    }
+  };
+
+  // Handle Single Team Digest Dispatch (for 1 AM or RM)
+  const handleSingleTeamDigestDispatch = async (mgr, isDryRun = false) => {
+    const actionName = isDryRun ? 'Dry-Run Simulation' : 'Live Team Digest Dispatch';
+    if (!isDryRun && !window.confirm(`Trigger ${actionName} for:\n\n${mgr.roleTitle}: ${mgr.managerName}\nEmail: ${mgr.managerEmail}\nHub/Region: ${mgr.hub}\nCovering: ${mgr.fes.length} FEs with ${mgr.totalFatalStrikes} fatal strikes.\n\nProceed?`)) {
+      return;
+    }
+    setDispatchingManagerEmail(mgr.managerEmail);
+    try {
+      const res = await feFatalDigestApi.dispatchTeamDigest({
+        date: targetDate,
+        managerEmail: mgr.managerEmail,
+        role: mgr.role,
+        dryRun: isDryRun,
+        tasks,
+        users
+      });
+      alert(`Success! Team digest ${isDryRun ? 'simulation completed' : 'dispatched'} to ${mgr.roleTitle} ${mgr.managerName} (${mgr.managerEmail}).`);
+      await loadLogs();
+    } catch (err) {
+      alert(`Team Digest Error: ${err.message}`);
+    } finally {
+      setDispatchingManagerEmail(null);
+    }
+  };
+
+  // Handle Batch Team Digest Dispatch (for all AMs and RMs)
+  const handleBatchTeamDigestDispatch = async (isDryRun = false) => {
+    const targetGroup = managerRoleFilter === 'ALL' ? 'all AMs & RMs' : `${managerRoleFilter}s`;
+    const count = filteredManagers.length;
+    const actionName = isDryRun ? 'Dry-Run Simulation' : 'Live Batch Dispatch';
+
+    if (!isDryRun && !window.confirm(`Trigger ${actionName} of Consolidated Team Digests to ${count} ${targetGroup} for ${targetDate}?\n\nEach manager will receive 1 summarized email covering all FEs under their supervision who incurred fatal strikes today.`)) {
+      return;
+    }
+
+    setIsDispatchingTeam(true);
+    setTeamDispatchResult(null);
+
+    try {
+      const res = await feFatalDigestApi.dispatchTeamDigest({
+        date: targetDate,
+        role: managerRoleFilter === 'ALL' ? undefined : managerRoleFilter,
+        dryRun: isDryRun,
+        tasks,
+        users
+      });
+      setTeamDispatchResult(res);
+      await loadLogs();
+    } catch (err) {
+      alert(`Batch Team Dispatch Error: ${err.message}`);
+    } finally {
+      setIsDispatchingTeam(false);
     }
   };
 
@@ -448,340 +538,699 @@ export default function SuperAdminCronEngine({
         </div>
       </div>
 
-      {/* GENERAL EXECUTIVE SUMMARY FOR GM & BH (TRIAL EMAIL CRON DISPATCH) */}
-      <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 via-sky-950/30 to-slate-900 border border-sky-500/30 shadow-xl relative overflow-hidden">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 shadow-inner">
-              <Award className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-black text-white">
-                  General Summary Briefing (GM, BH &amp; SuperAdmin)
-                </span>
-                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
-                  <Sparkles className="w-3 h-3 text-amber-400" />
-                  Trial Mode: Leadership Only
-                </span>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                  <Zap className="w-3 h-3 text-emerald-400" />
-                  Brevo Gateway Ready
-                </span>
-              </div>
-              <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Aggregates national audit volumes, facility pass rates, SOP non-compliance Pareto, and active fatal strikes into an executive briefing. Today&apos;s trial cron run dispatches strictly to <strong className="text-white">General Managers (GM)</strong>, <strong className="text-white">Business Heads (BH)</strong>, and <strong className="text-sky-300">SuperAdmin</strong>.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto shrink-0">
-            <button
-              onClick={() => setShowExecutivePreviewModal(true)}
-              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <Eye className="w-3.5 h-3.5 text-sky-400" />
-              Preview Executive Email
-            </button>
-
-            <button
-              onClick={() => handleDispatchExecutiveSummary(true)}
-              disabled={isDispatchingExecutive}
-              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-            >
-              <Play className="w-3.5 h-3.5" />
-              Dry-Run Simulation
-            </button>
-
-            <button
-              onClick={() => handleDispatchExecutiveSummary(false)}
-              disabled={isDispatchingExecutive}
-              className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-sky-900/40 transition-all cursor-pointer disabled:opacity-50"
-            >
-              {isDispatchingExecutive ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <Send className="w-4 h-4" />
-              )}
-              Dispatch to GM, BH &amp; SuperAdmin (Trial)
-            </button>
-          </div>
-        </div>
-
-        {/* Target leadership recipients list */}
-        <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="font-semibold text-slate-300">Trial Leadership Recipients:</span>
-            {leadershipRecipients.map(r => (
-              <span key={r.email} className="px-2 py-0.5 rounded bg-slate-800/80 text-sky-300 font-mono text-[11px] border border-slate-700/60 shadow-sm">
-                {r.name} ({r.role}): {r.email}
-              </span>
-            ))}
-          </div>
-
-          <div className="text-[11px] text-slate-400">
-            Macro Snapshot: <strong className="text-white">{executiveSummary.totalAudited}</strong> Audited &bull; <strong className="text-emerald-400">{executiveSummary.passRate}%</strong> Pass &bull; <strong className="text-red-400">{executiveSummary.totalFatal}</strong> Fatals
-          </div>
-        </div>
-
-        {/* Executive Dispatch Result Alert */}
-        {executiveDispatchResult && (
-          <div className={`mt-3 p-3.5 rounded-xl border text-xs animate-fade-in ${
-            executiveDispatchResult.error 
-              ? 'bg-red-500/10 border-red-500/30 text-red-200' 
-              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+      {/* 3-TAB MAIN NAVIGATION */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3">
+        <button
+          onClick={() => setDispatchTab('team')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            dispatchTab === 'team'
+              ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/40'
+              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'
+          }`}
+        >
+          <Building2 className="w-4 h-4" />
+          Team Mail (AM &amp; RM Consolidated)
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+            dispatchTab === 'team' ? 'bg-purple-800 text-purple-100' : 'bg-slate-800 text-slate-400'
           }`}>
-            <div className="flex items-center justify-between font-bold text-sm">
-              <span className="flex items-center gap-2">
-                {executiveDispatchResult.error ? (
-                  <XCircle className="w-4 h-4 text-red-400" />
-                ) : (
-                  <CheckCircle className="w-4 h-4 text-emerald-400" />
-                )}
-                {executiveDispatchResult.error ? 'Executive Dispatch Failed' : `Executive Summary Dispatched (${executiveDispatchResult.mode})`}
+            {teamSummaries.allManagers.length} Managers
+          </span>
+        </button>
+
+        <button
+          onClick={() => setDispatchTab('fes')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            dispatchTab === 'fes'
+              ? 'bg-red-600 text-white shadow-lg shadow-red-900/40'
+              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'
+          }`}
+        >
+          <Mail className="w-4 h-4" />
+          FEs Mail (Individual Notices)
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+            dispatchTab === 'fes' ? 'bg-red-800 text-red-100' : 'bg-slate-800 text-slate-400'
+          }`}>
+            {feDigests.length} FEs
+          </span>
+        </button>
+
+        <button
+          onClick={() => setDispatchTab('leadership')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            dispatchTab === 'leadership'
+              ? 'bg-sky-600 text-white shadow-lg shadow-sky-900/40'
+              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800'
+          }`}
+        >
+          <Award className="w-4 h-4" />
+          Leadership Mail (GM, BH &amp; SuperAdmin)
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+            dispatchTab === 'leadership' ? 'bg-sky-800 text-sky-100' : 'bg-slate-800 text-slate-400'
+          }`}>
+            Executive Briefing
+          </span>
+        </button>
+      </div>
+
+      {/* ==================================================================== */}
+      {/* TAB 1: TEAM MAIL (AM & RM CONSOLIDATED DIGEST) */}
+      {/* ==================================================================== */}
+      {dispatchTab === 'team' && (
+        <div className="space-y-4 animate-fade-in">
+          {/* Information & Role Filter Banner */}
+          <div className="p-4 rounded-xl bg-purple-950/20 border border-purple-500/20 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-purple-200">
+              <Info className="w-4 h-4 text-purple-400 shrink-0" />
+              <span>
+                AMs &amp; RMs receive <strong className="text-white">strictly 1 consolidated digest email</strong> covering all FEs under their management. They are removed from individual FE emails to prevent inbox flooding.
               </span>
-              <button 
-                onClick={() => setExecutiveDispatchResult(null)} 
-                className="text-xs text-slate-400 hover:text-white"
+            </div>
+
+            {/* Sub-Filter: ALL / AM / RM */}
+            <div className="flex items-center gap-1.5 self-end md:self-auto shrink-0">
+              <span className="text-[11px] text-slate-400 font-semibold mr-1">Filter Role:</span>
+              <button
+                onClick={() => setManagerRoleFilter('ALL')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  managerRoleFilter === 'ALL'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
               >
-                Dismiss
+                All ({teamSummaries.allManagers.length})
+              </button>
+              <button
+                onClick={() => setManagerRoleFilter('AM')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  managerRoleFilter === 'AM'
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Area Managers ({teamSummaries.ams.length})
+              </button>
+              <button
+                onClick={() => setManagerRoleFilter('RM')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  managerRoleFilter === 'RM'
+                    ? 'bg-sky-600 text-white'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                Regional Managers ({teamSummaries.rms.length})
               </button>
             </div>
-            {executiveDispatchResult.error ? (
-              <p className="mt-1 text-red-300">{executiveDispatchResult.error}</p>
+          </div>
+
+          {/* Action & Controls Toolbar */}
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="relative w-full sm:w-80">
+              <Filter className="w-3.5 h-3.5 absolute left-3 top-3 text-slate-500" />
+              <input
+                type="text"
+                placeholder="Search Manager, FE, Hub..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-end flex-wrap">
+              <button
+                onClick={() => handleBatchTeamDigestDispatch(true)}
+                disabled={isDispatchingTeam || filteredManagers.length === 0}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40"
+              >
+                <Play className="w-3.5 h-3.5 text-amber-400" />
+                Dry-Run Simulation
+              </button>
+
+              <button
+                onClick={() => handleBatchTeamDigestDispatch(false)}
+                disabled={isDispatchingTeam || filteredManagers.length === 0}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-purple-900/30 transition-all cursor-pointer disabled:opacity-40"
+              >
+                {isDispatchingTeam ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                Dispatch All Team Digests ({filteredManagers.length} Managers)
+              </button>
+            </div>
+          </div>
+
+          {/* Team Dispatch Result Alert */}
+          {teamDispatchResult && (
+            <div className={`p-4 rounded-xl border text-xs animate-fade-in ${
+              teamDispatchResult.failedCount > 0 
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-200' 
+                : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+            }`}>
+              <div className="flex items-center justify-between font-bold text-sm mb-1">
+                <span className="flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400" />
+                  Team Digest Execution Complete ({teamDispatchResult.mode})
+                </span>
+                <button 
+                  onClick={() => setTeamDispatchResult(null)} 
+                  className="text-xs text-slate-400 hover:text-white"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <div className="flex gap-4 mt-2 font-mono">
+                <span>Sent: <strong>{teamDispatchResult.sentCount}</strong></span>
+                <span>Failed: <strong>{teamDispatchResult.failedCount}</strong></span>
+                <span>Total Managers: <strong>{teamDispatchResult.totalManagers}</strong></span>
+              </div>
+            </div>
+          )}
+
+          {/* Queue of Managers */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-purple-400" />
+                <h3 className="text-sm font-bold text-white">
+                  Area &amp; Regional Managers Queue ({filteredManagers.length})
+                </h3>
+              </div>
+              <span className="text-xs text-slate-400">
+                1 Consolidated Digest Per Manager
+              </span>
+            </div>
+
+            {filteredManagers.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <CheckCircle className="w-12 h-12 text-emerald-500/50 mx-auto mb-3" />
+                <div className="text-base font-bold text-slate-200">No Managers with Flagged FEs for {targetDate}</div>
+                <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                  Zero FEs under {managerRoleFilter === 'ALL' ? 'any manager' : managerRoleFilter} incurred fatal strikes today. Zero team digests needed.
+                </p>
+              </div>
             ) : (
-              <div className="mt-1.5 flex flex-wrap gap-4 text-xs font-mono text-slate-300">
-                <span>Target: <strong>{executiveDispatchResult.targetAudience}</strong></span>
-                <span>Recipients: <strong>{executiveDispatchResult.recipients?.join(', ')}</strong></span>
-                <span>Provider: <strong>{executiveDispatchResult.provider?.toUpperCase()}</strong></span>
+              <div className="divide-y divide-slate-800/80">
+                {filteredManagers.map((mgr) => {
+                  const isExpanded = expandedManager === mgr.id;
+                  const isAM = mgr.role === 'AM';
+
+                  return (
+                    <div key={mgr.id} className="p-4 hover:bg-slate-800/30 transition-colors">
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        
+                        {/* Manager Information */}
+                        <div className="flex items-start gap-3">
+                          <div className={`w-10 h-10 rounded-xl font-black text-xs flex items-center justify-center shrink-0 border ${
+                            isAM 
+                              ? 'bg-purple-500/10 border-purple-500/30 text-purple-300' 
+                              : 'bg-sky-500/10 border-sky-500/30 text-sky-300'
+                          }`}>
+                            {mgr.role}
+                          </div>
+
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-white text-sm">{mgr.managerName}</span>
+                              <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded border ${
+                                isAM 
+                                  ? 'bg-purple-500/10 text-purple-300 border-purple-500/20' 
+                                  : 'bg-sky-500/10 text-sky-300 border-sky-500/20'
+                              }`}>
+                                {mgr.roleTitle}
+                              </span>
+                              <span className="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                                {mgr.hub}
+                              </span>
+                            </div>
+
+                            <div className="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-y-1 gap-x-3">
+                              <span>Email: <strong className="text-slate-200 font-mono">{mgr.managerEmail || 'Email unassigned'}</strong></span>
+                              <span>Flagged Team: <strong className="text-purple-300">{mgr.fes.length} FEs</strong></span>
+                              <span>Total Strikes: <strong className="text-red-400">{mgr.totalFatalStrikes}</strong></span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center gap-2 self-start lg:self-auto shrink-0">
+                          <button
+                            onClick={() => setPreviewTeamDigest(mgr)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1 border border-slate-700 transition-colors cursor-pointer"
+                            title="Preview consolidated team digest email"
+                          >
+                            <Eye className="w-3.5 h-3.5 text-purple-400" />
+                            Preview Digest
+                          </button>
+
+                          <button
+                            onClick={() => handleSingleTeamDigestDispatch(mgr, false)}
+                            disabled={dispatchingManagerEmail === mgr.managerEmail || isDispatchingTeam}
+                            className="px-3 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 text-xs font-semibold flex items-center gap-1 border border-purple-500/30 transition-colors cursor-pointer disabled:opacity-50"
+                            title={`Send consolidated digest to ${mgr.managerName}`}
+                          >
+                            {dispatchingManagerEmail === mgr.managerEmail ? (
+                              <>
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-400" />
+                                <span>Sending...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Send className="w-3.5 h-3.5" />
+                                <span>Dispatch Digest</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            onClick={() => setExpandedManager(isExpanded ? null : mgr.id)}
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Expanded FEs under this manager */}
+                      {isExpanded && (
+                        <div className="mt-4 pt-4 border-t border-slate-800/80 space-y-3 text-xs animate-fade-in">
+                          <div className="font-semibold text-slate-300 uppercase tracking-wider text-[11px] flex items-center justify-between">
+                            <span>FEs with Fatal Strikes under {mgr.managerName} ({mgr.fes.length}):</span>
+                            <span className="text-slate-400 font-mono">{mgr.totalFatalStrikes} total strikes</span>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {mgr.fes.map((fe, feIdx) => (
+                              <div key={feIdx} className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-slate-300">
+                                <div className="flex items-center justify-between font-bold text-white text-xs mb-1.5 border-b border-slate-800/80 pb-1.5">
+                                  <span className="flex items-center gap-1.5">
+                                    <span className="text-purple-400">#{feIdx + 1}</span> {fe.feName}
+                                    <span className="font-mono text-[10px] text-slate-400">({fe.feCode})</span>
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-black bg-red-500/10 text-red-400 border border-red-500/20">
+                                    {fe.fatalCount} Strike{fe.fatalCount > 1 ? 's' : ''}
+                                  </span>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  {fe.fatalTasks.map((ft, ftIdx) => (
+                                    <div key={ftIdx} className="bg-red-950/20 border border-red-500/15 p-2 rounded-lg">
+                                      <div className="flex items-center justify-between font-mono text-[11px] text-red-400">
+                                        <span>Task #{ft.taskId}</span>
+                                        <a
+                                          href={ft.portalUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-sky-400 hover:underline flex items-center gap-0.5 text-[10px]"
+                                        >
+                                          Inspect Photos <ExternalLink className="w-2.5 h-2.5" />
+                                        </a>
+                                      </div>
+                                      <ul className="list-disc pl-3 mt-1 text-[11px] text-red-300/90 space-y-0.5">
+                                        {ft.failedReasons.map((r, ri) => (
+                                          <li key={ri}>{r}</li>
+                                        ))}
+                                      </ul>
+                                      {ft.remarks && (
+                                        <div className="mt-1 text-[10px] italic text-amber-300/80 bg-amber-500/5 p-1 rounded">
+                                          &ldquo;{ft.remarks}&rdquo;
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
-          </div>
-        )}
-      </div>
-
-      {/* ACTION & CONTROLS TOOLBAR */}
-      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
-        
-        {/* Search */}
-        <div className="relative w-full sm:w-80">
-          <Filter className="w-3.5 h-3.5 absolute left-3 top-3 text-slate-500" />
-          <input
-            type="text"
-            placeholder="Search FE, Code, Hub or AM..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
-          />
-        </div>
-
-        {/* Actions & Redispatch toggle */}
-        <div className="flex items-center gap-3 w-full sm:w-auto justify-end flex-wrap">
-          <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={forceRedispatch}
-              onChange={(e) => setForceRedispatch(e.target.checked)}
-              className="rounded bg-slate-950 border-slate-700 text-red-500 focus:ring-0 cursor-pointer"
-            />
-            <span>Force Re-dispatch</span>
-          </label>
-
-          <button
-            onClick={() => handleTriggerDispatch(true)}
-            disabled={isDispatching || feDigests.length === 0}
-            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40"
-          >
-            <Play className="w-3.5 h-3.5 text-amber-400" />
-            Dry-Run Simulation
-          </button>
-
-          <button
-            onClick={() => handleTriggerDispatch(false)}
-            disabled={isDispatching || feDigests.length === 0}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-red-900/30 transition-all cursor-pointer disabled:opacity-40"
-          >
-            {isDispatching ? (
-              <RefreshCw className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-            Dispatch Fatal Warnings to FEs Now ({feDigests.length})
-          </button>
-        </div>
-      </div>
-
-      {/* DISPATCH RESULT ALERT (IF JUST EXECUTED) */}
-      {dispatchResult && (
-        <div className={`p-4 rounded-xl border text-xs animate-fade-in ${
-          dispatchResult.failedCount > 0 
-            ? 'bg-amber-500/10 border-amber-500/30 text-amber-200' 
-            : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
-        }`}>
-          <div className="flex items-center justify-between font-bold text-sm mb-1">
-            <span className="flex items-center gap-2">
-              <CheckCircle className="w-4 h-4 text-emerald-400" />
-              Execution Complete ({dispatchResult.mode})
-            </span>
-            <button 
-              onClick={() => setDispatchResult(null)} 
-              className="text-xs text-slate-400 hover:text-white"
-            >
-              Dismiss
-            </button>
-          </div>
-          <div className="flex gap-4 mt-2 font-mono">
-            <span>Sent: <strong>{dispatchResult.sentCount}</strong></span>
-            <span>Skipped: <strong>{dispatchResult.skippedCount}</strong></span>
-            <span>Failed: <strong>{dispatchResult.failedCount}</strong></span>
-            <span>Total FEs: <strong>{dispatchResult.totalFatalFEs}</strong></span>
           </div>
         </div>
       )}
 
-      {/* PENDING FATAL FEs QUEUE */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 text-red-400" />
-            <h3 className="text-sm font-bold text-white">
-              Today&apos;s Fatal Strike Recipients Queue ({filteredFeDigests.length})
-            </h3>
+      {/* ==================================================================== */}
+      {/* TAB 2: FEs MAIL (INDIVIDUAL NOTICES - DIRECT TO FE ONLY) */}
+      {/* ==================================================================== */}
+      {dispatchTab === 'fes' && (
+        <div className="space-y-4 animate-fade-in">
+          {/* Information Notice */}
+          <div className="p-4 rounded-xl bg-red-950/20 border border-red-500/20 flex items-center justify-between gap-3 text-xs text-red-200">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+              <span>
+                Each FE receives their direct fatal strike notice. <strong className="text-white">AM and RM are removed from CC</strong> to prevent flooding their inboxes; managers receive consolidated team digests via the Team Mail tab.
+              </span>
+            </div>
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20 shrink-0">
+              Direct to FE Only
+            </span>
           </div>
-          <span className="text-xs text-slate-400">
-            Strict Tri-Party: TO: FE &bull; CC: AM &bull; CC: RM
-          </span>
-        </div>
 
-        {filteredFeDigests.length === 0 ? (
-          <div className="p-12 text-center text-slate-400">
-            <CheckCircle className="w-12 h-12 text-emerald-500/50 mx-auto mb-3" />
-            <div className="text-base font-bold text-slate-200">No Fatal Strikes Found for {targetDate}</div>
-            <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-              All audited visits on this date met 100% compliance SOP standards, or no audits were marked Fatal yet. Zero emails will be sent tonight.
-            </p>
+          {/* Action & Controls Toolbar */}
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="relative w-full sm:w-80">
+              <Filter className="w-3.5 h-3.5 absolute left-3 top-3 text-slate-500" />
+              <input
+                type="text"
+                placeholder="Search FE, Code, Hub or AM..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-3 w-full sm:w-auto justify-end flex-wrap">
+              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={forceRedispatch}
+                  onChange={(e) => setForceRedispatch(e.target.checked)}
+                  className="rounded bg-slate-950 border-slate-700 text-red-500 focus:ring-0 cursor-pointer"
+                />
+                <span>Force Re-dispatch</span>
+              </label>
+
+              <button
+                onClick={() => handleTriggerDispatch(true)}
+                disabled={isDispatching || feDigests.length === 0}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40"
+              >
+                <Play className="w-3.5 h-3.5 text-amber-400" />
+                Dry-Run Simulation
+              </button>
+
+              <button
+                onClick={() => handleTriggerDispatch(false)}
+                disabled={isDispatching || feDigests.length === 0}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-red-900/30 transition-all cursor-pointer disabled:opacity-40"
+              >
+                {isDispatching ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                Dispatch Fatal Warnings to FEs Now ({feDigests.length})
+              </button>
+            </div>
           </div>
-        ) : (
-          <div className="divide-y divide-slate-800/80">
-            {filteredFeDigests.map((fe) => {
-              const isExpanded = expandedFe === fe.feKey;
 
-              return (
-                <div key={fe.feKey} className="p-4 hover:bg-slate-800/30 transition-colors">
-                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                    
-                    {/* FE Identification */}
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 font-bold flex items-center justify-center shrink-0">
-                        {fe.fatalCount}
-                      </div>
+          {/* Dispatch Result Alert */}
+          {dispatchResult && (
+            <div className={`p-4 rounded-xl border text-xs animate-fade-in ${
+              dispatchResult.failedCount > 0 
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-200' 
+                : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+            }`}>
+              <div className="flex items-center justify-between font-bold text-sm mb-1">
+                <span className="flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400" />
+                  Execution Complete ({dispatchResult.mode})
+                </span>
+                <button 
+                  onClick={() => setDispatchResult(null)} 
+                  className="text-xs text-slate-400 hover:text-white"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <div className="flex gap-4 mt-2 font-mono">
+                <span>Sent: <strong>{dispatchResult.sentCount}</strong></span>
+                <span>Skipped: <strong>{dispatchResult.skippedCount}</strong></span>
+                <span>Failed: <strong>{dispatchResult.failedCount}</strong></span>
+                <span>Total FEs: <strong>{dispatchResult.totalFatalFEs}</strong></span>
+              </div>
+            </div>
+          )}
 
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-white text-sm">{fe.feName}</span>
-                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                            {fe.feCode}
-                          </span>
-                          <span className="text-[11px] px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-                            {fe.hub}
-                          </span>
-                        </div>
+          {/* Pending Fatal FEs Queue */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-red-400" />
+                <h3 className="text-sm font-bold text-white">
+                  Today&apos;s Fatal Strike Recipients Queue ({filteredFeDigests.length})
+                </h3>
+              </div>
+              <span className="text-xs text-slate-400">
+                Direct to FE Only
+              </span>
+            </div>
 
-                        <div className="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-y-1 gap-x-3">
-                          <span>TO: <strong className="text-slate-200">{fe.feEmail}</strong></span>
-                          <span>CC (AM): <strong className="text-purple-300">{fe.amName}</strong> ({fe.amEmail})</span>
-                          <span>CC (RM): <strong className="text-amber-300">{fe.rmName}</strong> ({fe.rmEmail})</span>
-                        </div>
-                      </div>
-                    </div>
+            {filteredFeDigests.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <CheckCircle className="w-12 h-12 text-emerald-500/50 mx-auto mb-3" />
+                <div className="text-base font-bold text-slate-200">No Fatal Strikes Found for {targetDate}</div>
+                <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                  All audited visits on this date met 100% compliance SOP standards, or no audits were marked Fatal yet. Zero emails will be sent tonight.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-800/80">
+                {filteredFeDigests.map((fe) => {
+                  const isExpanded = expandedFe === fe.feKey;
 
-                    {/* Quick Stats & Actions */}
-                    <div className="flex items-center gap-2 self-start lg:self-auto shrink-0">
-                      <div className="text-right mr-2 hidden sm:block">
-                        <div className="text-xs font-bold text-red-400">{fe.fatalCount} Fatal Strike{fe.fatalCount > 1 ? 's' : ''}</div>
-                        <div className="text-[11px] text-slate-400">{fe.passedCount} Passed / {fe.totalAudited} Audited</div>
-                      </div>
+                  return (
+                    <div key={fe.feKey} className="p-4 hover:bg-slate-800/30 transition-colors">
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        
+                        {/* FE Identification */}
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 font-bold flex items-center justify-center shrink-0">
+                            {fe.fatalCount}
+                          </div>
 
-                      <button
-                        onClick={() => setPreviewDigest(fe)}
-                        className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1 border border-slate-700 transition-colors cursor-pointer"
-                        title="Preview generated email"
-                      >
-                        <Eye className="w-3.5 h-3.5 text-sky-400" />
-                        Preview Email
-                      </button>
-
-                      <button
-                        onClick={() => handleSingleFeDispatch(fe)}
-                        disabled={dispatchingFeKey === fe.feKey || isDispatching}
-                        className="px-2.5 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1 border border-red-500/30 transition-colors cursor-pointer disabled:opacity-50"
-                        title={`Send only ${fe.feName}'s warning notice now`}
-                      >
-                        {dispatchingFeKey === fe.feKey ? (
-                          <>
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-400" />
-                            <span>Sending...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Send className="w-3.5 h-3.5" />
-                            <span>Send Now</span>
-                          </>
-                        )}
-                      </button>
-
-                      <button
-                        onClick={() => setExpandedFe(isExpanded ? null : fe.feKey)}
-                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                      >
-                        {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Expanded Task Incident Breakdown */}
-                  {isExpanded && (
-                    <div className="mt-4 pt-4 border-t border-slate-800/80 space-y-2 text-xs animate-fade-in">
-                      <div className="font-semibold text-slate-300 uppercase tracking-wider text-[11px]">
-                        Violations in Today&apos;s Audits ({fe.fatalTasks.length}):
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        {fe.fatalTasks.map((ft, idx) => (
-                          <div key={idx} className="p-3 rounded-xl bg-slate-950 border border-red-500/20 text-slate-300">
-                            <div className="flex items-center justify-between text-xs font-mono font-bold text-red-400 mb-1">
-                              <span>Incident #{idx + 1} &bull; Task #{ft.taskId}</span>
-                              <a 
-                                href={ft.portalUrl} 
-                                target="_blank" 
-                                rel="noreferrer"
-                                className="text-[11px] text-sky-400 hover:underline flex items-center gap-0.5"
-                              >
-                                View Photos <ExternalLink className="w-3 h-3" />
-                              </a>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-white text-sm">{fe.feName}</span>
+                              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                                {fe.feCode}
+                              </span>
+                              <span className="text-[11px] px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
+                                {fe.hub}
+                              </span>
                             </div>
 
-                            <ul className="list-disc pl-4 text-[12px] text-red-300/90 space-y-0.5">
-                              {ft.failedReasons.map((r, ri) => (
-                                <li key={ri}>{r}</li>
-                              ))}
-                            </ul>
-
-                            {ft.remarks && (
-                              <div className="mt-2 text-[11px] italic text-amber-300/80 bg-amber-500/5 p-1.5 rounded border border-amber-500/10">
-                                &ldquo;{ft.remarks}&rdquo;
-                              </div>
-                            )}
+                            <div className="text-xs text-slate-400 mt-1 flex flex-wrap items-center gap-y-1 gap-x-3">
+                              <span>TO: <strong className="text-slate-200">{fe.feEmail}</strong></span>
+                              <span>Reporting AM: <strong className="text-purple-300">{fe.amName}</strong></span>
+                              <span>RM: <strong className="text-amber-300">{fe.rmName}</strong></span>
+                            </div>
                           </div>
-                        ))}
+                        </div>
+
+                        {/* Quick Stats & Actions */}
+                        <div className="flex items-center gap-2 self-start lg:self-auto shrink-0">
+                          <div className="text-right mr-2 hidden sm:block">
+                            <div className="text-xs font-bold text-red-400">{fe.fatalCount} Fatal Strike{fe.fatalCount > 1 ? 's' : ''}</div>
+                            <div className="text-[11px] text-slate-400">{fe.passedCount} Passed / {fe.totalAudited} Audited</div>
+                          </div>
+
+                          <button
+                            onClick={() => setPreviewDigest(fe)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1 border border-slate-700 transition-colors cursor-pointer"
+                            title="Preview generated email"
+                          >
+                            <Eye className="w-3.5 h-3.5 text-sky-400" />
+                            Preview Notice
+                          </button>
+
+                          <button
+                            onClick={() => handleSingleFeDispatch(fe)}
+                            disabled={dispatchingFeKey === fe.feKey || isDispatching}
+                            className="px-2.5 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs font-semibold flex items-center gap-1 border border-red-500/30 transition-colors cursor-pointer disabled:opacity-50"
+                            title={`Send only ${fe.feName}'s warning notice now`}
+                          >
+                            {dispatchingFeKey === fe.feKey ? (
+                              <>
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-400" />
+                                <span>Sending...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Send className="w-3.5 h-3.5" />
+                                <span>Send Notice</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            onClick={() => setExpandedFe(isExpanded ? null : fe.feKey)}
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
+
+                      {/* Expanded Task Incident Breakdown */}
+                      {isExpanded && (
+                        <div className="mt-4 pt-4 border-t border-slate-800/80 space-y-2 text-xs animate-fade-in">
+                          <div className="font-semibold text-slate-300 uppercase tracking-wider text-[11px]">
+                            Violations in Today&apos;s Audits ({fe.fatalTasks.length}):
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {fe.fatalTasks.map((ft, idx) => (
+                              <div key={idx} className="p-3 rounded-xl bg-slate-950 border border-red-500/20 text-slate-300">
+                                <div className="flex items-center justify-between text-xs font-mono font-bold text-red-400 mb-1">
+                                  <span>Incident #{idx + 1} &bull; Task #{ft.taskId}</span>
+                                  <a 
+                                    href={ft.portalUrl} 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="text-[11px] text-sky-400 hover:underline flex items-center gap-0.5"
+                                  >
+                                    View Photos <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                </div>
+
+                                <ul className="list-disc pl-4 text-[12px] text-red-300/90 space-y-0.5">
+                                  {ft.failedReasons.map((r, ri) => (
+                                    <li key={ri}>{r}</li>
+                                  ))}
+                                </ul>
+
+                                {ft.remarks && (
+                                  <div className="mt-2 text-[11px] italic text-amber-300/80 bg-amber-500/5 p-1.5 rounded border border-amber-500/10">
+                                    &ldquo;{ft.remarks}&rdquo;
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                  );
+                })}
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* TAB 3: LEADERSHIP MAIL (GM, BH & SUPERADMIN EXECUTIVE BRIEFING) */}
+      {/* ==================================================================== */}
+      {dispatchTab === 'leadership' && (
+        <div className="space-y-4 animate-fade-in">
+          {/* Executive Briefing Container */}
+          <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 via-sky-950/30 to-slate-900 border border-sky-500/30 shadow-xl relative overflow-hidden">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 shadow-inner">
+                  <Award className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-black text-white">
+                      Executive Quality Audit Briefing (GM, BH &amp; SuperAdmin)
+                    </span>
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-amber-400" />
+                      Leadership Briefing
+                    </span>
+                    <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                      <Zap className="w-3 h-3 text-emerald-400" />
+                      Brevo Gateway Ready
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
+                    Aggregates national audit volumes, facility pass rates, SOP non-compliance Pareto, and active fatal strikes into an executive briefing. Dispatches strictly to <strong className="text-white">General Managers (GM)</strong>, <strong className="text-white">Business Heads (BH)</strong>, and <strong className="text-sky-300">SuperAdmin</strong>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto shrink-0">
+                <button
+                  onClick={() => setShowExecutivePreviewModal(true)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Eye className="w-3.5 h-3.5 text-sky-400" />
+                  Preview Executive Email
+                </button>
+
+                <button
+                  onClick={() => handleDispatchExecutiveSummary(true)}
+                  disabled={isDispatchingExecutive}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  Dry-Run Simulation
+                </button>
+
+                <button
+                  onClick={() => handleDispatchExecutiveSummary(false)}
+                  disabled={isDispatchingExecutive}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-sky-900/40 transition-all cursor-pointer disabled:opacity-50"
+                >
+                  {isDispatchingExecutive ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4" />
+                  )}
+                  Dispatch to GM, BH &amp; SuperAdmin
+                </button>
+              </div>
+            </div>
+
+            {/* Target leadership recipients list */}
+            <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="font-semibold text-slate-300">Executive Leadership Group:</span>
+                {leadershipRecipients.map(r => (
+                  <span key={r.email} className="px-2 py-0.5 rounded bg-slate-800/80 text-sky-300 font-mono text-[11px] border border-slate-700/60 shadow-sm">
+                    {r.name} ({r.role}): {r.email}
+                  </span>
+                ))}
+              </div>
+
+              <div className="text-[11px] text-slate-400">
+                Macro Snapshot: <strong className="text-white">{executiveSummary.totalAudited}</strong> Audited &bull; <strong className="text-emerald-400">{executiveSummary.passRate}%</strong> Pass &bull; <strong className="text-red-400">{executiveSummary.totalFatal}</strong> Fatals
+              </div>
+            </div>
+
+            {/* Executive Dispatch Result Alert */}
+            {executiveDispatchResult && (
+              <div className={`mt-3 p-3.5 rounded-xl border text-xs animate-fade-in ${
+                executiveDispatchResult.error 
+                  ? 'bg-red-500/10 border-red-500/30 text-red-200' 
+                  : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+              }`}>
+                <div className="flex items-center justify-between font-bold text-sm">
+                  <span className="flex items-center gap-2">
+                    {executiveDispatchResult.error ? (
+                      <XCircle className="w-4 h-4 text-red-400" />
+                    ) : (
+                      <CheckCircle className="w-4 h-4 text-emerald-400" />
+                    )}
+                    {executiveDispatchResult.error ? 'Executive Dispatch Failed' : `Executive Summary Dispatched (${executiveDispatchResult.mode})`}
+                  </span>
+                  <button 
+                    onClick={() => setExecutiveDispatchResult(null)} 
+                    className="text-xs text-slate-400 hover:text-white"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+                {executiveDispatchResult.error ? (
+                  <p className="mt-1 text-red-300">{executiveDispatchResult.error}</p>
+                ) : (
+                  <div className="mt-1.5 flex flex-wrap gap-4 text-xs font-mono text-slate-300">
+                    <span>Target: <strong>{executiveDispatchResult.targetAudience}</strong></span>
+                    <span>Recipients: <strong>{executiveDispatchResult.recipients?.join(', ')}</strong></span>
+                    <span>Provider: <strong>{executiveDispatchResult.provider?.toUpperCase()}</strong></span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* DISPATCH HISTORY LEDGER */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg">
@@ -870,7 +1319,7 @@ export default function SuperAdminCronEngine({
 
             <div className="p-3 bg-slate-950/60 border-b border-slate-800 text-xs text-slate-400 flex flex-wrap gap-4">
               <span><strong>TO:</strong> {previewDigest.feEmail}</span>
-              <span><strong>CC:</strong> {previewDigest.amEmail} (AM), {previewDigest.rmEmail} (RM)</span>
+              <span><strong>Reporting AM:</strong> {previewDigest.amName} &bull; {previewDigest.hub}</span>
               <span><strong>Subject:</strong> [FORMAL WARNING] Lenskart DLC Quality Audit - {previewDigest.fatalCount} Fatal Strike(s)</span>
             </div>
 
@@ -879,6 +1328,68 @@ export default function SuperAdminCronEngine({
                 dangerouslySetInnerHTML={{ 
                   __html: buildFeFatalWarningEmailHtml({ 
                     feDigest: previewDigest, 
+                    portalBaseUrl 
+                  }) 
+                }} 
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TEAM DIGEST PREVIEW MODAL (CONSOLIDATED FOR AM & RM) */}
+      {previewTeamDigest && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
+              <div className="flex items-center gap-2">
+                <Building2 className="w-5 h-5 text-purple-400" />
+                <div>
+                  <h3 className="font-bold text-white text-sm">
+                    Consolidated Team Quality Digest &bull; {previewTeamDigest.roleTitle} {previewTeamDigest.managerName}
+                  </h3>
+                  <div className="text-[11px] text-slate-400">
+                    {previewTeamDigest.hub} &bull; {previewTeamDigest.fes.length} Flagged FEs &bull; {previewTeamDigest.totalFatalStrikes} Fatal Strikes
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const mgr = previewTeamDigest;
+                    setPreviewTeamDigest(null);
+                    handleSingleTeamDigestDispatch(mgr, false);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Dispatch This Digest Now
+                </button>
+                <button
+                  onClick={() => setPreviewTeamDigest(null)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 cursor-pointer"
+                >
+                  Close Preview
+                </button>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-950/70 border-b border-slate-800 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span><strong>TO ({previewTeamDigest.roleTitle}):</strong> <span className="text-purple-300 font-mono">{previewTeamDigest.managerEmail}</span></span>
+                <span><strong>Team Scope:</strong> {previewTeamDigest.fes.length} FEs with Fatal Strikes</span>
+              </div>
+              <span className="text-[11px] text-purple-300 font-semibold bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">
+                Inbox-Protection: Replaces individual FE CC notices
+              </span>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 bg-slate-900/60 flex justify-center">
+              <div 
+                className="w-full max-w-[700px] shadow-2xl rounded-xl overflow-hidden"
+                dangerouslySetInnerHTML={{ 
+                  __html: buildAmRmConsolidatedTeamDigestHtml({ 
+                    managerSummary: previewTeamDigest, 
                     portalBaseUrl 
                   }) 
                 }} 

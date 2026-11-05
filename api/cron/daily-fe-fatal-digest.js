@@ -12,6 +12,9 @@ import {
   aggregateFeFatalDigests, 
   buildFeFatalWarningEmailHtml, 
   buildFeFatalWarningEmailText,
+  aggregateTeamFatalSummaries,
+  buildAmRmConsolidatedTeamDigestHtml,
+  buildAmRmConsolidatedTeamDigestText,
   aggregateGmBhExecutiveSummary,
   buildGmBhExecutiveSummaryHtml,
   buildGmBhExecutiveSummaryText
@@ -420,8 +423,87 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     }
 
     // ====================================================================
-    // 7B. NORMAL FE-LEVEL FATAL STRIKE DISPATCH
-    // Strictly dispatched to FEs with >= 1 Fatal strike (CC: direct AM & RM)
+    // 7B. CONSOLIDATED TEAM QUALITY DIGEST FOR AM & RM
+    // Dispatches 1 summarized digest per AM & RM covering all FEs under them
+    // ====================================================================
+    const isTeamDigest = query.action === 'send_team_digest' || body.action === 'send_team_digest';
+
+    if (isTeamDigest) {
+      const teamSummaries = aggregateTeamFatalSummaries({ feDigests, targetDate });
+      const targetManagerEmail = (query.managerEmail || body.managerEmail || '').toLowerCase().trim();
+      const targetRole = (query.role || body.role || '').toUpperCase().trim();
+
+      let targetList = teamSummaries.allManagers;
+      if (targetRole === 'AM') targetList = teamSummaries.ams;
+      else if (targetRole === 'RM') targetList = teamSummaries.rms;
+
+      if (targetManagerEmail) {
+        targetList = targetList.filter(m => (m.managerEmail || '').toLowerCase().trim() === targetManagerEmail);
+      }
+
+      const teamResults = [];
+      let teamSentCount = 0;
+      let teamFailedCount = 0;
+
+      for (const mgr of targetList) {
+        if (!mgr.managerEmail || !mgr.managerEmail.includes('@') || mgr.fes.length === 0) {
+          continue;
+        }
+
+        const subject = `[TEAM AUDIT SUMMARY] Lenskart Quality Digest - ${mgr.roleTitle} ${mgr.managerName} (${mgr.fes.length} FEs Flagged, ${mgr.totalFatalStrikes} Strikes - ${targetDate})`;
+        const html = buildAmRmConsolidatedTeamDigestHtml({ managerSummary: mgr, portalBaseUrl });
+        const text = buildAmRmConsolidatedTeamDigestText({ managerSummary: mgr, portalBaseUrl });
+
+        let dispatchResult = null;
+        let dispatchError = null;
+
+        try {
+          dispatchResult = await dispatchEmail({
+            to: mgr.managerEmail,
+            subject,
+            html,
+            text
+          });
+          teamSentCount++;
+        } catch (err) {
+          console.error(`Failed to dispatch Team Digest to ${mgr.roleTitle} ${mgr.managerEmail}:`, err.message);
+          dispatchError = err.message;
+          teamFailedCount++;
+        }
+
+        const logStatus = dispatchError ? 'FAILED' : (dryRun ? 'DRY_RUN' : 'SENT');
+
+        teamResults.push({
+          managerEmail: mgr.managerEmail,
+          managerName: mgr.managerName,
+          role: mgr.role,
+          roleTitle: mgr.roleTitle,
+          feCount: mgr.fes.length,
+          fatalStrikes: mgr.totalFatalStrikes,
+          status: logStatus,
+          error: dispatchError,
+          dispatchResult
+        });
+      }
+
+      res.statusCode = teamFailedCount > 0 && teamSentCount === 0 ? 500 : 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        success: teamFailedCount === 0,
+        mode: dryRun ? 'DRY_RUN_TEAM' : 'LIVE_TEAM_DISPATCH',
+        digestDate: targetDate,
+        targetAudience: targetRole ? `${targetRole}s Only` : 'All AMs & RMs',
+        sentCount: teamSentCount,
+        failedCount: teamFailedCount,
+        totalManagers: targetList.length,
+        results: teamResults
+      }));
+      return;
+    }
+
+    // ====================================================================
+    // 7C. NORMAL FE-LEVEL FATAL STRIKE DISPATCH
+    // Strictly dispatched to FEs with >= 1 Fatal strike (Direct to FE ONLY)
     // ====================================================================
     const results = [];
     let sentCount = 0;
@@ -454,7 +536,8 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       const text = buildFeFatalWarningEmailText({ feDigest, portalBaseUrl });
 
       const toEmail = feDigest.feEmail;
-      const ccEmails = [feDigest.amEmail, feDigest.rmEmail].filter(Boolean);
+      // AM and RM removed from CC list to prevent inbox overload; they receive a single consolidated team digest
+      const ccEmails = [];
 
       let dispatchResult = null;
       let dispatchError = null;

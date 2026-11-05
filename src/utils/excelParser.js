@@ -19,6 +19,33 @@ export function extractFeCode(rawName, fallbackId = '') {
   return fallbackId || 'N/A';
 }
 
+/**
+ * Normalizes Locus image URLs:
+ * 1. Converts relative filenames (e.g. cropped818251920465975209, temp_file_...) to full assets.locus-api.com URLs
+ * 2. Rewrites locus-api.com to assets.locus-api.com for fast-path CDN access
+ */
+export function normalizeTaskImageUrl(val, taskId) {
+  if (!val || typeof val !== 'string') return '';
+  const trimmed = val.trim();
+  if (!trimmed || trimmed === '-' || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') {
+    return '';
+  }
+
+  // If already an absolute URL or blob
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) {
+    return trimmed
+      .replace('https://locus-api.com/v1/client/', 'https://assets.locus-api.com/v1/client/')
+      .replace('https://api.locus-api.com/v1/client/', 'https://assets.locus-api.com/v1/client/');
+  }
+
+  // Relative file key from Locus export (e.g. cropped... or temp_file_...)
+  if (taskId) {
+    return `https://assets.locus-api.com/v1/client/lenskart-dlc/task/${taskId}/file/${trimmed}`;
+  }
+
+  return trimmed;
+}
+
 // Normalized matching for dynamic column detection
 function findColumnValue(row, patterns) {
   const keys = Object.keys(row);
@@ -93,14 +120,14 @@ export function transformRawRow(row, index) {
   ]);
 
   const images = {
-    selfie,
-    torches,
-    visionChart,
-    toolkit,
-    frameDisplay
+    selfie: normalizeTaskImageUrl(selfie, taskId),
+    torches: normalizeTaskImageUrl(torches, taskId),
+    visionChart: normalizeTaskImageUrl(visionChart, taskId),
+    toolkit: normalizeTaskImageUrl(toolkit, taskId),
+    frameDisplay: normalizeTaskImageUrl(frameDisplay, taskId)
   };
 
-  const imageCount = [selfie, torches, visionChart, toolkit, frameDisplay].filter(Boolean).length;
+  const imageCount = Object.values(images).filter(Boolean).length;
   const hasImages = imageCount > 0;
 
   return {
