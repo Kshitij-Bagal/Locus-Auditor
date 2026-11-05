@@ -464,7 +464,8 @@ export default function ClusterManagerPortal({
       if (fe.fatalTasks >= 2) atRiskFEs += 1;
     });
 
-    const fatalRate = totalAudited > 0 ? ((totalFatals / totalAudited) * 100).toFixed(1) : 0;
+    const fatalRate = totalAudited > 0 ? ((totalFatals / totalAudited) * 100).toFixed(1) : '0.0';
+    const strikesPerVisit = totalVisits > 0 ? (totalFatals / totalVisits).toFixed(2) : '0.00';
 
     return {
       totalFEs,
@@ -475,7 +476,8 @@ export default function ClusterManagerPortal({
       totalReplacements,
       cleanFEs,
       atRiskFEs,
-      fatalRate
+      fatalRate,
+      strikesPerVisit
     };
   }, [scopedFEs]);
 
@@ -514,7 +516,8 @@ export default function ClusterManagerPortal({
     return Array.from(map.values())
       .map(item => ({
         ...item,
-        fatalRate: item.auditedVisits > 0 ? ((item.fatalCount / item.auditedVisits) * 100).toFixed(1) : 0
+        fatalRate: item.auditedVisits > 0 ? ((item.fatalCount / item.auditedVisits) * 100).toFixed(1) : '0.0',
+        strikesPerVisit: item.totalVisits > 0 ? (item.fatalCount / item.totalVisits).toFixed(2) : '0.00'
       }))
       .sort((a, b) => b.fatalCount - a.fatalCount || b.totalVisits - a.totalVisits);
   }, [feMasterList, selectedRmFilter]);
@@ -537,7 +540,9 @@ export default function ClusterManagerPortal({
       'AUDITED VISITS': fe.auditedTasks,
       'PASSED AUDITS': fe.passedTasks,
       'FATAL STRIKES': fe.fatalTasks,
-      'FATAL RATE %': fe.auditedTasks > 0 ? `${((fe.fatalTasks / fe.auditedTasks) * 100).toFixed(1)}%` : '0%',
+      'QA AUDIT FATAL RATE %': fe.auditedTasks > 0 ? `${((fe.fatalTasks / fe.auditedTasks) * 100).toFixed(1)}%` : '0%',
+      'STRIKES PER VISIT AVG': fe.totalTasks > 0 ? (fe.fatalTasks / fe.totalTasks).toFixed(2) : '0.00',
+      'OVERALL VISIT STRIKE %': fe.totalTasks > 0 ? `${((fe.fatalTasks / fe.totalTasks) * 100).toFixed(1)}%` : '0%',
       'TOOL REPLACEMENTS ORDERED': fe.replacementsCount,
       'COMPLIANCE STATUS': fe.fatalTasks === 0 ? 'CLEAN (0 Strikes)' : fe.fatalTasks === 1 ? 'WARNING (1 Strike)' : 'ACTION REQUIRED (2+ Strikes)'
     }));
@@ -680,14 +685,16 @@ export default function ClusterManagerPortal({
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-          <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Fatal Rate %</div>
+          <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Fatal Rate (QA)</div>
           <div className={`text-2xl font-black mt-1 ${
             Number(clusterMetrics.fatalRate) > 10 ? 'text-red-400' :
             Number(clusterMetrics.fatalRate) > 5 ? 'text-amber-400' : 'text-emerald-400'
           }`}>
             {clusterMetrics.fatalRate}%
           </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Target: &lt;5% fatal</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">
+            Avg: <strong className="text-slate-300 font-mono">{clusterMetrics.strikesPerVisit}</strong> strikes/visit
+          </div>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
@@ -785,24 +792,36 @@ export default function ClusterManagerPortal({
                     <th className="py-3 px-4">Field Executive</th>
                     <th className="py-3 px-4">Hub / Location</th>
                     <th className="py-3 px-4">Direct Area Manager (AM)</th>
-                    <th className="py-3 px-4 text-center">Customer Visits</th>
-                    <th className="py-3 px-4 text-center">Passed</th>
-                    <th className="py-3 px-4 text-center">Fatal Strikes</th>
-                    <th className="py-3 px-4 text-center">Fatal Rate</th>
-                    <th className="py-3 px-4 text-center">Replacements</th>
+                    <th className="py-3 px-3 text-center">
+                      <div>Customer Visits</div>
+                      <div className="text-[9px] text-slate-500 font-normal">Total (Audited)</div>
+                    </th>
+                    <th className="py-3 px-3 text-center">Passed</th>
+                    <th className="py-3 px-3 text-center">Fatal Strikes</th>
+                    <th className="py-3 px-3 text-center">
+                      <div>Fatal Rate</div>
+                      <div className="text-[9px] text-slate-500 font-normal">% of Audited</div>
+                    </th>
+                    <th className="py-3 px-3 text-center">
+                      <div>Strikes / Visit</div>
+                      <div className="text-[9px] text-slate-500 font-normal">Overall Avg</div>
+                    </th>
+                    <th className="py-3 px-3 text-center">Replacements</th>
                     <th className="py-3 px-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800 text-slate-200">
                   {scopedFEs.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="py-12 text-center text-slate-400">
+                      <td colSpan={10} className="py-12 text-center text-slate-400">
                         No Field Executives found for this manager / search criteria.
                       </td>
                     </tr>
                   ) : (
                     scopedFEs.map(fe => {
                       const fatalRate = fe.auditedTasks > 0 ? Math.round((fe.fatalTasks / fe.auditedTasks) * 100) : 0;
+                      const strikesPerVisit = fe.totalTasks > 0 ? (fe.fatalTasks / fe.totalTasks).toFixed(2) : '0.00';
+                      const overallRate = fe.totalTasks > 0 ? ((fe.fatalTasks / fe.totalTasks) * 100).toFixed(1) : '0.0';
                       return (
                         <tr key={fe.key} className="hover:bg-slate-850/60 transition-colors">
                           
@@ -837,17 +856,20 @@ export default function ClusterManagerPortal({
                           </td>
 
                           {/* Customer Visits */}
-                          <td className="py-3.5 px-4 text-center font-bold text-white">
-                            {fe.totalTasks}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap">
+                            <div className="font-bold text-white">{fe.totalTasks}</div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              ({fe.auditedTasks} audited)
+                            </div>
                           </td>
 
                           {/* Passed */}
-                          <td className="py-3.5 px-4 text-center font-bold text-emerald-400">
+                          <td className="py-3.5 px-3 text-center font-bold text-emerald-400">
                             {fe.passedTasks}
                           </td>
 
                           {/* Fatal Strikes Badge */}
-                          <td className="py-3.5 px-4 text-center">
+                          <td className="py-3.5 px-3 text-center">
                             {fe.fatalTasks === 0 ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                                 <CheckCircle2 className="w-3 h-3" />
@@ -866,18 +888,34 @@ export default function ClusterManagerPortal({
                             )}
                           </td>
 
-                          {/* Fatal Rate */}
-                          <td className="py-3.5 px-4 text-center font-bold">
-                            <span className={
+                          {/* Fatal Rate (% of Audited) */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap">
+                            <div className={`font-bold ${
                               fatalRate > 10 ? 'text-red-400' :
                               fatalRate > 5 ? 'text-amber-400' : 'text-emerald-400'
-                            }>
+                            }`}>
                               {fatalRate}%
-                            </span>
+                            </div>
+                            <div className="text-[9px] text-slate-500 font-mono">
+                              {fe.fatalTasks}/{fe.auditedTasks || 0} aud.
+                            </div>
+                          </td>
+
+                          {/* Strikes Per Task Average (Overall) */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap">
+                            <div className={`font-bold font-mono ${
+                              Number(strikesPerVisit) > 0.10 ? 'text-red-400' :
+                              Number(strikesPerVisit) > 0.05 ? 'text-amber-400' : 'text-slate-200'
+                            }`}>
+                              {strikesPerVisit}
+                            </div>
+                            <div className="text-[9px] text-slate-500 font-mono">
+                              ({overallRate}% total)
+                            </div>
                           </td>
 
                           {/* Replacements */}
-                          <td className="py-3.5 px-4 text-center">
+                          <td className="py-3.5 px-3 text-center">
                             {fe.replacementsCount > 0 ? (
                               <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold text-[10px]">
                                 {fe.replacementsCount} items
@@ -1147,6 +1185,9 @@ export default function ClusterManagerPortal({
                       Number(am.fatalRate) > 5 ? 'text-amber-400' : 'text-emerald-400'
                     }`}>
                       {am.fatalRate}%
+                    </span>
+                    <span className="text-[9px] text-slate-500 block font-mono mt-0.5">
+                      {am.strikesPerVisit} / visit
                     </span>
                   </div>
                 </div>
