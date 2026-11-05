@@ -101,6 +101,13 @@ export const SYSTEM_PAGES = [
     fullName: 'Image Forensics & Deduplication Lab',
     description: 'Inspect photo metadata, SHA-256 byte fingerprints, and perceptual dHash reuse',
     category: 'Governance'
+  },
+  {
+    id: 'executiveDashboard',
+    label: 'Executive Summary',
+    fullName: 'Executive Leadership Overview & Analytics',
+    description: 'Date-wise task compliance, image integrity, strike rates, and cross-hierarchy filters for GM, BH & SuperAdmin',
+    category: 'Governance'
   }
 ];
 
@@ -118,7 +125,8 @@ export const PAGE_ID_TO_LABEL = {
   accessControl: 'Access Control',
   fatalObjection: 'Fatal objection',
   emailDispatch: 'Mail Dispatch',
-  forensicsLab: 'Forensics Lab'
+  forensicsLab: 'Forensics Lab',
+  executiveDashboard: 'Executive Summary'
 };
 
 export const PAGE_LABEL_TO_ID = {
@@ -140,7 +148,8 @@ export const PAGE_LABEL_TO_ID = {
   'Email Dispatch': 'emailDispatch',
   'Forensics Lab': 'forensicsLab',
   'Image Forensics Lab': 'forensicsLab',
-  'Image Forensics': 'forensicsLab'
+  'Image Forensics': 'forensicsLab',
+  'Executive Summary': 'executiveDashboard'
 };
 
 // 9 Standard Corporate Roles represented in the system
@@ -161,6 +170,7 @@ export const ALL_ROLES = [
 // ====================================================================
 export const DEFAULT_ROLE_PRESETS = {
   SuperAdmin: [
+    'Executive Summary',
     'Audits',
     'Upload Task',
     'Roster & Workload',
@@ -202,6 +212,7 @@ export const DEFAULT_ROLE_PRESETS = {
     'Forensics Lab'
   ],
   GM: [
+    'Executive Summary',
     'Audits',
     'Upload Task',
     'Roster & Workload',
@@ -214,6 +225,7 @@ export const DEFAULT_ROLE_PRESETS = {
     'Forensics Lab'
   ],
   BH: [
+    'Executive Summary',
     'Audits',
     'Roster & Workload',
     'D + 1 Escalations',

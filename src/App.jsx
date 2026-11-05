@@ -18,6 +18,7 @@ import SuperAdminCronEngine from './components/SuperAdminCronEngine.jsx';
 import ClusterManagerPortal from './components/ClusterManagerPortal.jsx';
 import FatalObjectionHub from './components/FatalObjectionHub.jsx';
 import ImageForensicsLab from './components/ImageForensicsLab.jsx';
+import ExecutiveSummaryHub from './components/ExecutiveSummaryHub.jsx';
 
 import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi, settingsApi } from './api/client.js';
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
@@ -386,7 +387,9 @@ export default function App() {
     // Route to appropriate first page according to effective page permissions
     const accessible = getUserEffectivePages(enrichedProfile);
     const userRoleList = parseRoles(enrichedProfile.roles || [enrichedProfile.role]);
-    if ((userRoleList.includes('AM') || userRoleList.includes('RM')) && accessible.includes('managerPortal')) {
+    if ((userRoleList.includes('GM') || userRoleList.includes('BH') || userRoleList.includes('SuperAdmin')) && accessible.includes('executiveDashboard')) {
+      setActivePage('executiveDashboard');
+    } else if ((userRoleList.includes('AM') || userRoleList.includes('RM')) && accessible.includes('managerPortal')) {
       setActivePage('managerPortal');
     } else if (accessible.includes('audits')) {
       setActivePage('audits');
@@ -1253,6 +1256,20 @@ export default function App() {
       {/* Page Content Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
         
+        {/* PAGE 0: GM, BH & SUPERADMIN EXCLUSIVE SUMMARY & ANALYTICS */}
+        {activePage === 'executiveDashboard' && (
+          <ExecutiveSummaryHub
+            tasks={tasks}
+            users={users}
+            currentUser={currentUser}
+            onNavigate={setActivePage}
+            onFilterFE={(feCode) => {
+              setSearchQuery(feCode);
+              setActivePage('audits');
+            }}
+          />
+        )}
+
         {/* PAGE 1: UPLOAD DISPATCHES (Central Ops Write Operation) */}
         {activePage === 'upload' && (
           <UploadPage

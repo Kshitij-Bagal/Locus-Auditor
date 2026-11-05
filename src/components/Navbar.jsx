@@ -17,7 +17,8 @@ import {
   Briefcase,
   Scale,
   Mail,
-  Fingerprint
+  Fingerprint,
+  LayoutDashboard
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -43,6 +44,12 @@ export default function Navbar({
 
   // Role & Permission Based Page Definitions
   const allNavItems = [
+    {
+      id: 'executiveDashboard',
+      label: 'Executive Summary',
+      icon: LayoutDashboard,
+      allowedRoles: ['GM', 'BH', 'SuperAdmin']
+    },
     {
       id: 'audits',
       label: 'Audits',
