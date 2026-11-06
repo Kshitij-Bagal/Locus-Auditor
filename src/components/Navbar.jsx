@@ -18,7 +18,8 @@ import {
   Scale,
   Mail,
   Fingerprint,
-  LayoutDashboard
+  LayoutDashboard,
+  Sparkles
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -55,6 +56,12 @@ export default function Navbar({
       label: 'Audits',
       icon: FileSpreadsheet,
       allowedRoles: ['Auditor', 'Central Ops', 'Admin', 'AM', 'RM', 'SuperAdmin']
+    },
+    {
+      id: 'aiAudits',
+      label: 'AI Audits',
+      icon: Sparkles,
+      allowedRoles: ['Auditor', 'Central Ops', 'GM', 'BH', 'SuperAdmin']
     },
     {
       id: 'upload',

@@ -108,12 +108,20 @@ export const SYSTEM_PAGES = [
     fullName: 'Executive Leadership Overview & Analytics',
     description: 'Date-wise task compliance, image integrity, strike rates, and cross-hierarchy filters for GM, BH & SuperAdmin',
     category: 'Governance'
+  },
+  {
+    id: 'aiAudits',
+    label: 'AI Audits',
+    fullName: 'Gemini 1.5 Flash AI Auditing Console',
+    description: 'Autonomous multimodal photo compliance auditing, scoring, and error margin detection',
+    category: 'Core Operations'
   }
 ];
 
 // Mapping between Page ID and Human-Readable Page Label
 export const PAGE_ID_TO_LABEL = {
   audits: 'Audits',
+  aiAudits: 'AI Audits',
   upload: 'Upload Task',
   allocation: 'Roster & Workload',
   escalations: 'D + 1 Escalations',
@@ -131,6 +139,8 @@ export const PAGE_ID_TO_LABEL = {
 
 export const PAGE_LABEL_TO_ID = {
   'Audits': 'audits',
+  'AI Audits': 'aiAudits',
+  'AI Audit': 'aiAudits',
   'Upload Task': 'upload',
   'Upload Tasks': 'upload',
   'Roster & Workload': 'allocation',
@@ -171,6 +181,7 @@ export const ALL_ROLES = [
 export const DEFAULT_ROLE_PRESETS = {
   SuperAdmin: [
     'Executive Summary',
+    'AI Audits',
     'Audits',
     'Upload Task',
     'Roster & Workload',
@@ -194,6 +205,7 @@ export const DEFAULT_ROLE_PRESETS = {
   ],
   Auditor: [
     'Audits',
+    'AI Audits',
     'Forensics Lab'
   ],
   AM: [
@@ -206,6 +218,7 @@ export const DEFAULT_ROLE_PRESETS = {
   ],
   'Central Ops': [
     'Audits',
+    'AI Audits',
     'Upload Task',
     'Tool Orders',
     'Cluster Oversight',
@@ -213,6 +226,7 @@ export const DEFAULT_ROLE_PRESETS = {
   ],
   GM: [
     'Executive Summary',
+    'AI Audits',
     'Audits',
     'Upload Task',
     'Roster & Workload',
@@ -226,6 +240,7 @@ export const DEFAULT_ROLE_PRESETS = {
   ],
   BH: [
     'Executive Summary',
+    'AI Audits',
     'Audits',
     'Roster & Workload',
     'D + 1 Escalations',

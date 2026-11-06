@@ -19,6 +19,7 @@ import ClusterManagerPortal from './components/ClusterManagerPortal.jsx';
 import FatalObjectionHub from './components/FatalObjectionHub.jsx';
 import ImageForensicsLab from './components/ImageForensicsLab.jsx';
 import ExecutiveSummaryHub from './components/ExecutiveSummaryHub.jsx';
+import AIAuditsConsole from './components/AIAuditsConsole.jsx';
 
 import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi, settingsApi } from './api/client.js';
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
@@ -1266,6 +1267,29 @@ export default function App() {
             onFilterFE={(feCode) => {
               setSearchQuery(feCode);
               setActivePage('audits');
+            }}
+          />
+        )}
+
+        {/* PAGE: AI AUDITS CONSOLE (GEMINI 1.5 FLASH) */}
+        {activePage === 'aiAudits' && (
+          <AIAuditsConsole
+            tasks={tasks}
+            users={users}
+            currentUser={currentUser}
+            onNavigate={setActivePage}
+            onTaskAudited={(taskId, verdict) => {
+              setTasks(prev => prev.map(t => {
+                if (String(t.id || t.taskId) === String(taskId)) {
+                  return {
+                    ...t,
+                    auditStatus: verdict,
+                    auditedAt: new Date().toISOString(),
+                    auditedBy: 'Gemini 1.5 Flash (AI)'
+                  };
+                }
+                return t;
+              }));
             }}
           />
         )}
