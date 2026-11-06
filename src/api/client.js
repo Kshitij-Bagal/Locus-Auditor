@@ -502,7 +502,10 @@ export const tasksApi = {
         disputeResolvedAt: row.dispute_resolved_at || null,
         disputeResolvedByName: row.dispute_resolved_by_name || null,
         disputeResolutionRemarks: row.dispute_resolution_remarks || null,
-        disputeProofUrl: row.dispute_proof_url || null
+        disputeProofUrl: row.dispute_proof_url || null,
+        totalTokens: row.total_tokens || 0,
+        total_tokens: row.total_tokens || 0,
+        auditorModel: row.auditor_model || row.audited_by_name || null
       }));
     } catch (e) {
       console.warn('tasksApi.getTasks error:', e.message);
@@ -511,10 +514,10 @@ export const tasksApi = {
   },
 
   // Auditor PASS write operation
-  async passAudit({ taskId, auditorName, auditorLocation, remarks, criteriaStatus, replacements, taskData }) {
+  async passAudit({ taskId, auditorName, auditorLocation, remarks, criteriaStatus, replacements, taskData, totalTokens = null }) {
     // 1. Update task in tasks table
     if (supabase) {
-      const { error } = await supabase.from('tasks').update({
+      const updatePayload = {
         audit_status: 'PASSED',
         audited_at: new Date().toISOString(),
         audited_by_name: auditorName,
@@ -524,7 +527,21 @@ export const tasksApi = {
         failed_reasons: [],
         replacements: replacements || [],
         updated_at: new Date().toISOString()
-      }).eq('id', String(taskId));
+      };
+
+      if (totalTokens !== null && totalTokens !== undefined) {
+        updatePayload.total_tokens = Number(totalTokens);
+      }
+
+      let { error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+
+      // Resilient fallback if 'total_tokens' column hasn't been added to tasks table via SQL yet
+      if (error && error.message && error.message.includes('total_tokens')) {
+        console.warn('Supabase tasks table is missing total_tokens column. Please run the SQL snippet.');
+        delete updatePayload.total_tokens;
+        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+        error = retry.error;
+      }
 
       if (error) {
         console.error('tasksApi.passAudit Supabase error:', error);
@@ -563,7 +580,8 @@ export const tasksApi = {
     amEmail,
     rmEmail,
     improvementTips,
-    immediateEmail = false
+    immediateEmail = false,
+    totalTokens = null
   }) {
     // 1. Single immediate email only if explicitly enabled (default is false to use daily scheduled batch)
     const recipients = [feEmail, amEmail, rmEmail].filter(Boolean);
@@ -593,7 +611,7 @@ export const tasksApi = {
 
     // 2. Write FATAL status to database with email_sent = false (queuing for daily batch)
     if (supabase) {
-      const { error } = await supabase.from('tasks').update({
+      const updatePayload = {
         audit_status: 'FATAL',
         audited_at: new Date().toISOString(),
         audited_by_name: auditorName,
@@ -606,7 +624,21 @@ export const tasksApi = {
         email_sent_at: immediateEmail ? new Date().toISOString() : null,
         email_recipients: recipients,
         updated_at: new Date().toISOString()
-      }).eq('id', String(taskId));
+      };
+
+      if (totalTokens !== null && totalTokens !== undefined) {
+        updatePayload.total_tokens = Number(totalTokens);
+      }
+
+      let { error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+
+      // Resilient fallback if 'total_tokens' column hasn't been added to tasks table via SQL yet
+      if (error && error.message && error.message.includes('total_tokens')) {
+        console.warn('Supabase tasks table is missing total_tokens column. Please run the SQL snippet.');
+        delete updatePayload.total_tokens;
+        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+        error = retry.error;
+      }
 
       if (error) {
         console.error('tasksApi.failAudit Supabase error:', error);

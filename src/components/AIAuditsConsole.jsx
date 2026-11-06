@@ -278,36 +278,43 @@ export default function AIAuditsConsole({
         result
       });
 
+      // Calculate exact tokens used
+      const promptToks = result.usageMetadata?.promptTokens || 1650;
+      const respToks = result.usageMetadata?.responseTokens || 350;
+      const totToks = result.usageMetadata?.totalTokens || (promptToks + respToks);
+
+      // Overwrite Auditor Name directly with the exact model used (e.g. gemini-3.8-flash)
+      const auditorName = result.activeModelUsed || selectedModel || 'gemini-3.8-flash';
+      const auditorLocation = taskToAudit.facilityCode || taskToAudit.city || 'Central AI';
+
+      // Prepare criteria status map
+      const criteriaStatus = {};
+      const failedReasons = [];
+      (result.criteriaEvaluation || []).forEach(c => {
+        criteriaStatus[c.id] = c.status;
+        if (c.status === 'FAIL') {
+          if (c.failureReasons && c.failureReasons.length > 0) {
+            failedReasons.push(...c.failureReasons);
+          } else {
+            failedReasons.push(`${c.label}: Non-compliant`);
+          }
+        }
+      });
+
       // Optionally commit to Supabase database
       if (shouldCommit) {
-        setCurrentProgress({ step: 'COMMITTING', message: 'Writing AI audit verdict to Supabase database...' });
-        
-        // Prepare criteria status map
-        const criteriaStatus = {};
-        const failedReasons = [];
-        (result.criteriaEvaluation || []).forEach(c => {
-          criteriaStatus[c.id] = c.status;
-          if (c.status === 'FAIL') {
-            if (c.failureReasons && c.failureReasons.length > 0) {
-              failedReasons.push(...c.failureReasons);
-            } else {
-              failedReasons.push(`${c.label}: Non-compliant`);
-            }
-          }
-        });
-
-        const auditorName = result.activeModelUsed ? `Gemini (${result.activeModelUsed})` : 'Gemini AI';
-        const auditorLocation = taskToAudit.facilityCode || taskToAudit.city || 'Central AI';
+        setCurrentProgress({ step: 'COMMITTING', message: 'Writing AI audit verdict & tokens to Supabase database...' });
 
         if (result.verdict === 'PASS') {
           await tasksApi.passAudit({
             taskId: taskToAudit.id || taskToAudit.taskId,
-            auditorName,
+            auditorName, // Overwrites Auditor Name with the model used
             auditorLocation,
             remarks: `AI PASSED (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`,
             criteriaStatus,
             replacements: [],
-            taskData: taskToAudit
+            taskData: taskToAudit,
+            totalTokens: totToks // Stores total tokens in Supabase
           });
         } else {
           await tasksApi.failAudit({
@@ -317,9 +324,10 @@ export default function AIAuditsConsole({
             remarks: `AI FATAL STRIKE (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`,
             criteriaStatus,
             replacements: [],
-            auditorName,
+            auditorName, // Overwrites Auditor Name with the model used
             auditorLocation,
-            immediateEmail: false
+            immediateEmail: false,
+            totalTokens: totToks // Stores total tokens in Supabase
           });
         }
 
@@ -329,10 +337,6 @@ export default function AIAuditsConsole({
       }
 
       // Update session telemetry counters
-      const promptToks = result.usageMetadata?.promptTokens || 1650;
-      const respToks = result.usageMetadata?.responseTokens || 350;
-      const totToks = result.usageMetadata?.totalTokens || (promptToks + respToks);
-
       setSessionUsage(prev => ({
         requests: prev.requests + 1,
         promptTokens: prev.promptTokens + promptToks,
@@ -343,6 +347,7 @@ export default function AIAuditsConsole({
       // Add to session ledger
       const sessionEntry = {
         taskId: taskToAudit.taskId || taskToAudit.id,
+        task: taskToAudit,
         feName: taskToAudit.feName || 'Unknown',
         feCode: taskToAudit.feCode || '',
         city: taskToAudit.facilityCode || taskToAudit.city || 'Hub',
@@ -352,8 +357,15 @@ export default function AIAuditsConsole({
         confidenceScore: result.confidenceScore,
         errorMargin: result.errorMargin,
         tokensUsed: totToks,
-        modelUsed: result.activeModelUsed || selectedModel,
+        totalTokens: totToks,
+        total_tokens: totToks,
+        modelUsed: auditorName,
+        auditedBy: auditorName,
+        audited_by_name: auditorName,
         summary: result.summary,
+        criteriaStatus,
+        failedReasons,
+        criteriaEvaluation: result.criteriaEvaluation || [],
         auditedAt: new Date().toLocaleTimeString()
       };
       setSessionHistory(prev => [sessionEntry, ...prev]);
@@ -446,6 +458,9 @@ export default function AIAuditsConsole({
       const humanStatus = isOverturned ? 'OVERTURNED' : (isVerified ? 'VERIFIED' : 'PENDING');
       return {
         ...t,
+        auditedBy: t.audited_by_name || t.auditedBy || 'gemini-3.8-flash',
+        totalTokens: t.total_tokens || t.totalTokens || 0,
+        total_tokens: t.total_tokens || t.totalTokens || 0,
         humanStatus
       };
     });
@@ -462,10 +477,18 @@ export default function AIAuditsConsole({
           city: s.city,
           date: s.date,
           auditStatus: s.verdict,
-          auditedBy: s.modelUsed ? `Gemini (${s.modelUsed})` : 'Gemini AI',
+          auditedBy: s.modelUsed || 'gemini-3.8-flash',
+          audited_by_name: s.modelUsed || 'gemini-3.8-flash',
           remarks: `AI ${s.verdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`,
           auditor_remarks: `AI ${s.verdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`,
           images: s.task?.images || {},
+          criteriaStatus: s.criteriaStatus || {},
+          criteria_status: s.criteriaStatus || {},
+          failedReasons: s.failedReasons || [],
+          failed_reasons: s.failedReasons || [],
+          criteriaEvaluation: s.criteriaEvaluation || [],
+          totalTokens: s.totalTokens || 0,
+          total_tokens: s.totalTokens || 0,
           humanStatus: 'PENDING'
         });
       }
@@ -528,6 +551,58 @@ export default function AIAuditsConsole({
     };
   }, [selectedVerifyTask]);
 
+  // AI Criteria Breakdown & Failure Reasons for the Selected Task
+  const verifyCriteriaBreakdown = useMemo(() => {
+    if (!selectedVerifyTask) return [];
+
+    // 1. If criteriaEvaluation array already exists from live audit result
+    if (Array.isArray(selectedVerifyTask.criteriaEvaluation) && selectedVerifyTask.criteriaEvaluation.length > 0) {
+      return selectedVerifyTask.criteriaEvaluation;
+    }
+
+    // 2. Reconstruct from criteria_status / criteriaStatus and failed_reasons
+    const statusMap = selectedVerifyTask.criteria_status || selectedVerifyTask.criteriaStatus || {};
+    const failedList = selectedVerifyTask.failed_reasons || selectedVerifyTask.failedReasons || [];
+
+    const definitions = [
+      { id: 'selfie', label: '1. Selfie: Official T-Shirt & Visible ID Card', icon: '👤', fallbackObs: 'Lenskart polo uniform and readable employee badge verification.' },
+      { id: 'torches', label: '2. Dual Torches: Cobalt Blue & Amber Yellow', icon: '🔦', fallbackObs: 'Both penlights active and powered on side-by-side.' },
+      { id: 'visionChart', label: '3. Vision Acuity Chart & Telescoping Standee', icon: '👁️', fallbackObs: 'Snellen / LogMAR acuity chart mounted at eye-level on standee.' },
+      { id: 'toolkit', label: '4. Optical Refraction Toolkit & Sanitizer', icon: '🧰', fallbackObs: '6-piece clinical refraction kit with trial frame & sanitizer.' },
+      { id: 'trialLenses', altId: 'frameDisplay', label: '5. Frame Display & Trial Lens Set', icon: '👓', fallbackObs: 'Eyewear frames display tray and clean trial lenses.' }
+    ];
+
+    return definitions.map(def => {
+      const rawStatus = statusMap[def.id] || (def.altId ? statusMap[def.altId] : null);
+      const isFatalAudit = selectedVerifyTask.auditStatus === 'FATAL';
+      
+      const matchingReasons = failedList.filter(r => {
+        const lower = String(r).toLowerCase();
+        if (def.id === 'selfie' && (lower.includes('selfie') || lower.includes('t-shirt') || lower.includes('badge') || lower.includes('id card'))) return true;
+        if (def.id === 'torches' && (lower.includes('torch') || lower.includes('penlight') || lower.includes('blue') || lower.includes('yellow'))) return true;
+        if (def.id === 'visionChart' && (lower.includes('chart') || lower.includes('standee') || lower.includes('vision'))) return true;
+        if (def.id === 'toolkit' && (lower.includes('toolkit') || lower.includes('sanitizer') || lower.includes('jcc') || lower.includes('frame') || lower.includes('ruler'))) return true;
+        if (def.id === 'trialLenses' && (lower.includes('lens') || lower.includes('display') || lower.includes('tray'))) return true;
+        return false;
+      });
+
+      const status = rawStatus || (matchingReasons.length > 0 ? 'FAIL' : (isFatalAudit ? 'UNKNOWN' : 'PASS'));
+
+      return {
+        id: def.id,
+        label: def.label,
+        icon: def.icon,
+        status: status === 'FAIL' ? 'FAIL' : (status === 'PASS' ? 'PASS' : (matchingReasons.length > 0 ? 'FAIL' : 'PASS')),
+        failureReasons: matchingReasons.length > 0 ? matchingReasons : (status === 'FAIL' ? ['Criterion non-compliance detected by AI'] : []),
+        observations: matchingReasons.length > 0 ? matchingReasons.join('. ') : (status === 'PASS' ? 'Fully compliant with clinical DLC SOP standards.' : def.fallbackObs)
+      };
+    });
+  }, [selectedVerifyTask]);
+
+  const failedCriteriaInReview = useMemo(() => {
+    return verifyCriteriaBreakdown.filter(c => c.status === 'FAIL');
+  }, [verifyCriteriaBreakdown]);
+
   // Verification statistics
   const verificationStats = useMemo(() => {
     const total = allAiAuditedTasks.length;
@@ -549,15 +624,19 @@ export default function AIAuditsConsole({
       const notesClean = humanNotesInput.trim();
       const updatedRemarks = `[Human Verified by ${reviewerName}${notesClean ? `: ${notesClean}` : ''}] ${originalRemarks}`;
 
+      const modelAuditorName = selectedVerifyTask.auditedBy || selectedVerifyTask.audited_by_name || 'gemini-3.8-flash';
+      const taskTokens = selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens || 0;
+
       if (selectedVerifyTask.auditStatus === 'PASSED') {
         await tasksApi.passAudit({
           taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
-          auditorName: `AI + ${reviewerName}`,
+          auditorName: modelAuditorName,
           auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
           remarks: updatedRemarks,
           criteriaStatus: selectedVerifyTask.criteriaStatus || {},
           replacements: [],
-          taskData: selectedVerifyTask
+          taskData: selectedVerifyTask,
+          totalTokens: taskTokens
         });
       } else {
         await tasksApi.failAudit({
@@ -567,9 +646,10 @@ export default function AIAuditsConsole({
           remarks: updatedRemarks,
           criteriaStatus: selectedVerifyTask.criteriaStatus || {},
           replacements: [],
-          auditorName: `AI + ${reviewerName}`,
+          auditorName: modelAuditorName,
           auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
-          immediateEmail: false
+          immediateEmail: false,
+          totalTokens: taskTokens
         });
       }
 
@@ -598,6 +678,8 @@ export default function AIAuditsConsole({
       const reviewerName = currentUser?.name || currentUser?.email || 'Central QA Reviewer';
       const originalRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
 
+      const taskTokens = selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens || 0;
+
       if (overrideActionType === 'PASS') {
         const remarks = `[Human Overturned FATAL to PASS by ${reviewerName}: ${overrideReasonInput.trim()}] Original AI: ${originalRemarks}`;
         await tasksApi.passAudit({
@@ -607,7 +689,8 @@ export default function AIAuditsConsole({
           remarks,
           criteriaStatus: { selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS' },
           replacements: [],
-          taskData: selectedVerifyTask
+          taskData: selectedVerifyTask,
+          totalTokens: taskTokens
         });
         if (onTaskAudited) {
           onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, 'PASSED');
@@ -623,7 +706,8 @@ export default function AIAuditsConsole({
           replacements: [],
           auditorName: reviewerName,
           auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
-          immediateEmail: false
+          immediateEmail: false,
+          totalTokens: taskTokens
         });
         if (onTaskAudited) {
           onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, 'FATAL');
@@ -653,7 +737,9 @@ export default function AIAuditsConsole({
       'City': t.facilityCode || t.city || 'Hub',
       'Date': t.date || t.dispatch_date || '',
       'AI Verdict': t.auditStatus,
-      'Audited By': t.auditedBy || t.audited_by_name || 'Gemini AI',
+      'Auditor / Model': t.auditedBy || t.audited_by_name || 'gemini-3.8-flash',
+      'Total Tokens': t.totalTokens || t.total_tokens || 0,
+      'Failed Criteria': Array.isArray(t.failedReasons || t.failed_reasons) ? (t.failedReasons || t.failed_reasons).join('; ') : '',
       'Human Status': t.humanStatus,
       'Remarks': t.remarks || t.auditor_remarks || ''
     }));
@@ -1643,6 +1729,17 @@ export default function AIAuditsConsole({
                       <div className="mt-1.5 text-[10px] text-slate-400 line-clamp-1 italic">
                         {t.remarks || t.auditor_remarks || 'No remarks'}
                       </div>
+
+                      <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500 pt-1.5 border-t border-slate-800/60 font-mono">
+                        <span className="text-sky-400 font-semibold truncate max-w-[140px]">
+                          🤖 {t.auditedBy || t.audited_by_name || 'gemini-3.8-flash'}
+                        </span>
+                        {(t.totalTokens || t.total_tokens) > 0 ? (
+                          <span className="text-emerald-400">
+                            ⚡ {((t.totalTokens || t.total_tokens) / 1000).toFixed(1)}k tokens
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                   );
                 })}
@@ -1672,9 +1769,21 @@ export default function AIAuditsConsole({
                         </span>
                       </div>
 
-                      <div className="text-right text-[11px] text-slate-400">
-                        <span className="text-[10px] uppercase font-bold text-slate-400 block">Audited By</span>
-                        <span className="font-mono text-sky-300 font-bold">{selectedVerifyTask.auditedBy || 'Gemini AI'}</span>
+                      <div className="text-right text-[11px] text-slate-400 space-y-0.5">
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-slate-400 mr-1.5">Auditor:</span>
+                          <span className="font-mono text-sky-300 font-bold">
+                            {selectedVerifyTask.auditedBy || selectedVerifyTask.audited_by_name || 'gemini-3.8-flash'}
+                          </span>
+                        </div>
+                        {(selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens) > 0 && (
+                          <div>
+                            <span className="text-[10px] uppercase font-bold text-slate-400 mr-1.5">Tokens Used:</span>
+                            <span className="font-mono text-emerald-400 font-bold">
+                              {(selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens).toLocaleString()} tokens
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1725,6 +1834,121 @@ export default function AIAuditsConsole({
                       <p className="text-slate-300 text-[11px] leading-relaxed">
                         {selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || 'No detailed remarks.'}
                       </p>
+                    </div>
+
+                    {/* AI Criteria Evaluation & Failure Triggers Breakdown */}
+                    <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white flex items-center gap-2 text-xs">
+                          <Sliders className="w-3.5 h-3.5 text-sky-400" />
+                          <span>AI Criteria Evaluation & Failure Triggers</span>
+                        </span>
+                        {selectedVerifyTask.auditStatus === 'FATAL' ? (
+                          <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-red-400" />
+                            {failedCriteriaInReview.length > 0 ? `${failedCriteriaInReview.length} Failed Criteria Triggers` : 'AI Fatal Strike'}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            All 5 Criteria Compliant
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Prominent Highlighting for AI Fatal Triggers */}
+                      {selectedVerifyTask.auditStatus === 'FATAL' && (
+                        <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/40 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-red-200 flex items-center gap-1.5 uppercase tracking-wide">
+                              <ShieldAlert className="w-4 h-4 text-red-400" />
+                              AI Fatal Strike Triggers (Why this task failed):
+                            </span>
+                            <span className="text-[9px] font-mono font-bold bg-red-500/30 text-red-200 px-2 py-0.5 rounded uppercase">
+                              Mandatory Non-Compliance
+                            </span>
+                          </div>
+
+                          <p className="text-[11px] text-red-300/90 leading-tight">
+                            The AI auditor identified non-compliance on the following mandatory equipment station photos:
+                          </p>
+
+                          <div className="space-y-1.5 pt-1">
+                            {(failedCriteriaInReview.length > 0
+                              ? failedCriteriaInReview
+                              : (selectedVerifyTask.failedReasons || ['Clinical equipment non-compliance detected by AI']).map((r, i) => ({
+                                  id: `fail-${i}`,
+                                  label: 'Non-Compliance Trigger',
+                                  icon: '🚨',
+                                  failureReasons: [r],
+                                  observations: r
+                                }))
+                            ).map((c, idx) => (
+                              <div key={c.id || idx} className="p-2.5 rounded-lg bg-red-900/40 border border-red-500/30 text-xs">
+                                <div className="flex items-center justify-between font-bold text-red-200 mb-0.5">
+                                  <span className="flex items-center gap-1.5">
+                                    <span>{c.icon || '❌'}</span>
+                                    <span>{c.label}</span>
+                                  </span>
+                                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-red-500/40 text-white">
+                                    STRIKE (FAIL)
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-red-200 pl-5 leading-snug">
+                                  {c.failureReasons && c.failureReasons.length > 0
+                                    ? c.failureReasons.join(', ')
+                                    : c.observations || 'Photo missing or criteria requirements not satisfied.'}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Full 5-Station SOP Evaluation Checklist */}
+                      <div className="space-y-2 pt-1">
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
+                          5-Station Clinical SOP Checklist ({verifyCriteriaBreakdown.filter(c => c.status === 'PASS').length}/5 Passed)
+                        </span>
+
+                        <div className="grid grid-cols-1 gap-2">
+                          {verifyCriteriaBreakdown.map((crit) => {
+                            const isFail = crit.status === 'FAIL';
+                            return (
+                              <div
+                                key={crit.id}
+                                className={`p-2.5 rounded-xl border text-xs transition-all ${
+                                  isFail
+                                    ? 'bg-red-950/20 border-red-500/40 text-red-200'
+                                    : 'bg-slate-900/60 border-slate-800 text-slate-300'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-base">{crit.icon}</span>
+                                    <span className="font-bold text-white text-xs">{crit.label}</span>
+                                  </div>
+                                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded ${
+                                    isFail
+                                      ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                  }`}>
+                                    {crit.status}
+                                  </span>
+                                </div>
+
+                                <p className={`text-[11px] mt-1.5 pl-6 leading-relaxed ${
+                                  isFail ? 'text-red-300 font-medium' : 'text-slate-400'
+                                }`}>
+                                  {crit.failureReasons && crit.failureReasons.length > 0
+                                    ? `⚠️ ${crit.failureReasons.join('. ')}`
+                                    : crit.observations || 'Compliant with clinical standards.'}
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
 
                     {/* Human Verification Action Box */}
