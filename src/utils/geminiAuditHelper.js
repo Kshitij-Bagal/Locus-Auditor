@@ -30,18 +30,41 @@ export function saveStoredGeminiApiKey(key) {
 export function getStoredGeminiModel() {
   if (typeof window !== 'undefined' && window.localStorage) {
     const saved = localStorage.getItem(GEMINI_MODEL_STORAGE_KEY);
-    if (saved && saved.trim() && !saved.includes('1.5') && !saved.includes('2.5')) return saved.trim();
+    if (saved && saved.trim() && !saved.includes('1.5') && !saved.includes('2.5')) {
+      return saved.trim();
+    } else if (saved && (saved.includes('1.5') || saved.includes('2.5'))) {
+      localStorage.setItem(GEMINI_MODEL_STORAGE_KEY, 'gemini-3.8-flash');
+    }
   }
   return 'gemini-3.8-flash';
 }
 
 export function saveStoredGeminiModel(model) {
   if (typeof window !== 'undefined' && window.localStorage) {
-    if (model && model.trim()) {
+    if (model && model.trim() && !model.includes('1.5') && !model.includes('2.5')) {
       localStorage.setItem(GEMINI_MODEL_STORAGE_KEY, model.trim());
     } else {
-      localStorage.removeItem(GEMINI_MODEL_STORAGE_KEY);
+      localStorage.setItem(GEMINI_MODEL_STORAGE_KEY, 'gemini-3.8-flash');
     }
+  }
+}
+
+/**
+ * Robust fetch with timeout to prevent hung HTTP requests.
+ */
+export async function fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`Google Gemini API request timed out after ${timeoutMs / 1000}s`);
+    }
+    throw err;
   }
 }
 
@@ -348,13 +371,17 @@ export async function listAvailableGeminiModels(apiKey) {
         const supported = data.models
           .filter(m => {
             const methods = m.supportedGenerationMethods || [];
-            return methods.includes('generateContent');
+            const id = m.name.replace(/^models\//, '');
+            // Only generateContent models, and exclude retired models that fail on generateContent
+            if (!methods.includes('generateContent')) return false;
+            if (id.includes('1.5') || id.includes('2.5')) return false;
+            return true;
           })
           .map(m => {
             const id = m.name.replace(/^models\//, '');
             const isFlash = id.toLowerCase().includes('flash');
             const isPro = id.toLowerCase().includes('pro');
-            const isLatestFlash = id === 'gemini-3.8-flash' || id === 'gemini-3.7-flash' || id === 'gemini-3.5-flash' || id === 'gemini-flash-latest' || id === 'gemini-2.5-flash' || id === 'gemini-1.5-flash-latest';
+            const isLatestFlash = id === 'gemini-3.8-flash' || id === 'gemini-3.7-flash' || id === 'gemini-3.6-flash' || id === 'gemini-3.5-flash' || id === 'gemini-flash-latest';
 
             // Token Limits
             const inputLimit = m.inputTokenLimit || (isPro ? 2097152 : 1048576);
@@ -451,13 +478,19 @@ export async function testGeminiApiKey(apiKey, targetModelId = null) {
   // 2. Assemble candidate models to test
   const candidates = [];
 
+  // Filter out any obsolete 1.5 or 2.5 models
+  let cleanTargetId = targetModelId;
+  if (cleanTargetId && (cleanTargetId.includes('1.5') || cleanTargetId.includes('2.5'))) {
+    cleanTargetId = 'gemini-3.8-flash';
+  }
+
   // If target model specified, put it first
-  if (targetModelId) {
-    const match = availableModels.find(m => m.id === targetModelId);
+  if (cleanTargetId) {
+    const match = availableModels.find(m => m.id === cleanTargetId);
     if (match) {
       candidates.push(match);
     } else {
-      candidates.push({ id: targetModelId, apiVersion: 'v1beta', displayName: targetModelId });
+      candidates.push({ id: cleanTargetId, apiVersion: 'v1beta', displayName: cleanTargetId });
     }
   }
 
@@ -468,21 +501,19 @@ export async function testGeminiApiKey(apiKey, targetModelId = null) {
       candidates.push(optimal);
     }
     availableModels.forEach(m => {
-      if (!candidates.some(c => c.id === m.id)) {
+      if (!candidates.some(c => c.id === m.id) && !m.id.includes('1.5') && !m.id.includes('2.5')) {
         candidates.push(m);
       }
     });
   } else {
-    // If ListModels failed or returned 0, try common default models
+    // If ListModels failed or returned 0, try modern 3.x Flash models only (NEVER 1.5/2.5)
     const fallbackList = [
-      { id: 'gemini-1.5-flash-latest', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash Latest' },
-      { id: 'gemini-1.5-flash', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash' },
-      { id: 'gemini-1.5-flash-002', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash 002' },
-      { id: 'gemini-2.0-flash', apiVersion: 'v1beta', displayName: 'Gemini 2.0 Flash' },
-      { id: 'gemini-2.0-flash-exp', apiVersion: 'v1beta', displayName: 'Gemini 2.0 Flash Exp' },
-      { id: 'gemini-1.5-flash-8b', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash 8B' },
-      { id: 'gemini-1.5-pro-latest', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Pro Latest' },
-      { id: 'gemini-1.5-flash', apiVersion: 'v1', displayName: 'Gemini 1.5 Flash (v1)' }
+      { id: 'gemini-3.8-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.8 Flash' },
+      { id: 'gemini-3.7-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.7 Flash' },
+      { id: 'gemini-3.6-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.6 Flash' },
+      { id: 'gemini-3.5-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.5 Flash' },
+      { id: 'gemini-flash-latest', apiVersion: 'v1beta', displayName: 'Gemini Flash Latest' },
+      { id: 'gemini-3.1-flash-lite', apiVersion: 'v1beta', displayName: 'Gemini 3.1 Flash Lite' }
     ];
     candidates.push(...fallbackList);
   }
@@ -508,11 +539,11 @@ export async function testGeminiApiKey(apiKey, targetModelId = null) {
     };
 
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithTimeout(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      });
+      }, 15000);
 
       if (response.ok) {
         const data = await response.json();
@@ -551,7 +582,8 @@ export async function auditTaskWithGemini({
   modelId = null, 
   apiVersion = null, 
   rules = INITIAL_CENTRAL_RULES, 
-  onProgress 
+  onProgress,
+  allowModelFailover = true
 }) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('Google Gemini API Key is missing. Please configure it in the AI Audits console.');
@@ -586,8 +618,6 @@ export async function auditTaskWithGemini({
     };
   }
 
-  if (onProgress) onProgress({ step: 'DOWNLOADING_IMAGES', message: `Downloading ${availableKeys.length} clinical photos via proxy...` });
-
   if (onProgress) onProgress({ step: 'DOWNLOADING_IMAGES', message: `Downloading & optimizing ${availableKeys.length} clinical photos concurrently...` });
 
   // 1. Download and optimize all 5 photos in TRUE PARALLEL
@@ -615,8 +645,14 @@ export async function auditTaskWithGemini({
   const downloadedGroups = await Promise.all(downloadPromises);
   const imageParts = downloadedGroups.flat();
 
-  // 2. Resolve active model and endpoint
-  let activeModel = modelId || getStoredGeminiModel() || 'gemini-3.8-flash';
+  // 2. Resolve active model and sanitize legacy versions
+  let requestedModel = modelId || getStoredGeminiModel() || 'gemini-3.8-flash';
+  if (requestedModel.includes('1.5') || requestedModel.includes('2.5')) {
+    requestedModel = 'gemini-3.8-flash';
+    saveStoredGeminiModel('gemini-3.8-flash');
+  }
+
+  let activeModel = requestedModel;
   let activeVersion = apiVersion || 'v1beta';
 
   if (onProgress) onProgress({ step: 'QUERYING_AI', message: `Sending optimized 5-photo inspection request to ${activeModel}...` });
@@ -633,101 +669,139 @@ export async function auditTaskWithGemini({
     ],
     generationConfig: {
       temperature: 0.1,
-      responseMimeType: 'application/json',
-      thinkingConfig: {
-        thinkingBudget: 0
-      }
+      responseMimeType: 'application/json'
     }
   };
 
-  let endpoint = `https://generativelanguage.googleapis.com/${activeVersion}/models/${activeModel}:generateContent?key=${apiKey.trim()}`;
-
-  let response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-
-  // Helper for pause
   const waitMs = (ms) => new Promise(res => setTimeout(res, ms));
 
-  // If response failed, handle auto-fallbacks (e.g. responseMimeType / thinkingConfig not supported, model not found, or temporary high demand)
-  if (!response.ok) {
-    let errorBody = await response.text();
-    let isMimeTypeError = errorBody.includes('response_mime_type') || errorBody.includes('responseMimeType');
-    let isThinkingConfigError = errorBody.includes('thinking_budget') || errorBody.includes('thinkingConfig') || errorBody.includes('thinking');
-    let isModelNotFoundError = response.status === 404 || errorBody.includes('not found') || errorBody.includes('no longer available') || errorBody.includes('ListModels');
-    let isHighDemand = response.status === 503 || errorBody.includes('high demand') || errorBody.includes('overloaded');
+  // Helper to execute request with 35s timeout
+  const executeQuery = async (targetModel) => {
+    const endpoint = `https://generativelanguage.googleapis.com/${activeVersion}/models/${targetModel}:generateContent?key=${apiKey.trim()}`;
+    return await fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, 35000);
+  };
 
-    if (isThinkingConfigError) {
-      delete payload.generationConfig.thinkingConfig;
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-    } else if (isMimeTypeError) {
+  let response = null;
+  let errorBody = '';
+
+  try {
+    response = await executeQuery(activeModel);
+  } catch (err) {
+    errorBody = err.message;
+  }
+
+  // Handle errors (MIME type, 503 high demand spike, 429 quota, or model not found)
+  if (!response || !response.ok) {
+    if (response) errorBody = await response.text();
+
+    const isMimeTypeError = errorBody.includes('response_mime_type') || errorBody.includes('responseMimeType');
+    let isHighDemand = (response && (response.status === 503 || response.status === 429)) || 
+                       errorBody.includes('high demand') || 
+                       errorBody.includes('overloaded') || 
+                       errorBody.includes('RESOURCE_EXHAUSTED') || 
+                       errorBody.includes('UNAVAILABLE');
+
+    // 1. Retry without responseMimeType if model doesn't support JSON mode
+    if (isMimeTypeError) {
       delete payload.generationConfig.responseMimeType;
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-    } else if (isHighDemand) {
-      // 1. Retry with exponential backoff on current model (spikes are temporary)
-      if (onProgress) onProgress({ step: 'RETRYING', message: `Google reports high demand spike. Retrying ${activeModel} in 1.5s...` });
-      await waitMs(1500);
-
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      // 2. If still high demand, failover to sister 3.x model (gemini-3.7-flash or gemini-3.5-flash)
-      if (!response.ok) {
-        const retryErr = await response.text();
-        if (response.status === 503 || retryErr.includes('high demand')) {
-          const sisterModel = activeModel === 'gemini-3.8-flash' ? 'gemini-3.7-flash' : 'gemini-3.8-flash';
-          if (onProgress) onProgress({ step: 'FAILOVER', message: `${activeModel} still busy. Re-routing to ${sisterModel}...` });
-          
-          activeModel = sisterModel;
-          saveStoredGeminiModel(sisterModel);
-          endpoint = `https://generativelanguage.googleapis.com/${activeVersion}/models/${sisterModel}:generateContent?key=${apiKey.trim()}`;
-          
-          await waitMs(1000);
-          response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-        }
+      try {
+        response = await executeQuery(activeModel);
+      } catch (e) {
+        errorBody = e.message;
       }
-    } else if (isModelNotFoundError) {
-      // Model not available or retired: pick optimal supported 3.x model
-      const discovered = await listAvailableGeminiModels(apiKey);
-      const fallback = pickOptimalModel(discovered);
-      if (fallback && fallback.id !== activeModel) {
-        activeModel = fallback.id;
-        activeVersion = fallback.apiVersion || 'v1beta';
-        saveStoredGeminiModel(activeModel);
+      if (response && !response.ok) errorBody = await response.text();
+    }
 
-        endpoint = `https://generativelanguage.googleapis.com/${activeVersion}/models/${activeModel}:generateContent?key=${apiKey.trim()}`;
-        response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+    // 2. High Demand (503) or Rate Limit (429) Handling
+    if (!response || !response.ok) {
+      isHighDemand = (response && (response.status === 503 || response.status === 429)) || 
+                     errorBody.includes('high demand') || 
+                     errorBody.includes('overloaded') || 
+                     errorBody.includes('RESOURCE_EXHAUSTED') || 
+                     errorBody.includes('UNAVAILABLE');
+
+      if (isHighDemand) {
+        // Fast retry after 1.2s on selected model in case it was a momentary spike
+        if (onProgress) onProgress({ step: 'RETRYING', message: `Google reports high demand on ${activeModel}. Retrying in 1.2s...` });
+        await waitMs(1200);
+
+        try {
+          response = await executeQuery(activeModel);
+        } catch (e) {
+          errorBody = e.message;
+        }
+
+        // If still 503 and auto-failover is enabled, try sister Flash models
+        if ((!response || !response.ok) && allowModelFailover) {
+          if (response) errorBody = await response.text();
+          
+          // Pool of available 3.x Flash models in project
+          const sisterModels = [
+            'gemini-3.7-flash',
+            'gemini-3.6-flash',
+            'gemini-3.5-flash',
+            'gemini-flash-latest',
+            'gemini-3.1-flash-lite'
+          ].filter(m => m !== activeModel);
+
+          for (const sister of sisterModels) {
+            if (onProgress) onProgress({ step: 'FAILOVER', message: `${activeModel} still busy. Auto-routing to sister model ${sister}...` });
+            await waitMs(600);
+
+            try {
+              const sisterRes = await executeQuery(sister);
+              if (sisterRes.ok) {
+                response = sisterRes;
+                activeModel = sister;
+                break;
+              } else {
+                errorBody = await sisterRes.text();
+              }
+            } catch (sisterErr) {
+              errorBody = sisterErr.message;
+            }
+          }
+        }
       }
     }
 
-    if (!response.ok) {
-      const finalErr = await response.text();
-      let msg = `Gemini API Error ${response.status}: ${response.statusText}`;
+    // 3. Model Not Found / Retired (e.g. 404)
+    if (!response || !response.ok) {
+      const isNotFound = (response && response.status === 404) || errorBody.includes('not found') || errorBody.includes('no longer available');
+      if (isNotFound && allowModelFailover) {
+        const discovered = await listAvailableGeminiModels(apiKey);
+        const fallback = pickOptimalModel(discovered);
+        if (fallback && fallback.id !== activeModel) {
+          activeModel = fallback.id;
+          activeVersion = fallback.apiVersion || 'v1beta';
+          if (onProgress) onProgress({ step: 'FAILOVER', message: `Re-routing to active supported model ${activeModel}...` });
+          try {
+            response = await executeQuery(activeModel);
+          } catch (e) {
+            errorBody = e.message;
+          }
+          if (response && !response.ok) errorBody = await response.text();
+        }
+      }
+    }
+
+    // Final failure check
+    if (!response || !response.ok) {
+      let msg = response ? `Gemini API Error ${response.status}: ${response.statusText}` : `Request Error: ${errorBody}`;
       try {
-        const parsed = JSON.parse(finalErr);
+        const parsed = JSON.parse(errorBody);
         if (parsed.error?.message) msg = parsed.error.message;
-      } catch (_) {}
+      } catch (_) {
+        if (errorBody && errorBody.length < 250) msg = errorBody;
+      }
+
+      if (msg.includes('high demand') || msg.includes('503')) {
+        msg = `Google Gemini servers are currently experiencing peak traffic on ${requestedModel} (503 High Demand). Please select gemini-3.7-flash from the dropdown or try again in a few moments.`;
+      }
       throw new Error(msg);
     }
   }

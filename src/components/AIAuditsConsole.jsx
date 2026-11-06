@@ -28,7 +28,12 @@ import {
   Clock,
   Info,
   Activity,
-  Zap
+  Zap,
+  UserCheck,
+  ThumbsUp,
+  ThumbsDown,
+  CheckCheck,
+  FileSpreadsheet
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -75,7 +80,7 @@ export default function AIAuditsConsole({
 
     const isPro = selectedModel.toLowerCase().includes('pro');
     const isFlash = selectedModel.toLowerCase().includes('flash');
-    const isRecommended = selectedModel === 'gemini-3.8-flash' || selectedModel === 'gemini-3.7-flash' || selectedModel === 'gemini-3.5-flash' || selectedModel === 'gemini-flash-latest' || selectedModel === 'gemini-2.5-flash' || selectedModel === 'gemini-1.5-flash-latest';
+    const isRecommended = selectedModel === 'gemini-3.8-flash' || selectedModel === 'gemini-3.7-flash' || selectedModel === 'gemini-3.6-flash' || selectedModel === 'gemini-3.5-flash' || selectedModel === 'gemini-flash-latest';
     return {
       id: selectedModel,
       displayName: selectedModel,
@@ -104,10 +109,26 @@ export default function AIAuditsConsole({
   const [currentProgress, setCurrentProgress] = useState({ step: '', message: '' });
   const [activeAuditResult, setActiveAuditResult] = useState(null);
   const [autoCommitToDb, setAutoCommitToDb] = useState(true);
+  const [allowFailover, setAllowFailover] = useState(true);
 
   // 4. Session History Ledger
   const [sessionHistory, setSessionHistory] = useState([]);
   const [previewImage, setPreviewImage] = useState(null);
+
+  // 5. Active Console Mode: 'EXECUTE' | 'VERIFY'
+  const [activeConsoleTab, setActiveConsoleTab] = useState('EXECUTE');
+
+  // 6. Human Review & Verification States
+  const [verifySearchQuery, setVerifySearchQuery] = useState('');
+  const [verifyCityFilter, setVerifyCityFilter] = useState('ALL');
+  const [verifyVerdictFilter, setVerifyVerdictFilter] = useState('ALL'); // 'ALL' | 'PASSED' | 'FATAL'
+  const [verifyHumanStatusFilter, setVerifyHumanStatusFilter] = useState('ALL'); // 'ALL' | 'PENDING' | 'VERIFIED' | 'OVERTURNED'
+  const [selectedVerifyTaskId, setSelectedVerifyTaskId] = useState(null);
+  const [overrideModalOpen, setOverrideModalOpen] = useState(false);
+  const [overrideActionType, setOverrideActionType] = useState('PASS'); // 'PASS' | 'FATAL'
+  const [overrideReasonInput, setOverrideReasonInput] = useState('');
+  const [humanNotesInput, setHumanNotesInput] = useState('');
+  const [isVerifyingAction, setIsVerifyingAction] = useState(false);
 
   // Auto-discover models quietly when API key exists and ensure selectedModel is valid
   useEffect(() => {
@@ -247,7 +268,8 @@ export default function AIAuditsConsole({
         apiKey,
         modelId: selectedModel,
         rules: INITIAL_CENTRAL_RULES,
-        onProgress: (prog) => setCurrentProgress(prog)
+        onProgress: (prog) => setCurrentProgress(prog),
+        allowModelFailover: allowFailover
       });
 
       setActiveAuditResult({
@@ -369,9 +391,9 @@ export default function AIAuditsConsole({
       await runAiAuditOnTask(t, autoCommitToDb);
       processed++;
       
-      // 800ms throttle interval between tasks to avoid API rate limits
+      // 2000ms throttle interval between tasks to stay safely under Google's 15 RPM rate limit
       if (processed < tasksToProcess.length && !isBatchCancelledRef.current) {
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 2000));
       }
     }
 
@@ -408,6 +430,238 @@ export default function AIAuditsConsole({
       frameDisplay: normalizeLocusUrl(imgObj.frameDisplay, taskId)
     };
   }, [selectedTask]);
+
+  // All AI-audited tasks (from Supabase tasks + current session)
+  const allAiAuditedTasks = useMemo(() => {
+    const list = tasks.filter(t => {
+      const isAudited = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
+      if (!isAudited) return false;
+      const by = (t.auditedBy || t.audited_by_name || '').toLowerCase();
+      const rem = (t.remarks || t.auditor_remarks || '').toLowerCase();
+      return by.includes('gemini') || by.includes('ai') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
+    }).map(t => {
+      const rem = (t.remarks || t.auditor_remarks || '');
+      const isVerified = rem.includes('[Human Verified') || t.human_verified;
+      const isOverturned = rem.includes('[Human Overturned') || t.human_overturned;
+      const humanStatus = isOverturned ? 'OVERTURNED' : (isVerified ? 'VERIFIED' : 'PENDING');
+      return {
+        ...t,
+        humanStatus
+      };
+    });
+
+    // Also include any tasks audited in current session not yet refreshed in tasks prop
+    sessionHistory.forEach(s => {
+      if (!list.some(t => String(t.id || t.taskId) === String(s.taskId))) {
+        list.push({
+          id: s.taskId,
+          taskId: s.taskId,
+          feName: s.feName,
+          feCode: s.feCode,
+          facilityCode: s.city,
+          city: s.city,
+          date: s.date,
+          auditStatus: s.verdict,
+          auditedBy: s.modelUsed ? `Gemini (${s.modelUsed})` : 'Gemini AI',
+          remarks: `AI ${s.verdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`,
+          auditor_remarks: `AI ${s.verdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`,
+          images: s.task?.images || {},
+          humanStatus: 'PENDING'
+        });
+      }
+    });
+
+    return list;
+  }, [tasks, sessionHistory]);
+
+  // Distinct cities in AI audited tasks
+  const verifyAvailableCities = useMemo(() => {
+    const s = new Set();
+    allAiAuditedTasks.forEach(t => {
+      const c = t.facilityCode || t.city;
+      if (c) s.add(c);
+    });
+    return Array.from(s).sort();
+  }, [allAiAuditedTasks]);
+
+  // Filtered tasks for Human Verification Hub
+  const filteredVerifyTasks = useMemo(() => {
+    return allAiAuditedTasks.filter(t => {
+      if (verifyVerdictFilter !== 'ALL' && t.auditStatus !== verifyVerdictFilter) return false;
+      if (verifyHumanStatusFilter !== 'ALL' && t.humanStatus !== verifyHumanStatusFilter) return false;
+      if (verifyCityFilter !== 'ALL') {
+        const c = t.facilityCode || t.city || '';
+        if (c.toLowerCase() !== verifyCityFilter.toLowerCase()) return false;
+      }
+      if (verifySearchQuery.trim()) {
+        const q = verifySearchQuery.toLowerCase().trim();
+        const mId = String(t.taskId || t.id || '').toLowerCase().includes(q);
+        const mFe = String(t.feName || '').toLowerCase().includes(q);
+        const mCode = String(t.feCode || '').toLowerCase().includes(q);
+        if (!mId && !mFe && !mCode) return false;
+      }
+      return true;
+    });
+  }, [allAiAuditedTasks, verifyVerdictFilter, verifyHumanStatusFilter, verifyCityFilter, verifySearchQuery]);
+
+  // Selected Task for Human Verification
+  const selectedVerifyTask = useMemo(() => {
+    if (!filteredVerifyTasks.length) return null;
+    if (selectedVerifyTaskId) {
+      const found = filteredVerifyTasks.find(t => String(t.id || t.taskId) === String(selectedVerifyTaskId));
+      if (found) return found;
+    }
+    return filteredVerifyTasks[0];
+  }, [filteredVerifyTasks, selectedVerifyTaskId]);
+
+  // Images for selected verification task
+  const verifyTaskImages = useMemo(() => {
+    if (!selectedVerifyTask) return {};
+    const imgObj = selectedVerifyTask.images || {};
+    const taskId = selectedVerifyTask.id || selectedVerifyTask.taskId;
+    return {
+      selfie: normalizeLocusUrl(imgObj.selfie, taskId),
+      torches: normalizeLocusUrl(imgObj.torches, taskId),
+      visionChart: normalizeLocusUrl(imgObj.visionChart, taskId),
+      toolkit: normalizeLocusUrl(imgObj.toolkit, taskId),
+      frameDisplay: normalizeLocusUrl(imgObj.frameDisplay, taskId)
+    };
+  }, [selectedVerifyTask]);
+
+  // Verification statistics
+  const verificationStats = useMemo(() => {
+    const total = allAiAuditedTasks.length;
+    const fatal = allAiAuditedTasks.filter(t => t.auditStatus === 'FATAL').length;
+    const passed = allAiAuditedTasks.filter(t => t.auditStatus === 'PASSED').length;
+    const verified = allAiAuditedTasks.filter(t => t.humanStatus === 'VERIFIED').length;
+    const overturned = allAiAuditedTasks.filter(t => t.humanStatus === 'OVERTURNED').length;
+    const agreementRate = total > 0 ? (((total - overturned) / total) * 100).toFixed(1) : 100;
+    return { total, fatal, passed, verified, overturned, agreementRate };
+  }, [allAiAuditedTasks]);
+
+  // Human confirms and approves AI verdict
+  const handleConfirmAiVerdict = async () => {
+    if (!selectedVerifyTask) return;
+    setIsVerifyingAction(true);
+    try {
+      const reviewerName = currentUser?.name || currentUser?.email || 'Central QA Reviewer';
+      const originalRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
+      const notesClean = humanNotesInput.trim();
+      const updatedRemarks = `[Human Verified by ${reviewerName}${notesClean ? `: ${notesClean}` : ''}] ${originalRemarks}`;
+
+      if (selectedVerifyTask.auditStatus === 'PASSED') {
+        await tasksApi.passAudit({
+          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
+          auditorName: `AI + ${reviewerName}`,
+          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          remarks: updatedRemarks,
+          criteriaStatus: selectedVerifyTask.criteriaStatus || {},
+          replacements: [],
+          taskData: selectedVerifyTask
+        });
+      } else {
+        await tasksApi.failAudit({
+          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
+          taskData: selectedVerifyTask,
+          failedReasons: selectedVerifyTask.failedReasons || ['AI Fatal Strike Confirmed by Human Reviewer'],
+          remarks: updatedRemarks,
+          criteriaStatus: selectedVerifyTask.criteriaStatus || {},
+          replacements: [],
+          auditorName: `AI + ${reviewerName}`,
+          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          immediateEmail: false
+        });
+      }
+
+      if (onTaskAudited) {
+        onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, selectedVerifyTask.auditStatus);
+      }
+      setHumanNotesInput('');
+      alert(`Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} confirmed and verified by ${reviewerName}!`);
+    } catch (err) {
+      alert(`Failed to verify audit: ${err.message}`);
+    } finally {
+      setIsVerifyingAction(false);
+    }
+  };
+
+  // Human overturns AI verdict
+  const handleExecuteOverturn = async () => {
+    if (!selectedVerifyTask) return;
+    if (!overrideReasonInput.trim()) {
+      alert('Please enter a reason for overturning the AI verdict.');
+      return;
+    }
+
+    setIsVerifyingAction(true);
+    try {
+      const reviewerName = currentUser?.name || currentUser?.email || 'Central QA Reviewer';
+      const originalRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
+
+      if (overrideActionType === 'PASS') {
+        const remarks = `[Human Overturned FATAL to PASS by ${reviewerName}: ${overrideReasonInput.trim()}] Original AI: ${originalRemarks}`;
+        await tasksApi.passAudit({
+          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
+          auditorName: reviewerName,
+          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          remarks,
+          criteriaStatus: { selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS' },
+          replacements: [],
+          taskData: selectedVerifyTask
+        });
+        if (onTaskAudited) {
+          onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, 'PASSED');
+        }
+      } else {
+        const remarks = `[Human Overturned PASS to FATAL by ${reviewerName}: ${overrideReasonInput.trim()}] Original AI: ${originalRemarks}`;
+        await tasksApi.failAudit({
+          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
+          taskData: selectedVerifyTask,
+          failedReasons: [overrideReasonInput.trim()],
+          remarks,
+          criteriaStatus: selectedVerifyTask.criteriaStatus || {},
+          replacements: [],
+          auditorName: reviewerName,
+          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          immediateEmail: false
+        });
+        if (onTaskAudited) {
+          onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, 'FATAL');
+        }
+      }
+
+      setOverrideModalOpen(false);
+      setOverrideReasonInput('');
+      alert(`Verdict overturned to ${overrideActionType} for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id}!`);
+    } catch (err) {
+      alert(`Failed to overturn verdict: ${err.message}`);
+    } finally {
+      setIsVerifyingAction(false);
+    }
+  };
+
+  // Export Verification Audit Trail to Excel
+  const handleExportVerificationExcel = () => {
+    if (allAiAuditedTasks.length === 0) {
+      alert('No AI audits to export.');
+      return;
+    }
+    const exportData = allAiAuditedTasks.map(t => ({
+      'Task ID': t.taskId || t.id,
+      'Field Executive': t.feName || 'N/A',
+      'FE Code': t.feCode || '',
+      'City': t.facilityCode || t.city || 'Hub',
+      'Date': t.date || t.dispatch_date || '',
+      'AI Verdict': t.auditStatus,
+      'Audited By': t.auditedBy || t.audited_by_name || 'Gemini AI',
+      'Human Status': t.humanStatus,
+      'Remarks': t.remarks || t.auditor_remarks || ''
+    }));
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'AI_Human_Verification');
+    XLSX.writeFile(wb, `AI_Human_Verification_Log_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
 
   return (
     <div className="space-y-6 animate-fade-in max-w-7xl mx-auto">
@@ -451,6 +705,43 @@ export default function AIAuditsConsole({
         </div>
       </div>
 
+      {/* Mode Switcher: Run AI Audits vs Human Verification Hub */}
+      <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+        <button
+          type="button"
+          onClick={() => setActiveConsoleTab('EXECUTE')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            activeConsoleTab === 'EXECUTE'
+              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-lg shadow-sky-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+          }`}
+        >
+          <Sparkles className="w-4 h-4 text-sky-400" />
+          <span>Run AI Audits</span>
+          <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-slate-300 border border-slate-800 font-mono">
+            {queueTasks.length} Pending
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveConsoleTab('VERIFY')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            activeConsoleTab === 'VERIFY'
+              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-lg shadow-emerald-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+          }`}
+        >
+          <UserCheck className="w-4 h-4 text-emerald-400" />
+          <span>Human Review & Verification</span>
+          <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-emerald-300 border border-slate-800 font-mono">
+            {allAiAuditedTasks.length} AI Audits
+          </span>
+        </button>
+      </div>
+
+      {activeConsoleTab === 'EXECUTE' ? (
+        <>
       {/* Google Gemini API Key & Model Configuration Bar */}
       <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -535,13 +826,30 @@ export default function AIAuditsConsole({
               ) : (
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-mono font-bold text-sky-400 bg-slate-950 border border-slate-700 px-2.5 py-1 rounded-lg">
-                    {selectedModel || 'gemini-1.5-flash-latest'}
+                    {selectedModel || 'gemini-3.8-flash'}
                   </span>
                   <span className="text-[10px] text-slate-500 italic">
                     (Auto-discovers model token limits on Test)
                   </span>
                 </div>
               )}
+
+              {/* Smart Auto-Failover Toggle */}
+              <label 
+                className="flex items-center gap-1.5 text-[11px] text-slate-300 font-medium cursor-pointer select-none bg-slate-950 border border-slate-800 hover:border-slate-700 px-2.5 py-1.5 rounded-lg transition-colors"
+                title="When Google experiences temporary 503 high-demand spikes on a model, automatically failover to sister Flash models (3.7/3.6/3.5) to keep audits running with 0 errors"
+              >
+                <input
+                  type="checkbox"
+                  checked={allowFailover}
+                  onChange={(e) => setAllowFailover(e.target.checked)}
+                  className="rounded border-slate-700 text-sky-500 focus:ring-sky-500 focus:ring-offset-0 bg-slate-900 w-3.5 h-3.5 cursor-pointer"
+                />
+                <span className="flex items-center gap-1">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Auto-Failover on 503 Demand Spikes</span>
+                </span>
+              </label>
 
               {/* Recommendation Pill */}
               {activeModelObj.isRecommended ? (
@@ -1123,6 +1431,431 @@ export default function AIAuditsConsole({
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+        </>
+      ) : (
+        /* TAB 2: HUMAN REVIEW & VERIFICATION HUB */
+        <div className="space-y-6">
+          {/* Verification Summary KPIs Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
+                Total AI Audited
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-white">{verificationStats.total}</span>
+                <span className="text-[10px] text-slate-500">Visits</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-emerald-950 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
+                AI Passed
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-emerald-400">{verificationStats.passed}</span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {verificationStats.total > 0 ? ((verificationStats.passed / verificationStats.total) * 100).toFixed(0) : 0}%
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-red-950 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-red-400 block mb-1">
+                AI Fatal Strikes
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-red-400">{verificationStats.fatal}</span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {verificationStats.total > 0 ? ((verificationStats.fatal / verificationStats.total) * 100).toFixed(0) : 0}%
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-sky-950 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
+                Human Verified
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-sky-400">{verificationStats.verified}</span>
+                <span className="text-[10px] text-slate-500">Confirmed</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-amber-950 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 block mb-1">
+                Human Overturned
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-amber-400">{verificationStats.overturned}</span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {verificationStats.agreementRate}% Match
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Verification Filters Bar */}
+          <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <Filter className="w-4 h-4 text-emerald-400" />
+                <span className="font-bold text-white uppercase tracking-wider">
+                  Review Queue ({filteredVerifyTasks.length} Visits)
+                </span>
+              </div>
+
+              <button
+                onClick={handleExportVerificationExcel}
+                className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Export Verification Ledger</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 text-xs">
+              {/* Search */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 flex items-center gap-2">
+                <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <input
+                  type="text"
+                  value={verifySearchQuery}
+                  onChange={(e) => setVerifySearchQuery(e.target.value)}
+                  placeholder="Search Task ID, FE Name..."
+                  className="w-full bg-transparent text-white text-xs placeholder-slate-500 focus:outline-none"
+                />
+              </div>
+
+              {/* City */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+                <span className="text-[10px] font-bold text-slate-400 block mb-0.5">City / Hub</span>
+                <select
+                  value={verifyCityFilter}
+                  onChange={(e) => setVerifyCityFilter(e.target.value)}
+                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
+                >
+                  <option value="ALL" className="bg-slate-900 text-white">All Cities</option>
+                  {verifyAvailableCities.map(c => (
+                    <option key={c} value={c} className="bg-slate-900 text-white">{c}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* AI Verdict Filter */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+                <span className="text-[10px] font-bold text-slate-400 block mb-0.5">AI Verdict</span>
+                <select
+                  value={verifyVerdictFilter}
+                  onChange={(e) => setVerifyVerdictFilter(e.target.value)}
+                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
+                >
+                  <option value="ALL" className="bg-slate-900 text-white">All AI Verdicts</option>
+                  <option value="PASSED" className="bg-slate-900 text-emerald-300">AI Passed</option>
+                  <option value="FATAL" className="bg-slate-900 text-red-300">AI Fatal Strike</option>
+                </select>
+              </div>
+
+              {/* Human Verification Status */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+                <span className="text-[10px] font-bold text-slate-400 block mb-0.5">Human Review Status</span>
+                <select
+                  value={verifyHumanStatusFilter}
+                  onChange={(e) => setVerifyHumanStatusFilter(e.target.value)}
+                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
+                >
+                  <option value="ALL" className="bg-slate-900 text-white">All Human States</option>
+                  <option value="PENDING" className="bg-slate-900 text-amber-300">Pending Human Check</option>
+                  <option value="VERIFIED" className="bg-slate-900 text-emerald-300">Verified by Human</option>
+                  <option value="OVERTURNED" className="bg-slate-900 text-purple-300">Overturned / Overridden</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Verification Split-Pane */}
+          {filteredVerifyTasks.length === 0 ? (
+            <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+              <UserCheck className="w-10 h-10 text-slate-600 mx-auto" />
+              <h3 className="text-base font-bold text-white">No AI-Audited Tasks Found</h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto">
+                Run audits in the &ldquo;Run AI Audits&rdquo; tab first. All audited visits will appear here for human oversight and verification.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              {/* Left Queue List (5 cols) */}
+              <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-2 shadow-xl max-h-[750px] overflow-y-auto">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                  <span>Audited Visits ({filteredVerifyTasks.length})</span>
+                  <span>AI Verdict / State</span>
+                </div>
+
+                {filteredVerifyTasks.map(t => {
+                  const isSelected = String(selectedVerifyTask?.id || selectedVerifyTask?.taskId) === String(t.id || t.taskId);
+                  const isFatal = t.auditStatus === 'FATAL';
+
+                  return (
+                    <div
+                      key={t.id || t.taskId}
+                      onClick={() => setSelectedVerifyTaskId(t.id || t.taskId)}
+                      className={`p-3 rounded-xl border text-xs cursor-pointer transition-all ${
+                        isSelected
+                          ? 'bg-sky-950/40 border-sky-500/60 shadow-md shadow-sky-950/50'
+                          : 'bg-slate-950/60 hover:bg-slate-950 border-slate-800/80'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-bold text-white text-[13px]">
+                          #{t.taskId || t.id}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded ${
+                            isFatal ? 'bg-red-500/20 text-red-300 border border-red-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          }`}>
+                            AI {t.auditStatus}
+                          </span>
+
+                          {t.humanStatus === 'VERIFIED' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-0.5">
+                              <Check className="w-2.5 h-2.5" /> Verified
+                            </span>
+                          )}
+                          {t.humanStatus === 'OVERTURNED' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-0.5">
+                              <RotateCcw className="w-2.5 h-2.5" /> Overturned
+                            </span>
+                          )}
+                          {t.humanStatus === 'PENDING' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                              Pending
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
+                        <span>{t.feName || 'Unknown FE'} ({t.feCode || 'FE'})</span>
+                        <span>{t.facilityCode || t.city || 'Hub'}</span>
+                      </div>
+
+                      <div className="mt-1.5 text-[10px] text-slate-400 line-clamp-1 italic">
+                        {t.remarks || t.auditor_remarks || 'No remarks'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Right Inspection & Human Action Panel (7 cols) */}
+              <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl space-y-4">
+                {selectedVerifyTask ? (
+                  <>
+                    {/* Task Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-black text-white font-mono">
+                            Task #{selectedVerifyTask.taskId || selectedVerifyTask.id}
+                          </span>
+                          <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-full ${
+                            selectedVerifyTask.auditStatus === 'FATAL'
+                              ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                              : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                          }`}>
+                            Current: {selectedVerifyTask.auditStatus}
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-400 block mt-0.5">
+                          {selectedVerifyTask.feName} ({selectedVerifyTask.feCode}) • {selectedVerifyTask.facilityCode || selectedVerifyTask.city} • {selectedVerifyTask.date || 'Today'}
+                        </span>
+                      </div>
+
+                      <div className="text-right text-[11px] text-slate-400">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block">Audited By</span>
+                        <span className="font-mono text-sky-300 font-bold">{selectedVerifyTask.auditedBy || 'Gemini AI'}</span>
+                      </div>
+                    </div>
+
+                    {/* 5 Clinical Photos Gallery */}
+                    <div>
+                      <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block mb-2">
+                        Clinical Photo Evidence (Click any photo to zoom)
+                      </span>
+
+                      <div className="grid grid-cols-5 gap-2">
+                        {[
+                          { key: 'selfie', label: '1. Selfie' },
+                          { key: 'torches', label: '2. Torches' },
+                          { key: 'visionChart', label: '3. Chart' },
+                          { key: 'toolkit', label: '4. Toolkit' },
+                          { key: 'frameDisplay', label: '5. Frame' }
+                        ].map(st => {
+                          const url = verifyTaskImages[st.key];
+                          return (
+                            <div
+                              key={st.key}
+                              onClick={() => url && setPreviewImage({ url, title: `${st.label} - Task #${selectedVerifyTask.taskId || selectedVerifyTask.id}` })}
+                              className={`rounded-xl border p-1 text-center cursor-pointer transition-all ${
+                                url
+                                ? 'bg-slate-950 border-slate-800 hover:border-sky-500'
+                                : 'bg-slate-950/40 border-slate-800/40 opacity-40 cursor-not-allowed'
+                              }`}
+                            >
+                              <div className="aspect-square bg-slate-900 rounded-lg overflow-hidden flex items-center justify-center relative mb-1">
+                                {url ? (
+                                  <img src={url} alt={st.label} className="w-full h-full object-cover" />
+                                ) : (
+                                  <Camera className="w-4 h-4 text-slate-600" />
+                                )}
+                              </div>
+                              <span className="text-[9px] font-bold text-slate-400 block truncate">{st.label}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* AI Diagnostic Remarks */}
+                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5 text-xs">
+                      <span className="font-bold text-sky-400 flex items-center gap-1.5 text-xs">
+                        <Sparkles className="w-3.5 h-3.5" /> AI Diagnostic Summary
+                      </span>
+                      <p className="text-slate-300 text-[11px] leading-relaxed">
+                        {selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || 'No detailed remarks.'}
+                      </p>
+                    </div>
+
+                    {/* Human Verification Action Box */}
+                    <div className="p-4 rounded-xl bg-gradient-to-br from-slate-950 to-slate-900 border border-emerald-900/40 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white text-xs flex items-center gap-1.5">
+                          <UserCheck className="w-4 h-4 text-emerald-400" /> Human Reviewer Decision
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          Logged in as: <strong className="text-slate-200">{currentUser?.name || 'Reviewer'}</strong>
+                        </span>
+                      </div>
+
+                      {/* Reviewer Note Input */}
+                      <div>
+                        <input
+                          type="text"
+                          value={humanNotesInput}
+                          onChange={(e) => setHumanNotesInput(e.target.value)}
+                          placeholder="Add optional verification notes or rationale..."
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-medium"
+                        />
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                        {/* Confirm Button */}
+                        <button
+                          onClick={handleConfirmAiVerdict}
+                          disabled={isVerifyingAction}
+                          className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-emerald-950/40"
+                        >
+                          <CheckCheck className="w-4 h-4" />
+                          <span>Confirm AI Verdict</span>
+                        </button>
+
+                        {/* Overturn Button */}
+                        {selectedVerifyTask.auditStatus === 'FATAL' ? (
+                          <button
+                            onClick={() => {
+                              setOverrideActionType('PASS');
+                              setOverrideModalOpen(true);
+                            }}
+                            disabled={isVerifyingAction}
+                            className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-amber-950/40"
+                          >
+                            <ThumbsUp className="w-4 h-4" />
+                            <span>Overturn to PASS</span>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setOverrideActionType('FATAL');
+                              setOverrideModalOpen(true);
+                            }}
+                            disabled={isVerifyingAction}
+                            className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-red-950/40"
+                          >
+                            <ThumbsDown className="w-4 h-4" />
+                            <span>Overturn to FATAL</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="py-20 text-center text-slate-500 text-xs">
+                    Select a visit from the left to inspect and verify.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Overturn Reason Modal */}
+          {overrideModalOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                  <span className="font-bold text-white text-sm flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    Overturn AI Verdict to {overrideActionType}
+                  </span>
+                  <button
+                    onClick={() => setOverrideModalOpen(false)}
+                    className="text-slate-400 hover:text-white text-xs font-bold"
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                <div className="space-y-2 text-xs text-slate-300">
+                  <p>
+                    You are overriding Task #{selectedVerifyTask?.taskId || selectedVerifyTask?.id} from{' '}
+                    <strong className="text-white">{selectedVerifyTask?.auditStatus}</strong> to{' '}
+                    <strong className={overrideActionType === 'PASS' ? 'text-emerald-400' : 'text-red-400'}>
+                      {overrideActionType}
+                    </strong>.
+                  </p>
+                  <label className="block font-bold text-slate-300 text-[11px] pt-1">
+                    Reason for Overturning (Required for audit compliance):
+                  </label>
+                  <textarea
+                    value={overrideReasonInput}
+                    onChange={(e) => setOverrideReasonInput(e.target.value)}
+                    placeholder="e.g. Torches visible upon closer inspection in dark room; clinical standard satisfied."
+                    rows={3}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-medium"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => setOverrideModalOpen(false)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleExecuteOverturn}
+                    disabled={!overrideReasonInput.trim() || isVerifyingAction}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold text-white transition-colors cursor-pointer disabled:opacity-50 ${
+                      overrideActionType === 'PASS' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
+                    }`}
+                  >
+                    Confirm Overturn to {overrideActionType}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
