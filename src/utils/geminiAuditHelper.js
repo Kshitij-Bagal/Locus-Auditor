@@ -30,9 +30,9 @@ export function saveStoredGeminiApiKey(key) {
 export function getStoredGeminiModel() {
   if (typeof window !== 'undefined' && window.localStorage) {
     const saved = localStorage.getItem(GEMINI_MODEL_STORAGE_KEY);
-    if (saved && saved.trim()) return saved.trim();
+    if (saved && saved.trim() && !saved.includes('1.5')) return saved.trim();
   }
-  return 'gemini-1.5-flash-latest';
+  return 'gemini-2.5-flash';
 }
 
 export function saveStoredGeminiModel(model) {
@@ -229,12 +229,12 @@ You MUST respond strictly with valid JSON conforming to this exact structure:
  * Prefers latest, ultra-fast multimodal Flash models with vision support.
  */
 export const GEMINI_MODEL_PRIORITY = [
+  'gemini-2.5-flash',
+  'gemini-flash-latest',
   'gemini-3.8-flash',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   'gemini-3.5-flash',
-  'gemini-flash-latest',
-  'gemini-2.5-flash',
   'gemini-3-flash-preview',
   'gemini-2.0-flash',
   'gemini-1.5-flash-latest',
@@ -597,14 +597,28 @@ export async function auditTaskWithGemini({
     body: JSON.stringify(payload)
   });
 
-  // If response failed, handle auto-fallbacks (e.g. responseMimeType not supported, or model not found)
+  // If response failed, handle auto-fallbacks (e.g. responseMimeType not supported, model not found, or high demand)
   if (!response.ok) {
     const errorBody = await response.text();
     let isMimeTypeError = errorBody.includes('response_mime_type') || errorBody.includes('responseMimeType');
     let isModelNotFoundError = response.status === 404 || errorBody.includes('not found') || errorBody.includes('ListModels');
+    let isHighDemand = response.status === 503 || errorBody.includes('high demand') || errorBody.includes('overloaded');
 
     if (isMimeTypeError) {
       delete payload.generationConfig.responseMimeType;
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } else if (isHighDemand) {
+      // Preview model under heavy traffic spike: failover to rock-solid production Flash (gemini-2.5-flash)
+      const stableCandidate = activeModel !== 'gemini-2.5-flash' ? 'gemini-2.5-flash' : 'gemini-flash-latest';
+      if (onProgress) onProgress({ step: 'RETRYING', message: `${activeModel} is busy on Google preview servers. Re-routing to stable production (${stableCandidate})...` });
+      
+      activeModel = stableCandidate;
+      saveStoredGeminiModel(stableCandidate);
+      endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${stableCandidate}:generateContent?key=${apiKey.trim()}`;
       response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

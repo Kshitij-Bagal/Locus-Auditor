@@ -109,12 +109,20 @@ export default function AIAuditsConsole({
   const [sessionHistory, setSessionHistory] = useState([]);
   const [previewImage, setPreviewImage] = useState(null);
 
-  // Auto-discover models quietly when API key exists
+  // Auto-discover models quietly when API key exists and ensure selectedModel is valid
   useEffect(() => {
     if (apiKey && apiKey.trim()) {
       listAvailableGeminiModels(apiKey).then(models => {
         if (models && models.length > 0) {
           setAvailableModels(models);
+          const exists = models.some(m => m.id === selectedModel);
+          if (!exists) {
+            const optimal = models.find(m => m.id === 'gemini-2.5-flash') || models.find(m => m.id === 'gemini-flash-latest') || models[0];
+            if (optimal) {
+              setSelectedModel(optimal.id);
+              saveStoredGeminiModel(optimal.id);
+            }
+          }
         }
       }).catch(() => {});
     }
@@ -144,9 +152,11 @@ export default function AIAuditsConsole({
       const res = await testGeminiApiKey(apiKey, selectedModel);
       if (res.availableModels && res.availableModels.length > 0) {
         setAvailableModels(res.availableModels);
-      }
-      if (res.activeModel) {
-        setSelectedModel(res.activeModel);
+        const exists = res.availableModels.some(m => m.id === selectedModel);
+        if (!exists && res.activeModel) {
+          setSelectedModel(res.activeModel);
+          saveStoredGeminiModel(res.activeModel);
+        }
       }
       setKeyStatus({ 
         tested: true, 
