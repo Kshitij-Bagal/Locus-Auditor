@@ -126,7 +126,7 @@ export default function AIAuditsConsole({
   const [verifyVerdictFilter, setVerifyVerdictFilter] = useState('ALL'); // 'ALL' | 'PASSED' | 'FATAL'
   const [verifyHumanStatusFilter, setVerifyHumanStatusFilter] = useState('ALL'); // 'ALL' | 'PENDING' | 'VERIFIED' | 'OVERTURNED'
   const [selectedVerifyTaskId, setSelectedVerifyTaskId] = useState(null);
-  const [verifyDeckViewMode, setVerifyDeckViewMode] = useState('TINDER'); // 'TINDER' | 'SPLIT'
+  const [verifyDeckViewMode, setVerifyDeckViewMode] = useState('RAPID_DECK'); // 'RAPID_DECK' | 'SPLIT'
   const [deckTaskIndex, setDeckTaskIndex] = useState(0);
   const [overrideModalOpen, setOverrideModalOpen] = useState(false);
   const [overrideActionType, setOverrideActionType] = useState('PASS'); // 'PASS' | 'FATAL'
@@ -543,7 +543,7 @@ export default function AIAuditsConsole({
   // Selected Task for Human Verification
   const selectedVerifyTask = useMemo(() => {
     if (!filteredVerifyTasks.length) return null;
-    if (verifyDeckViewMode === 'TINDER') {
+    if (verifyDeckViewMode === 'RAPID_DECK') {
       const idx = Math.min(Math.max(0, deckTaskIndex), filteredVerifyTasks.length - 1);
       return filteredVerifyTasks[idx] || filteredVerifyTasks[0] || null;
     }
@@ -631,9 +631,9 @@ export default function AIAuditsConsole({
     return { total, fatal, passed, verified, overturned, agreementRate };
   }, [allAiAuditedTasks]);
 
-  // Tinder Deck Keyboard Navigation Hotkeys
+  // Rapid Deck Keyboard Navigation Hotkeys
   useEffect(() => {
-    if (activeConsoleTab !== 'VERIFY' || verifyDeckViewMode !== 'TINDER') return;
+    if (activeConsoleTab !== 'VERIFY' || verifyDeckViewMode !== 'RAPID_DECK') return;
     if (failAiModalOpen || overrideModalOpen || previewImage) return;
 
     const handleKeyDown = (e) => {
@@ -702,7 +702,7 @@ export default function AIAuditsConsole({
       }
       setHumanNotesInput('');
       
-      if (verifyDeckViewMode === 'TINDER') {
+      if (verifyDeckViewMode === 'RAPID_DECK') {
         if (deckTaskIndex < filteredVerifyTasks.length - 1) {
           setDeckTaskIndex(prev => prev + 1);
         }
@@ -848,7 +848,7 @@ export default function AIAuditsConsole({
       setFailAiModalOpen(false);
       setFailAiReasonInput('');
 
-      if (verifyDeckViewMode === 'TINDER') {
+      if (verifyDeckViewMode === 'RAPID_DECK') {
         if (deckTaskIndex < filteredVerifyTasks.length - 1) {
           setDeckTaskIndex(prev => prev + 1);
         }
@@ -1968,15 +1968,15 @@ export default function AIAuditsConsole({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setVerifyDeckViewMode('TINDER')}
+                onClick={() => setVerifyDeckViewMode('RAPID_DECK')}
                 className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
-                  verifyDeckViewMode === 'TINDER'
+                  verifyDeckViewMode === 'RAPID_DECK'
                     ? 'bg-gradient-to-r from-emerald-600 to-sky-600 text-white shadow-lg shadow-sky-950/40 ring-1 ring-sky-400'
                     : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
                 }`}
               >
                 <Zap className="w-3.5 h-3.5 text-amber-300" />
-                <span>⚡ Tinder Speed-Deck (1 Task at a Time)</span>
+                <span>⚡ Rapid Speed-Deck (1 Task at a Time)</span>
               </button>
 
               <button
@@ -1993,7 +1993,7 @@ export default function AIAuditsConsole({
               </button>
             </div>
 
-            {verifyDeckViewMode === 'TINDER' && filteredVerifyTasks.length > 0 && (
+            {verifyDeckViewMode === 'RAPID_DECK' && filteredVerifyTasks.length > 0 && (
               <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
                 <span className="px-2.5 py-1 rounded-full bg-slate-950 border border-slate-800 text-slate-300 font-bold">
                   Card {deckTaskIndex + 1} of {filteredVerifyTasks.length}
@@ -2005,8 +2005,8 @@ export default function AIAuditsConsole({
             )}
           </div>
 
-          {/* TINDER SPEED-DECK VIEW */}
-          {verifyDeckViewMode === 'TINDER' ? (
+          {/* RAPID INSPECTION DECK VIEW */}
+          {verifyDeckViewMode === 'RAPID_DECK' ? (
             filteredVerifyTasks.length === 0 ? (
               <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
                 <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center mx-auto">
@@ -2036,7 +2036,7 @@ export default function AIAuditsConsole({
                   />
                 </div>
 
-                {/* The Tinder Card */}
+                {/* The Rapid Inspection Card */}
                 <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 animate-in zoom-in-95 duration-200 relative overflow-hidden">
                   {/* Card Header */}
                   <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 pb-4">
@@ -2217,7 +2217,7 @@ export default function AIAuditsConsole({
                     />
                   </div>
 
-                  {/* THE TINDER ACTION BUTTONS BAR */}
+                  {/* RAPID VERIFICATION ACTION BUTTONS */}
                   <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
                     {/* LEFT BUTTON: AI PASS (CONFIRM & NEXT) */}
                     <button
