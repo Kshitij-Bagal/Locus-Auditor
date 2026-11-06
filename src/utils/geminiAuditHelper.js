@@ -229,20 +229,22 @@ You MUST respond strictly with valid JSON conforming to this exact structure:
  * Prefers latest, ultra-fast multimodal Flash models with vision support.
  */
 export const GEMINI_MODEL_PRIORITY = [
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-2.5-flash',
+  'gemini-3-flash-preview',
+  'gemini-2.0-flash',
   'gemini-1.5-flash-latest',
   'gemini-1.5-flash',
-  'gemini-1.5-flash-002',
-  'gemini-1.5-flash-001',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-exp',
-  'gemini-2.0-flash-001',
-  'gemini-1.5-flash-8b',
-  'gemini-1.5-flash-8b-latest',
-  'gemini-1.5-pro-latest',
-  'gemini-1.5-pro',
-  'gemini-1.5-pro-002',
-  'gemini-pro-vision',
-  'gemini-pro'
+  'gemini-flash-lite-latest',
+  'gemini-3.5-flash-lite',
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-pro-preview',
+  'gemini-2.5-pro',
+  'gemini-pro-latest'
 ];
 
 /**
@@ -308,7 +310,7 @@ export async function listAvailableGeminiModels(apiKey) {
             const id = m.name.replace(/^models\//, '');
             const isFlash = id.toLowerCase().includes('flash');
             const isPro = id.toLowerCase().includes('pro');
-            const isLatestFlash = id === 'gemini-1.5-flash-latest' || id === 'gemini-1.5-flash' || id === 'gemini-2.0-flash';
+            const isLatestFlash = id === 'gemini-3.8-flash' || id === 'gemini-3.7-flash' || id === 'gemini-3.5-flash' || id === 'gemini-flash-latest' || id === 'gemini-2.5-flash' || id === 'gemini-1.5-flash-latest';
 
             // Token Limits
             const inputLimit = m.inputTokenLimit || (isPro ? 2097152 : 1048576);

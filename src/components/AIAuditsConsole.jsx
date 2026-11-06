@@ -75,7 +75,7 @@ export default function AIAuditsConsole({
 
     const isPro = selectedModel.toLowerCase().includes('pro');
     const isFlash = selectedModel.toLowerCase().includes('flash');
-    const isRecommended = selectedModel === 'gemini-1.5-flash-latest' || selectedModel === 'gemini-1.5-flash' || selectedModel === 'gemini-2.0-flash';
+    const isRecommended = selectedModel === 'gemini-3.8-flash' || selectedModel === 'gemini-3.7-flash' || selectedModel === 'gemini-3.5-flash' || selectedModel === 'gemini-flash-latest' || selectedModel === 'gemini-2.5-flash' || selectedModel === 'gemini-1.5-flash-latest';
     return {
       id: selectedModel,
       displayName: selectedModel,
