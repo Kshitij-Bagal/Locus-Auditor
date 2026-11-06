@@ -237,6 +237,11 @@ export default function App() {
       const remarks = (t.remarks || t.auditor_remarks || '').toLowerCase();
       const isAi = auditedBy.toLowerCase().includes('gemini') || 
                    auditedBy.toLowerCase().includes('ai') || 
+                   auditedBy.toLowerCase().includes('gpt') || 
+                   auditedBy.toLowerCase().includes('claude') || 
+                   auditedBy.toLowerCase().includes('llama') || 
+                   auditedBy.toLowerCase().includes('groq') || 
+                   auditedBy.toLowerCase().includes('openrouter') || 
                    remarks.includes('ai passed') || 
                    remarks.includes('ai fatal') || 
                    remarks.includes('(score:');
@@ -1097,7 +1102,7 @@ export default function App() {
         return tasks.filter(t => {
           const by = String(t.auditedBy || t.audited_by_name || '').toLowerCase();
           const rem = String(t.remarks || t.auditor_remarks || '').toLowerCase();
-          return by.includes('gemini') || by.includes('ai') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
+          return by.includes('gemini') || by.includes('ai') || by.includes('gpt') || by.includes('claude') || by.includes('llama') || by.includes('groq') || by.includes('openrouter') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
         });
       }
       return tasks.filter(t => {
