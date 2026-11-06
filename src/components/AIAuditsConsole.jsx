@@ -138,6 +138,7 @@ export default function AIAuditsConsole({
   const [sessionReAuditMap, setSessionReAuditMap] = useState({}); // taskId -> { reason, requestedAt }
   const [reAuditSearchQuery, setReAuditSearchQuery] = useState('');
   const [reAuditCityFilter, setReAuditCityFilter] = useState('ALL');
+  const [reAuditVerdictFilter, setReAuditVerdictFilter] = useState('ALL'); // 'ALL' | 'PASSED' (False Positive) | 'FATAL' (False Negative)
 
   // Auto-discover models quietly when API key exists and ensure selectedModel is valid
   useEffect(() => {
@@ -855,6 +856,7 @@ export default function AIAuditsConsole({
   // Filtered Re-Audit Tasks
   const filteredReAuditTasks = useMemo(() => {
     return reAuditTasks.filter(t => {
+      if (reAuditVerdictFilter !== 'ALL' && t.auditStatus !== reAuditVerdictFilter) return false;
       if (reAuditCityFilter !== 'ALL') {
         const c = t.facilityCode || t.city || '';
         if (c.toLowerCase() !== reAuditCityFilter.toLowerCase()) return false;
@@ -868,7 +870,7 @@ export default function AIAuditsConsole({
       }
       return true;
     });
-  }, [reAuditTasks, reAuditCityFilter, reAuditSearchQuery]);
+  }, [reAuditTasks, reAuditVerdictFilter, reAuditCityFilter, reAuditSearchQuery]);
 
   // Distinct cities in Re-Audit tasks
   const reAuditAvailableCities = useMemo(() => {
@@ -1767,26 +1769,47 @@ export default function AIAuditsConsole({
               </div>
             </div>
 
-            <div className="bg-slate-900 border border-emerald-950 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
-                AI Passed
-              </span>
+            <div 
+              onClick={() => setVerifyVerdictFilter(verifyVerdictFilter === 'PASSED' ? 'ALL' : 'PASSED')}
+              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
+                verifyVerdictFilter === 'PASSED'
+                  ? 'bg-emerald-950/40 border-emerald-500 shadow-emerald-950/50 ring-1 ring-emerald-500'
+                  : 'bg-slate-900 border-emerald-950 hover:border-emerald-600/50'
+              }`}
+              title="Filter to inspect all AI-passed visits for False Positives"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                  AI Passed (Audit False Positives)
+                </span>
+                <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Quality Check
+                </span>
+              </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-xl font-black text-emerald-400">{verificationStats.passed}</span>
                 <span className="text-[10px] text-slate-500 font-mono">
-                  {verificationStats.total > 0 ? ((verificationStats.passed / verificationStats.total) * 100).toFixed(0) : 0}%
+                  {verificationStats.total > 0 ? ((verificationStats.passed / verificationStats.total) * 100).toFixed(0) : 0}% of AI Visits
                 </span>
               </div>
             </div>
 
-            <div className="bg-slate-900 border border-red-950 p-3.5 rounded-2xl shadow-lg">
+            <div 
+              onClick={() => setVerifyVerdictFilter(verifyVerdictFilter === 'FATAL' ? 'ALL' : 'FATAL')}
+              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
+                verifyVerdictFilter === 'FATAL'
+                  ? 'bg-red-950/40 border-red-500 shadow-red-950/50 ring-1 ring-red-500'
+                  : 'bg-slate-900 border-red-950 hover:border-red-600/50'
+              }`}
+              title="Filter to review AI fatal strikes"
+            >
               <span className="text-[10px] font-bold uppercase tracking-wider text-red-400 block mb-1">
                 AI Fatal Strikes
               </span>
               <div className="flex items-baseline gap-2">
                 <span className="text-xl font-black text-red-400">{verificationStats.fatal}</span>
                 <span className="text-[10px] text-slate-500 font-mono">
-                  {verificationStats.total > 0 ? ((verificationStats.fatal / verificationStats.total) * 100).toFixed(0) : 0}%
+                  {verificationStats.total > 0 ? ((verificationStats.fatal / verificationStats.total) * 100).toFixed(0) : 0}% of AI Visits
                 </span>
               </div>
             </div>
@@ -2137,6 +2160,36 @@ export default function AIAuditsConsole({
                         </div>
                       )}
 
+                      {/* Prominent Quality Alert for AI Passed Tasks (False Positive Inspection) */}
+                      {selectedVerifyTask.auditStatus === 'PASSED' && (
+                        <div className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-amber-950/30 border border-amber-500/40 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5 uppercase tracking-wide">
+                              <AlertTriangle className="w-4 h-4 text-amber-400" />
+                              False Positive Quality Check (AI Passed 5/5):
+                            </span>
+                            <span className="text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded uppercase">
+                              Verification Critical
+                            </span>
+                          </div>
+
+                          <p className="text-[11px] text-slate-300 leading-relaxed">
+                            AI evaluated this dispatch as <strong className="text-emerald-400 font-bold">PASSED</strong>. However, AI vision can occasionally produce <strong>false positives</strong> (e.g. failing to notice an obscured/missing ID badge, unlit torches, incorrect vision chart distance, or duplicate/blank photos). Please scrutinize each station photo below.
+                          </p>
+
+                          <div className="p-2 rounded-lg bg-slate-950/70 border border-slate-800 text-[11px] text-slate-300 flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-slate-400">
+                              Did AI overlook a violation or approve bad photos?
+                            </span>
+                            <div className="flex items-center gap-2 font-bold text-xs">
+                              <span className="text-rose-400">Click &ldquo;Fail AI Audit&rdquo;</span>
+                              <span className="text-slate-500">or</span>
+                              <span className="text-amber-400">&ldquo;Overturn to FATAL&rdquo;</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Full 5-Station SOP Evaluation Checklist */}
                       <div className="space-y-2 pt-1">
                         <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
@@ -2351,13 +2404,54 @@ export default function AIAuditsConsole({
                   <p className="text-xs text-slate-300">
                     Flag this AI evaluation as inaccurate, hallucinatory, or disputed. This task will be sent to the <strong className="text-amber-400">Clinical Re-Audit Queue</strong> where human auditors can re-audit the visit with all AI-selected criteria highlighted.
                   </p>
-                  <label className="block font-bold text-slate-300 text-[11px] pt-1">
-                    Reason AI Audit Failed (Required for audit history):
-                  </label>
+                  <div className="flex items-center justify-between pt-1">
+                    <label className="block font-bold text-slate-300 text-[11px]">
+                      Reason AI Audit Failed (Required for audit history):
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {selectedVerifyTask.auditStatus === 'PASSED' ? 'Flagging False Positive' : 'Disputing False Strike'}
+                    </span>
+                  </div>
+
+                  {/* One-Click Quick Reason Pills */}
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                      {selectedVerifyTask.auditStatus === 'PASSED' ? '⚡ Common False Positive Reasons:' : '⚡ Common False Strike Reasons:'}
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(selectedVerifyTask.auditStatus === 'PASSED' ? [
+                        'False Positive: Selfie missing visible ID badge / not official polo',
+                        'False Positive: Both torches not illuminated / missing yellow torch',
+                        'False Positive: Vision chart distance under 6m / poor lighting',
+                        'False Positive: Toolkit missing mandatory occluder or trial frame',
+                        'False Positive: Photo blurry / blank / duplicate image uploaded'
+                      ] : [
+                        'False Strike: Torches visible upon closer inspection in dark background',
+                        'False Strike: ID card badge visible on lanyard / pocket',
+                        'False Strike: Vision chart clearly legible and proper distance',
+                        'False Strike: Toolkit complete despite lighting reflection',
+                        'False Strike: SOP fully satisfied upon human review'
+                      ]).map((quickReason, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => setFailAiReasonInput(quickReason)}
+                          className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-[10px] font-semibold text-slate-300 border border-slate-700 hover:border-amber-400 transition-colors text-left cursor-pointer"
+                        >
+                          {quickReason}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   <textarea
                     value={failAiReasonInput}
                     onChange={(e) => setFailAiReasonInput(e.target.value)}
-                    placeholder="e.g. AI incorrectly marked Torches as FAIL. Flash reflections in mirror verify both blue & yellow torches are present."
+                    placeholder={
+                      selectedVerifyTask.auditStatus === 'PASSED'
+                        ? 'e.g. False Positive: FE is wearing generic t-shirt with no visible ID badge. AI incorrectly passed selfie.'
+                        : 'e.g. False Strike: Torches are visible in mirror reflection. AI incorrectly marked as fail.'
+                    }
                     rows={3}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500 font-medium"
                   />
@@ -2389,42 +2483,72 @@ export default function AIAuditsConsole({
         <div className="space-y-6">
           {/* Re-Audit KPIs Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-slate-900 border border-amber-500/30 p-3.5 rounded-2xl shadow-lg">
+            <div 
+              onClick={() => setReAuditVerdictFilter('ALL')}
+              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
+                reAuditVerdictFilter === 'ALL'
+                  ? 'bg-amber-950/40 border-amber-500 ring-1 ring-amber-500'
+                  : 'bg-slate-900 border-amber-500/30 hover:border-amber-500/60'
+              }`}
+            >
               <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 block mb-1">
-                Needs Re-Audit
+                All in Queue
               </span>
               <div className="flex items-baseline gap-2">
                 <span className="text-xl font-black text-amber-300">{reAuditTasks.length}</span>
-                <span className="text-[10px] text-slate-500">Visits Flagged</span>
+                <span className="text-[10px] text-slate-500">Flagged</span>
               </div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400 block mb-1">
-                Original AI Fatal
+            <div 
+              onClick={() => setReAuditVerdictFilter(reAuditVerdictFilter === 'PASSED' ? 'ALL' : 'PASSED')}
+              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
+                reAuditVerdictFilter === 'PASSED'
+                  ? 'bg-rose-950/40 border-rose-500 ring-1 ring-rose-500'
+                  : 'bg-slate-900 border-rose-950 hover:border-rose-600/50'
+              }`}
+              title="Click to show visits AI passed, but human QA rejected as False Positives"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400">
+                  AI False Positives
+                </span>
+                <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300">
+                  Strike Review
+                </span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-white">
+                  {reAuditTasks.filter(t => t.auditStatus === 'PASSED').length}
+                </span>
+                <span className="text-[10px] text-rose-400/80 font-mono">
+                  Orig. AI Pass
+                </span>
+              </div>
+            </div>
+
+            <div 
+              onClick={() => setReAuditVerdictFilter(reAuditVerdictFilter === 'FATAL' ? 'ALL' : 'FATAL')}
+              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
+                reAuditVerdictFilter === 'FATAL'
+                  ? 'bg-sky-950/40 border-sky-500 ring-1 ring-sky-500'
+                  : 'bg-slate-900 border-slate-800 hover:border-sky-600/50'
+              }`}
+              title="Click to show visits AI struck down as Fatal, but flagged for dispute/review"
+            >
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
+                Disputed Strikes
               </span>
               <div className="flex items-baseline gap-2">
                 <span className="text-xl font-black text-white">
                   {reAuditTasks.filter(t => t.auditStatus === 'FATAL').length}
                 </span>
-                <span className="text-[10px] text-slate-500">Disputed</span>
+                <span className="text-[10px] text-slate-500 font-mono">Orig. AI Fatal</span>
               </div>
             </div>
 
             <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
-                Original AI Pass
-              </span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xl font-black text-white">
-                  {reAuditTasks.filter(t => t.auditStatus === 'PASSED').length}
-                </span>
-                <span className="text-[10px] text-slate-500">Disputed</span>
-              </div>
-            </div>
-
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                 Showing in View
               </span>
               <div className="flex items-baseline gap-2">
@@ -2434,39 +2558,80 @@ export default function AIAuditsConsole({
             </div>
           </div>
 
-          {/* Search & City Filter Bar */}
-          <div className="bg-slate-900 border border-slate-800 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-lg">
-            <div className="flex items-center gap-2 flex-1 min-w-[220px]">
-              <Search className="w-4 h-4 text-slate-400" />
-              <input
-                type="text"
-                value={reAuditSearchQuery}
-                onChange={(e) => setReAuditSearchQuery(e.target.value)}
-                placeholder="Search Re-Audit by Task ID, FE Name, or Code..."
-                className="bg-transparent border-none text-xs text-white placeholder-slate-500 focus:outline-none w-full"
-              />
-              {reAuditSearchQuery && (
-                <button
-                  onClick={() => setReAuditSearchQuery('')}
-                  className="text-slate-500 hover:text-white text-xs cursor-pointer"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
+          {/* Search, Filter Tabs & City Filter Bar */}
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-2xl space-y-3 shadow-lg">
+            {/* Quick Filter Pill Buttons */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setReAuditVerdictFilter('ALL')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  reAuditVerdictFilter === 'ALL'
+                    ? 'bg-amber-500 text-slate-950 font-black shadow-md shadow-amber-950/40'
+                    : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                }`}
+              >
+                All Re-Audits ({reAuditTasks.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setReAuditVerdictFilter('PASSED')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  reAuditVerdictFilter === 'PASSED'
+                    ? 'bg-rose-600 text-white font-black shadow-md shadow-rose-950/40'
+                    : 'bg-slate-950 text-slate-400 hover:text-rose-300 border border-slate-800'
+                }`}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>🚨 AI False Positives ({reAuditTasks.filter(t => t.auditStatus === 'PASSED').length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setReAuditVerdictFilter('FATAL')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  reAuditVerdictFilter === 'FATAL'
+                    ? 'bg-sky-600 text-white font-black shadow-md shadow-sky-950/40'
+                    : 'bg-slate-950 text-slate-400 hover:text-sky-300 border border-slate-800'
+                }`}
+              >
+                <Scale className="w-3.5 h-3.5" />
+                <span>⚖️ Disputed AI Strikes ({reAuditTasks.filter(t => t.auditStatus === 'FATAL').length})</span>
+              </button>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-slate-400 font-medium">City:</span>
-              <select
-                value={reAuditCityFilter}
-                onChange={(e) => setReAuditCityFilter(e.target.value)}
-                className="bg-slate-950 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500"
-              >
-                <option value="ALL">All Hubs ({reAuditAvailableCities.length})</option>
-                {reAuditAvailableCities.map(city => (
-                  <option key={city} value={city}>{city}</option>
-                ))}
-              </select>
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-800">
+              <div className="flex items-center gap-2 flex-1 min-w-[220px]">
+                <Search className="w-4 h-4 text-slate-400" />
+                <input
+                  type="text"
+                  value={reAuditSearchQuery}
+                  onChange={(e) => setReAuditSearchQuery(e.target.value)}
+                  placeholder="Search Re-Audit by Task ID, FE Name, or Code..."
+                  className="bg-transparent border-none text-xs text-white placeholder-slate-500 focus:outline-none w-full"
+                />
+                {reAuditSearchQuery && (
+                  <button
+                    onClick={() => setReAuditSearchQuery('')}
+                    className="text-slate-500 hover:text-white text-xs cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-400 font-medium">City:</span>
+                <select
+                  value={reAuditCityFilter}
+                  onChange={(e) => setReAuditCityFilter(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="ALL">All Hubs ({reAuditAvailableCities.length})</option>
+                  {reAuditAvailableCities.map(city => (
+                    <option key={city} value={city}>{city}</option>
+                  ))}
+                </select>
+              </div>
             </div>
           </div>
 
@@ -2525,6 +2690,32 @@ export default function AIAuditsConsole({
                           </span>
                         </div>
                       </div>
+
+                      {/* AI False Positive Alert Callout */}
+                      {origVerdict === 'PASSED' && (
+                        <div className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-rose-950/50 via-slate-900 to-rose-950/40 border border-rose-500/40 text-xs flex items-center justify-between">
+                          <span className="font-bold text-rose-300 flex items-center gap-1.5">
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                            <span>AI False Positive Flag</span>
+                          </span>
+                          <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded bg-rose-500/30 text-rose-200 border border-rose-500/50">
+                            Orig. AI Passed &rarr; Re-Audit for Non-Compliance
+                          </span>
+                        </div>
+                      )}
+
+                      {/* AI False Strike / Dispute Alert Callout */}
+                      {origVerdict === 'FATAL' && (
+                        <div className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-sky-950/50 via-slate-900 to-sky-950/40 border border-sky-500/40 text-xs flex items-center justify-between">
+                          <span className="font-bold text-sky-300 flex items-center gap-1.5">
+                            <Scale className="w-3.5 h-3.5 text-sky-400" />
+                            <span>AI Fatal Strike Review</span>
+                          </span>
+                          <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded bg-sky-500/30 text-sky-200 border border-sky-500/50">
+                            Orig. AI Fatal &rarr; Clinical Dispute Check
+                          </span>
+                        </div>
+                      )}
 
                       {/* Re-Audit Reason Alert Box */}
                       <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs space-y-1">

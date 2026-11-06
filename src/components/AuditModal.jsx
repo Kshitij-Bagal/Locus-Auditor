@@ -703,19 +703,26 @@ export default function AuditModal({
               </div>
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-bold text-white text-xs">Clinical Re-Audit (AI Audit Failed by QA)</span>
+                  <span className="font-bold text-white text-xs">
+                    {task.auditStatus === 'PASSED' ? '🚨 AI False Positive Re-Audit' : '⚖️ Clinical Re-Audit (AI Audit Disputed)'}
+                  </span>
                   <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">
                     Orig Auditor: {task.auditedBy || task.audited_by_name || 'Gemini AI'}
                   </span>
                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                     task.auditStatus === 'FATAL' ? 'bg-red-500/20 text-red-300 border border-red-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                   }`}>
-                    AI Verdict: {task.auditStatus}
+                    Orig AI: {task.auditStatus}
                   </span>
+                  {task.auditStatus === 'PASSED' && (
+                    <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-rose-500 text-white animate-pulse">
+                      Scrutinize for Missed Non-Compliance
+                    </span>
+                  )}
                 </div>
                 {task.reAuditReason && (
-                  <p className="text-[11px] text-amber-300 mt-0.5 italic">
-                    <strong>Reviewer Reason for Re-Audit:</strong> &ldquo;{task.reAuditReason}&rdquo;
+                  <p className="text-[11px] text-amber-200 mt-0.5">
+                    <strong>QA Reviewer Flag:</strong> &ldquo;{task.reAuditReason}&rdquo;
                   </p>
                 )}
               </div>
