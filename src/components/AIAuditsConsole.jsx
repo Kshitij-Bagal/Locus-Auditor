@@ -15,6 +15,7 @@ import {
   Filter,
   Search,
   ExternalLink,
+  ChevronLeft,
   ChevronRight,
   Maximize2,
   RefreshCw,
@@ -125,6 +126,8 @@ export default function AIAuditsConsole({
   const [verifyVerdictFilter, setVerifyVerdictFilter] = useState('ALL'); // 'ALL' | 'PASSED' | 'FATAL'
   const [verifyHumanStatusFilter, setVerifyHumanStatusFilter] = useState('ALL'); // 'ALL' | 'PENDING' | 'VERIFIED' | 'OVERTURNED'
   const [selectedVerifyTaskId, setSelectedVerifyTaskId] = useState(null);
+  const [verifyDeckViewMode, setVerifyDeckViewMode] = useState('TINDER'); // 'TINDER' | 'SPLIT'
+  const [deckTaskIndex, setDeckTaskIndex] = useState(0);
   const [overrideModalOpen, setOverrideModalOpen] = useState(false);
   const [overrideActionType, setOverrideActionType] = useState('PASS'); // 'PASS' | 'FATAL'
   const [overrideReasonInput, setOverrideReasonInput] = useState('');
@@ -540,12 +543,16 @@ export default function AIAuditsConsole({
   // Selected Task for Human Verification
   const selectedVerifyTask = useMemo(() => {
     if (!filteredVerifyTasks.length) return null;
+    if (verifyDeckViewMode === 'TINDER') {
+      const idx = Math.min(Math.max(0, deckTaskIndex), filteredVerifyTasks.length - 1);
+      return filteredVerifyTasks[idx] || filteredVerifyTasks[0] || null;
+    }
     if (selectedVerifyTaskId) {
       const found = filteredVerifyTasks.find(t => String(t.id || t.taskId) === String(selectedVerifyTaskId));
       if (found) return found;
     }
     return filteredVerifyTasks[0];
-  }, [filteredVerifyTasks, selectedVerifyTaskId]);
+  }, [filteredVerifyTasks, selectedVerifyTaskId, verifyDeckViewMode, deckTaskIndex]);
 
   // Images for selected verification task
   const verifyTaskImages = useMemo(() => {
@@ -624,6 +631,33 @@ export default function AIAuditsConsole({
     return { total, fatal, passed, verified, overturned, agreementRate };
   }, [allAiAuditedTasks]);
 
+  // Tinder Deck Keyboard Navigation Hotkeys
+  useEffect(() => {
+    if (activeConsoleTab !== 'VERIFY' || verifyDeckViewMode !== 'TINDER') return;
+    if (failAiModalOpen || overrideModalOpen || previewImage) return;
+
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+        e.preventDefault();
+        handleConfirmAiVerdict();
+      } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        handleOpenFailAiAuditModal();
+      } else if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
+        e.preventDefault();
+        setDeckTaskIndex(prev => Math.max(0, prev - 1));
+      } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        setDeckTaskIndex(prev => Math.min(filteredVerifyTasks.length - 1, prev + 1));
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeConsoleTab, verifyDeckViewMode, failAiModalOpen, overrideModalOpen, previewImage, deckTaskIndex, filteredVerifyTasks, selectedVerifyTask]);
+
   // Human confirms and approves AI verdict
   const handleConfirmAiVerdict = async () => {
     if (!selectedVerifyTask) return;
@@ -667,7 +701,14 @@ export default function AIAuditsConsole({
         onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, selectedVerifyTask.auditStatus);
       }
       setHumanNotesInput('');
-      alert(`Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} confirmed and verified by ${reviewerName}!`);
+      
+      if (verifyDeckViewMode === 'TINDER') {
+        if (deckTaskIndex < filteredVerifyTasks.length - 1) {
+          setDeckTaskIndex(prev => prev + 1);
+        }
+      } else {
+        alert(`Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} confirmed and verified by ${reviewerName}!`);
+      }
     } catch (err) {
       alert(`Failed to verify audit: ${err.message}`);
     } finally {
@@ -806,8 +847,15 @@ export default function AIAuditsConsole({
 
       setFailAiModalOpen(false);
       setFailAiReasonInput('');
-      alert(`AI Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} marked as FAILED and sent to the Re-Audit Queue!`);
-      setActiveConsoleTab('REAUDIT');
+
+      if (verifyDeckViewMode === 'TINDER') {
+        if (deckTaskIndex < filteredVerifyTasks.length - 1) {
+          setDeckTaskIndex(prev => prev + 1);
+        }
+      } else {
+        alert(`AI Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} marked as FAILED and sent to the Re-Audit Queue!`);
+        setActiveConsoleTab('REAUDIT');
+      }
     } catch (err) {
       alert(`Failed to queue task for re-audit: ${err.message}`);
     } finally {
@@ -1915,16 +1963,333 @@ export default function AIAuditsConsole({
             </div>
           </div>
 
-          {/* Verification Split-Pane */}
-          {filteredVerifyTasks.length === 0 ? (
-            <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
-              <UserCheck className="w-10 h-10 text-slate-600 mx-auto" />
-              <h3 className="text-base font-bold text-white">No AI-Audited Tasks Found</h3>
-              <p className="text-xs text-slate-400 max-w-md mx-auto">
-                Run audits in the &ldquo;Run AI Audits&rdquo; tab first. All audited visits will appear here for human oversight and verification.
-              </p>
+          {/* Deck View Mode Switcher & Progress Header */}
+          <div className="flex items-center justify-between flex-wrap gap-3 pb-1">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setVerifyDeckViewMode('TINDER')}
+                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                  verifyDeckViewMode === 'TINDER'
+                    ? 'bg-gradient-to-r from-emerald-600 to-sky-600 text-white shadow-lg shadow-sky-950/40 ring-1 ring-sky-400'
+                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 text-amber-300" />
+                <span>⚡ Tinder Speed-Deck (1 Task at a Time)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setVerifyDeckViewMode('SPLIT')}
+                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                  verifyDeckViewMode === 'SPLIT'
+                    ? 'bg-slate-800 text-white border border-slate-600 shadow-md'
+                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5 text-slate-400" />
+                <span>📋 Classic Queue & Split View</span>
+              </button>
             </div>
+
+            {verifyDeckViewMode === 'TINDER' && filteredVerifyTasks.length > 0 && (
+              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                <span className="px-2.5 py-1 rounded-full bg-slate-950 border border-slate-800 text-slate-300 font-bold">
+                  Card {deckTaskIndex + 1} of {filteredVerifyTasks.length}
+                </span>
+                <span className="hidden sm:inline text-slate-500">
+                  Hotkeys: <kbd className="px-1 py-0.2 bg-slate-800 rounded text-emerald-300 font-bold">← AI Pass</kbd> <kbd className="px-1 py-0.2 bg-slate-800 rounded text-rose-300 font-bold">AI Reject →</kbd>
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* TINDER SPEED-DECK VIEW */}
+          {verifyDeckViewMode === 'TINDER' ? (
+            filteredVerifyTasks.length === 0 ? (
+              <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
+                <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center mx-auto">
+                  <CheckCheck className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-white">All Caught Up!</h3>
+                <p className="text-xs text-slate-400 max-w-md mx-auto">
+                  Every AI-audited task in this view has been verified by human review. Switch filters or head to the Clinical Re-Audit Queue to check flagged tasks.
+                </p>
+                {reAuditTasks.length > 0 && (
+                  <button
+                    onClick={() => setActiveConsoleTab('REAUDIT')}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer shadow-lg shadow-amber-950/40 inline-flex items-center gap-1.5"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>Open Clinical Re-Audit Queue ({reAuditTasks.length})</span>
+                  </button>
+                )}
+              </div>
+            ) : selectedVerifyTask ? (
+              <div className="space-y-4 max-w-5xl mx-auto">
+                {/* Progress bar */}
+                <div className="w-full bg-slate-950 rounded-full h-1.5 border border-slate-800 overflow-hidden">
+                  <div 
+                    className="bg-gradient-to-r from-emerald-500 via-sky-500 to-amber-500 h-full transition-all duration-300"
+                    style={{ width: `${Math.min(100, Math.round(((deckTaskIndex + 1) / filteredVerifyTasks.length) * 100))}%` }}
+                  />
+                </div>
+
+                {/* The Tinder Card */}
+                <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 animate-in zoom-in-95 duration-200 relative overflow-hidden">
+                  {/* Card Header */}
+                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 pb-4">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono text-base font-black text-white">
+                          TASK #{selectedVerifyTask.taskId || selectedVerifyTask.id}
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                          {selectedVerifyTask.facilityCode || selectedVerifyTask.city || 'Hub'}
+                        </span>
+                        <span className="text-xs text-slate-400 font-mono">
+                          {selectedVerifyTask.date || selectedVerifyTask.dispatch_date}
+                        </span>
+                        {selectedVerifyTask.pin && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                            PIN: {selectedVerifyTask.pin}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-300 font-semibold pt-1">
+                        Field Executive: <span className="text-white font-bold">{selectedVerifyTask.feName || 'Unknown'}</span>{' '}
+                        <span className="text-slate-500 font-mono">({selectedVerifyTask.feCode || 'FE'})</span> • Customer: <span className="text-slate-300">{selectedVerifyTask.customerName || 'Customer'}</span>
+                      </p>
+                    </div>
+
+                    {/* Large AI Verdict Badge */}
+                    <div className="text-right flex flex-col items-end">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider border shadow-md ${
+                          selectedVerifyTask.auditStatus === 'PASSED'
+                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-emerald-950/40'
+                            : 'bg-red-500/20 text-red-300 border-red-500/50 shadow-red-950/40 animate-pulse'
+                        }`}>
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>AI {selectedVerifyTask.auditStatus}</span>
+                          <span className="font-mono">({selectedVerifyTask.overallScore ?? 100}/100)</span>
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-mono mt-1">
+                        Model: <strong className="text-sky-300">{selectedVerifyTask.auditedBy || 'gemini-3.8-flash'}</strong> &bull; Conf: {selectedVerifyTask.confidenceScore ?? 95}% &plusmn;{selectedVerifyTask.errorMargin ?? 5}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* False Positive Warning (if AI Passed) OR Fatal Strike Breakdown (if AI Fatal) */}
+                  {selectedVerifyTask.auditStatus === 'PASSED' ? (
+                    <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-950 to-amber-950/30 border border-amber-500/40 flex items-center justify-between flex-wrap gap-2 text-xs">
+                      <div className="flex items-center gap-2 text-amber-300">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <div>
+                          <span className="font-bold uppercase tracking-wide text-amber-200">False Positive Quality Inspection:</span>
+                          <p className="text-[11px] text-slate-300 leading-tight">
+                            AI awarded 100% PASS. Carefully inspect the 5 photos below to ensure ID card is present, torches work, and photos are valid.
+                          </p>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold uppercase">
+                        Audit for False Pass
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="p-3.5 rounded-2xl bg-red-950/40 border border-red-500/40 space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between font-bold text-red-200">
+                        <span className="flex items-center gap-1.5 uppercase tracking-wide">
+                          <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+                          AI Fatal Strike Triggers:
+                        </span>
+                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-red-500/30 text-white uppercase font-black">
+                          Review Non-Compliance
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-red-200 leading-tight font-medium">
+                        {(selectedVerifyTask.failedReasons && selectedVerifyTask.failedReasons.length > 0)
+                          ? selectedVerifyTask.failedReasons.join('; ')
+                          : selectedVerifyTask.remarks || 'Mandatory equipment station non-compliance'}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* 5-Station Photo Gallery (Horizontal Responsive Grid) */}
+                  <div className="space-y-2">
+                    <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
+                      5 Mandatory Clinical Photo Stations (Click any photo to zoom):
+                    </span>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                      {[
+                        { key: 'selfie', label: '1. Selfie & ID', icon: '🤳' },
+                        { key: 'torches', label: '2. Dual Torches', icon: '🔦' },
+                        { key: 'visionChart', label: '3. Vision Chart', icon: '📊' },
+                        { key: 'toolkit', label: '4. Toolkit', icon: '🧰' },
+                        { key: 'frameDisplay', label: '5. Frame Display', icon: '👓' }
+                      ].map(st => {
+                        const imgUrl = verifyTaskImages[st.key];
+                        const crit = verifyCriteriaBreakdown.find(c => c.id === st.key);
+                        const isFail = crit?.status === 'FAIL';
+                        const isPass = crit?.status === 'PASS';
+
+                        return (
+                          <div
+                            key={st.key}
+                            className={`rounded-2xl border p-2 flex flex-col justify-between bg-slate-950/80 transition-all hover:border-slate-500 ${
+                              isFail ? 'border-red-500/50 bg-red-950/10' : isPass ? 'border-emerald-500/40' : 'border-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[11px] font-bold text-slate-200 truncate flex items-center gap-1">
+                                <span>{st.icon}</span>
+                                <span>{st.label}</span>
+                              </span>
+                              <span className={`text-[9px] font-black uppercase px-1.5 py-0.2 rounded ${
+                                isFail
+                                  ? 'bg-red-500/30 text-red-200 border border-red-500/40'
+                                  : isPass
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}>
+                                {isFail ? 'FAIL' : isPass ? 'PASS' : '-'}
+                              </span>
+                            </div>
+
+                            {/* Photo Thumbnail */}
+                            <div
+                              onClick={() => imgUrl && setPreviewImage({ url: imgUrl, title: `${st.label} - Task #${selectedVerifyTask.taskId || selectedVerifyTask.id}` })}
+                              className="relative aspect-square rounded-xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center cursor-pointer group/thumb"
+                            >
+                              {imgUrl ? (
+                                <>
+                                  <img
+                                    src={imgUrl}
+                                    alt={st.label}
+                                    className="w-full h-full object-cover transition-transform group-hover/thumb:scale-105"
+                                    onError={(e) => { e.target.style.display = 'none'; }}
+                                  />
+                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
+                                    <Maximize2 className="w-5 h-5 text-white" />
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="text-center p-2 text-slate-600">
+                                  <Camera className="w-6 h-6 mx-auto mb-1 opacity-50" />
+                                  <span className="text-[9px] italic">No Photo</span>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Observation snippet */}
+                            <p className={`text-[10px] mt-1.5 line-clamp-2 leading-snug ${
+                              isFail ? 'text-red-300 font-semibold' : 'text-slate-400'
+                            }`} title={crit?.observations}>
+                              {crit?.observations || 'Compliant with clinical SOP standards.'}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* AI Summary Text */}
+                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                      AI Executive Summary:
+                    </span>
+                    <p className="text-slate-300 leading-relaxed italic">
+                      &ldquo;{selectedVerifyTask.summary || selectedVerifyTask.remarks || 'Audit completed autonomously by Gemini Multimodal Vision engine.'}&rdquo;
+                    </p>
+                  </div>
+
+                  {/* Human Notes Input */}
+                  <div>
+                    <input
+                      type="text"
+                      value={humanNotesInput}
+                      onChange={(e) => setHumanNotesInput(e.target.value)}
+                      placeholder="Add optional reviewer notes (recorded in compliance audit trail)..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-medium"
+                    />
+                  </div>
+
+                  {/* THE TINDER ACTION BUTTONS BAR */}
+                  <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+                    {/* LEFT BUTTON: AI PASS (CONFIRM & NEXT) */}
+                    <button
+                      type="button"
+                      onClick={handleConfirmAiVerdict}
+                      disabled={isVerifyingAction}
+                      className="flex-1 min-w-[200px] py-4 px-6 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.98] text-white font-black text-sm flex items-center justify-center gap-2.5 shadow-xl shadow-emerald-950/60 transition-all cursor-pointer disabled:opacity-50"
+                      title="Confirm and verify this AI audit as accurate, then load next task (Hotkey: Left Arrow or A)"
+                    >
+                      <CheckCheck className="w-5 h-5" />
+                      <span>AI PASS (Confirm & Next)</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 font-mono border border-emerald-500/40">
+                        &larr; Arrow
+                      </span>
+                    </button>
+
+                    {/* CENTER NAVIGATION & OVERTURN */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDeckTaskIndex(prev => Math.max(0, prev - 1))}
+                        disabled={deckTaskIndex === 0}
+                        className="p-3 rounded-2xl bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-slate-300 border border-slate-800 transition-colors cursor-pointer"
+                        title="Previous Card (Hotkey: Up Arrow)"
+                      >
+                        <ChevronLeft className="w-5 h-5" />
+                      </button>
+
+                      <div className="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs font-bold text-slate-300">
+                        {deckTaskIndex + 1} / {filteredVerifyTasks.length}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setDeckTaskIndex(prev => Math.min(filteredVerifyTasks.length - 1, prev + 1))}
+                        disabled={deckTaskIndex >= filteredVerifyTasks.length - 1}
+                        className="p-3 rounded-2xl bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-slate-300 border border-slate-800 transition-colors cursor-pointer"
+                        title="Next Card (Hotkey: Down Arrow)"
+                      >
+                        <ChevronRight className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    {/* RIGHT BUTTON: AI REJECT (FAIL AI & SEND TO RE-AUDIT) */}
+                    <button
+                      type="button"
+                      onClick={handleOpenFailAiAuditModal}
+                      disabled={isVerifyingAction}
+                      className="flex-1 min-w-[200px] py-4 px-6 rounded-2xl bg-gradient-to-r from-rose-600 via-orange-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 active:scale-[0.98] text-white font-black text-sm flex items-center justify-center gap-2.5 shadow-xl shadow-rose-950/60 transition-all cursor-pointer disabled:opacity-50"
+                      title="Reject AI audit as inaccurate/false positive and send for human clinical re-audit (Hotkey: Right Arrow or D)"
+                    >
+                      <RotateCcw className="w-5 h-5" />
+                      <span>AI REJECT (Fail & Re-Audit)</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-rose-950/80 text-rose-300 font-mono border border-rose-500/40">
+                        Arrow &rarr;
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null
           ) : (
+            /* CLASSIC SPLIT VIEW (When user chooses SPLIT mode) */
+            filteredVerifyTasks.length === 0 ? (
+              <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
+                <UserCheck className="w-10 h-10 text-slate-600 mx-auto" />
+                <h3 className="text-base font-bold text-white">No AI-Audited Tasks Found</h3>
+                <p className="text-xs text-slate-400 max-w-md mx-auto">
+                  Run audits in the &ldquo;Run AI Audits&rdquo; tab first. All audited visits will appear here for human oversight and verification.
+                </p>
+              </div>
+            ) : (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
               {/* Left Queue List (5 cols) */}
               <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-2 shadow-xl max-h-[750px] overflow-y-auto">
@@ -2318,7 +2683,7 @@ export default function AIAuditsConsole({
                 )}
               </div>
             </div>
-          )}
+          ))}
 
           {/* Overturn Reason Modal */}
           {overrideModalOpen && (

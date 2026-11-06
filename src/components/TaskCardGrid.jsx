@@ -11,7 +11,8 @@ import {
   Camera, 
   ExternalLink,
   UserCheck,
-  ShieldAlert
+  ShieldAlert,
+  Sparkles
 } from 'lucide-react';
 
 // Fast normalize Locus URLs to CDN to eliminate 302 redirects
@@ -300,14 +301,36 @@ export default function TaskCardGrid({
                 )}
                 <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 mt-1">
                   <span className="text-slate-500">Auditor:</span>
-                  {task.assignedAuditorName ? (
-                    <span className="font-semibold text-sky-400 flex items-center gap-1 text-[10px]">
-                      <UserCheck className="w-3 h-3" />
-                      {task.assignedAuditorName}
-                    </span>
-                  ) : (
-                    <span className="text-slate-500 italic text-[10px]">Unassigned</span>
-                  )}
+                  {(() => {
+                    const auditedBy = task.auditedBy || task.audited_by_name || '';
+                    const remarks = (task.remarks || task.auditor_remarks || '').toLowerCase();
+                    const isAi = auditedBy.toLowerCase().includes('gemini') || 
+                                 auditedBy.toLowerCase().includes('ai') || 
+                                 remarks.includes('ai passed') || 
+                                 remarks.includes('ai fatal') || 
+                                 remarks.includes('(score:');
+
+                    if (isAi) {
+                      const modelDisplay = auditedBy || 'gemini-3.8-flash';
+                      return (
+                        <span className="font-bold text-sky-300 flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-sky-950/80 border border-sky-500/40 shadow-sm" title={`Audited autonomously by AI Model: ${modelDisplay}`}>
+                          <Sparkles className="w-3 h-3 text-sky-400 shrink-0" />
+                          <span>{modelDisplay}</span>
+                        </span>
+                      );
+                    }
+
+                    if (task.assignedAuditorName) {
+                      return (
+                        <span className="font-semibold text-sky-400 flex items-center gap-1 text-[10px]">
+                          <UserCheck className="w-3 h-3" />
+                          {task.assignedAuditorName}
+                        </span>
+                      );
+                    }
+
+                    return <span className="text-slate-500 italic text-[10px]">Unassigned</span>;
+                  })()}
                 </div>
                 {isFatal && task.failedReasons.length > 0 && (
                   <div className="mt-2 p-2 rounded bg-red-950/40 border border-red-500/30 text-[10px] text-red-300">

@@ -14,7 +14,8 @@ import {
   XCircle,
   HelpCircle,
   UserCheck,
-  ShieldAlert
+  ShieldAlert,
+  Sparkles
 } from 'lucide-react';
 
 export default function TaskTable({ 
@@ -226,14 +227,36 @@ export default function TaskTable({
 
                   {/* 7. Assigned Auditor */}
                   <td className="py-3.5 px-4 whitespace-nowrap">
-                    {task.assignedAuditorName ? (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-sky-500/10 text-sky-300 border border-sky-500/20">
-                        <UserCheck className="w-3 h-3 text-sky-400" />
-                        <span>{task.assignedAuditorName}</span>
-                      </span>
-                    ) : (
-                      <span className="text-[11px] text-slate-500 italic">Unassigned</span>
-                    )}
+                    {(() => {
+                      const auditedBy = task.auditedBy || task.audited_by_name || '';
+                      const remarks = (task.remarks || task.auditor_remarks || '').toLowerCase();
+                      const isAi = auditedBy.toLowerCase().includes('gemini') || 
+                                   auditedBy.toLowerCase().includes('ai') || 
+                                   remarks.includes('ai passed') || 
+                                   remarks.includes('ai fatal') || 
+                                   remarks.includes('(score:');
+
+                      if (isAi) {
+                        const modelDisplay = auditedBy || 'gemini-3.8-flash';
+                        return (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-sky-950/80 text-sky-300 border border-sky-500/40 shadow-sm" title={`Audited by AI Model: ${modelDisplay}`}>
+                            <Sparkles className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                            <span>{modelDisplay}</span>
+                          </span>
+                        );
+                      }
+
+                      if (task.assignedAuditorName) {
+                        return (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-sky-500/10 text-sky-300 border border-sky-500/20">
+                            <UserCheck className="w-3 h-3 text-sky-400" />
+                            <span>{task.assignedAuditorName}</span>
+                          </span>
+                        );
+                      }
+
+                      return <span className="text-[11px] text-slate-500 italic">Unassigned</span>;
+                    })()}
                   </td>
 
                   {/* 8. Audit Status */}

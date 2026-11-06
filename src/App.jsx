@@ -215,7 +215,8 @@ export default function App() {
       }
     });
 
-    // 2. Also ensure any auditor name that appears on existing tasks is included
+    // 2. Also ensure any auditor name that appears on existing tasks is included, plus AI models
+    let hasAiAuditedTasks = false;
     (tasks || []).forEach(t => {
       const name = (t.assignedAuditorName || '').trim();
       if (name) {
@@ -230,7 +231,44 @@ export default function App() {
           });
         }
       }
+
+      // Check if task was audited by AI
+      const auditedBy = (t.auditedBy || t.audited_by_name || '').trim();
+      const remarks = (t.remarks || t.auditor_remarks || '').toLowerCase();
+      const isAi = auditedBy.toLowerCase().includes('gemini') || 
+                   auditedBy.toLowerCase().includes('ai') || 
+                   remarks.includes('ai passed') || 
+                   remarks.includes('ai fatal') || 
+                   remarks.includes('(score:');
+
+      if (isAi) {
+        hasAiAuditedTasks = true;
+        const modelName = auditedBy || 'gemini-3.8-flash';
+        const modelKey = `ai_${modelName.toLowerCase()}`;
+        if (!seen.has(modelKey)) {
+          seen.add(modelKey);
+          list.push({
+            id: modelName,
+            full_name: `🤖 ${modelName} (AI)`,
+            name: modelName,
+            role: 'AI Model',
+            isAi: true
+          });
+        }
+      }
     });
+
+    // Add general AI Filter option if any AI audited visits exist
+    if (hasAiAuditedTasks && !seen.has('all_ai')) {
+      seen.add('all_ai');
+      list.unshift({
+        id: 'ALL_AI',
+        full_name: '🤖 All AI Audits',
+        name: 'ALL_AI',
+        role: 'AI Filter',
+        isAi: true
+      });
+    }
 
     return list;
   }, [users, tasks]);
@@ -1055,11 +1093,19 @@ export default function App() {
       if (selectedAuditorFilter === 'UNASSIGNED') {
         return tasks.filter(t => !t.assignedAuditorId && !t.assignedAuditorName);
       }
+      if (selectedAuditorFilter === 'ALL_AI') {
+        return tasks.filter(t => {
+          const by = String(t.auditedBy || t.audited_by_name || '').toLowerCase();
+          const rem = String(t.remarks || t.auditor_remarks || '').toLowerCase();
+          return by.includes('gemini') || by.includes('ai') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
+        });
+      }
       return tasks.filter(t => {
         const tAudName = String(t.assignedAuditorName || '').toLowerCase();
         const tAudId = String(t.assignedAuditorId || '').toLowerCase();
+        const tAuditedBy = String(t.auditedBy || t.audited_by_name || '').toLowerCase();
         const filterVal = selectedAuditorFilter.toLowerCase();
-        return tAudName === filterVal || tAudId === filterVal;
+        return tAudName === filterVal || tAudId === filterVal || tAuditedBy === filterVal || tAuditedBy.includes(filterVal);
       });
     }
 
