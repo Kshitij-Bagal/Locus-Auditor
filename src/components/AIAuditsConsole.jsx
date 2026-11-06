@@ -115,9 +115,10 @@ export default function AIAuditsConsole({
       listAvailableGeminiModels(apiKey).then(models => {
         if (models && models.length > 0) {
           setAvailableModels(models);
+          const isInvalidLegacy = selectedModel.includes('1.5') || selectedModel.includes('2.5');
           const exists = models.some(m => m.id === selectedModel);
-          if (!exists) {
-            const optimal = models.find(m => m.id === 'gemini-2.5-flash') || models.find(m => m.id === 'gemini-flash-latest') || models[0];
+          if (!exists || isInvalidLegacy) {
+            const optimal = models.find(m => m.id === 'gemini-3.8-flash') || models.find(m => m.id === 'gemini-3.7-flash') || models.find(m => m.id === 'gemini-3.5-flash') || models[0];
             if (optimal) {
               setSelectedModel(optimal.id);
               saveStoredGeminiModel(optimal.id);
@@ -152,8 +153,9 @@ export default function AIAuditsConsole({
       const res = await testGeminiApiKey(apiKey, selectedModel);
       if (res.availableModels && res.availableModels.length > 0) {
         setAvailableModels(res.availableModels);
+        const isInvalidLegacy = selectedModel.includes('1.5') || selectedModel.includes('2.5');
         const exists = res.availableModels.some(m => m.id === selectedModel);
-        if (!exists && res.activeModel) {
+        if ((!exists || isInvalidLegacy) && res.activeModel) {
           setSelectedModel(res.activeModel);
           saveStoredGeminiModel(res.activeModel);
         }
