@@ -53,8 +53,22 @@ async function fetchWithRetryAndRedirects(targetUrl, maxRedirects = 5, retryCoun
   const client = urlObj.protocol === 'https:' ? https : http;
 
   return new Promise((resolve, reject) => {
+    let finished = false;
+    const cleanup = () => {
+      finished = true;
+      clearTimeout(safetyTimer);
+    };
+
+    const safetyTimer = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        try { req.destroy(); } catch (_) {}
+        reject(new Error('Proxy request timed out after 15s'));
+      }
+    }, 15000);
+
     const req = client.get(effectiveUrl, {
-      timeout: 25000,
+      timeout: 12000,
       rejectUnauthorized: false,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -71,28 +85,27 @@ async function fetchWithRetryAndRedirects(targetUrl, maxRedirects = 5, retryCoun
         res.resume(); // Discard redirect stream
         try {
           const result = await fetchWithRetryAndRedirects(redirectUrl, maxRedirects - 1, retryCount);
+          cleanup();
           resolve(result);
         } catch (err) {
+          cleanup();
           reject(err);
         }
         return;
       }
 
       // 2. Handle HTTP 429 Too Many Requests or 503 with Exponential Backoff
-      if ((res.statusCode === 429 || res.statusCode === 503) && retryCount < 4) {
+      if ((res.statusCode === 429 || res.statusCode === 503) && retryCount < 2) {
         res.resume();
-        const retryHeader = parseInt(res.headers['retry-after'], 10);
-        // Generous backoff on 429: 2000ms, 4500ms, 9000ms, 18000ms + random jitter
-        const backoffMs = !isNaN(retryHeader) && retryHeader > 0
-          ? retryHeader * 1000
-          : Math.floor(2000 * Math.pow(2.2, retryCount) + Math.random() * 1500);
-
-        console.warn(`[Proxy] Upstream 429 on ${effectiveUrl}. Backing off for ${backoffMs}ms (retry ${retryCount + 1}/4)...`);
+        const backoffMs = 1500;
+        console.warn(`[Proxy] Upstream 429 on ${effectiveUrl}. Backing off for ${backoffMs}ms...`);
         await sleep(backoffMs);
         try {
           const result = await fetchWithRetryAndRedirects(effectiveUrl, maxRedirects, retryCount + 1);
+          cleanup();
           resolve(result);
         } catch (err) {
+          cleanup();
           reject(err);
         }
         return;
@@ -101,6 +114,7 @@ async function fetchWithRetryAndRedirects(targetUrl, maxRedirects = 5, retryCoun
       // 3. Upstream HTTP errors
       if (res.statusCode !== 200) {
         res.resume();
+        cleanup();
         return reject(new Error(`Upstream returned HTTP ${res.statusCode}`));
       }
 
@@ -108,15 +122,23 @@ async function fetchWithRetryAndRedirects(targetUrl, maxRedirects = 5, retryCoun
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
+        cleanup();
         const buffer = Buffer.concat(chunks);
         const contentType = res.headers['content-type'] || 'image/jpeg';
         resolve({ buffer, contentType });
       });
-      res.on('error', reject);
+      res.on('error', (err) => {
+        cleanup();
+        reject(err);
+      });
     });
 
-    req.on('error', reject);
+    req.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
     req.on('timeout', () => {
+      cleanup();
       req.destroy();
       reject(new Error('Upstream image request timed out'));
     });

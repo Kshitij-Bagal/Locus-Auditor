@@ -48,6 +48,7 @@ import {
 } from '../utils/geminiAuditHelper.js';
 import { tasksApi } from '../api/client.js';
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
+import AuditModal from './AuditModal.jsx';
 
 export default function AIAuditsConsole({
   tasks = [],
@@ -115,7 +116,7 @@ export default function AIAuditsConsole({
   const [sessionHistory, setSessionHistory] = useState([]);
   const [previewImage, setPreviewImage] = useState(null);
 
-  // 5. Active Console Mode: 'EXECUTE' | 'VERIFY'
+  // 5. Active Console Mode: 'EXECUTE' | 'VERIFY' | 'REAUDIT'
   const [activeConsoleTab, setActiveConsoleTab] = useState('EXECUTE');
 
   // 6. Human Review & Verification States
@@ -129,6 +130,14 @@ export default function AIAuditsConsole({
   const [overrideReasonInput, setOverrideReasonInput] = useState('');
   const [humanNotesInput, setHumanNotesInput] = useState('');
   const [isVerifyingAction, setIsVerifyingAction] = useState(false);
+
+  // 7. Fail AI Audit & Clinical Re-Audit States
+  const [failAiModalOpen, setFailAiModalOpen] = useState(false);
+  const [failAiReasonInput, setFailAiReasonInput] = useState('');
+  const [inspectingReAuditTask, setInspectingReAuditTask] = useState(null);
+  const [sessionReAuditMap, setSessionReAuditMap] = useState({}); // taskId -> { reason, requestedAt }
+  const [reAuditSearchQuery, setReAuditSearchQuery] = useState('');
+  const [reAuditCityFilter, setReAuditCityFilter] = useState('ALL');
 
   // Auto-discover models quietly when API key exists and ensure selectedModel is valid
   useEffect(() => {
@@ -749,6 +758,205 @@ export default function AIAuditsConsole({
     XLSX.writeFile(wb, `AI_Human_Verification_Log_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
+  // Open Fail AI Audit / Request Re-Audit Modal
+  const handleOpenFailAiAuditModal = () => {
+    if (!selectedVerifyTask) return;
+    setFailAiReasonInput('');
+    setFailAiModalOpen(true);
+  };
+
+  // Execute Fail AI Audit (Mark as failed and route to Re-Audit queue)
+  const handleExecuteFailAiAudit = async () => {
+    if (!selectedVerifyTask) return;
+    if (!failAiReasonInput.trim()) {
+      alert('Please enter a clinical reason why this AI audit failed and needs human re-check.');
+      return;
+    }
+
+    setIsVerifyingAction(true);
+    try {
+      const reviewerName = currentUser?.name || currentUser?.email || 'QA Reviewer';
+      const taskId = selectedVerifyTask.id || selectedVerifyTask.taskId;
+      const cleanReason = failAiReasonInput.trim();
+      const origRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
+
+      await tasksApi.failAiAudit({
+        taskId,
+        taskData: selectedVerifyTask,
+        reviewerName,
+        reason: cleanReason,
+        originalRemarks: origRemarks,
+        criteriaStatus: selectedVerifyTask.criteriaStatus || selectedVerifyTask.criteria_status || {},
+        failedReasons: selectedVerifyTask.failedReasons || selectedVerifyTask.failed_reasons || []
+      });
+
+      // Update session re-audit map
+      setSessionReAuditMap(prev => ({
+        ...prev,
+        [String(taskId)]: {
+          reason: cleanReason,
+          requestedAt: new Date().toLocaleTimeString()
+        }
+      }));
+
+      if (onTaskAudited) {
+        onTaskAudited(taskId, 'NEEDS_REAUDIT');
+      }
+
+      setFailAiModalOpen(false);
+      setFailAiReasonInput('');
+      alert(`AI Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} marked as FAILED and sent to the Re-Audit Queue!`);
+      setActiveConsoleTab('REAUDIT');
+    } catch (err) {
+      alert(`Failed to queue task for re-audit: ${err.message}`);
+    } finally {
+      setIsVerifyingAction(false);
+    }
+  };
+
+  // List of tasks queued for Re-Audit
+  const reAuditTasks = useMemo(() => {
+    const list = [];
+    const seenIds = new Set();
+
+    tasks.forEach(t => {
+      const id = String(t.id || t.taskId);
+      const sessionEntry = sessionReAuditMap[id];
+      const isDbReAudit = Boolean(
+        t.needsReAudit || 
+        t.needs_reaudit || 
+        t.auditStatus === 'NEEDS_REAUDIT' || 
+        t.audit_status === 'NEEDS_REAUDIT' ||
+        (t.remarks && (t.remarks.includes('[AI Audit Failed') || t.remarks.includes('[AI Audit Rejected'))) ||
+        (t.auditor_remarks && (t.auditor_remarks.includes('[AI Audit Failed') || t.auditor_remarks.includes('[AI Audit Rejected')))
+      );
+
+      if ((sessionEntry || isDbReAudit) && !seenIds.has(id)) {
+        seenIds.add(id);
+        const reason = sessionEntry?.reason || t.reAuditReason || (() => {
+          const rem = t.remarks || t.auditor_remarks || '';
+          const match = rem.match(/\[AI Audit (?:Failed|Rejected)[^:]*: ([^\]]+)\]/);
+          return match ? match[1] : 'AI audit was flagged as inaccurate by QA Reviewer';
+        })();
+
+        list.push({
+          ...t,
+          isAiReAudit: true,
+          needsReAudit: true,
+          reAuditReason: reason,
+          reAuditRequestedAt: sessionEntry?.requestedAt || t.updated_at || 'Recently'
+        });
+      }
+    });
+
+    return list;
+  }, [tasks, sessionReAuditMap]);
+
+  // Filtered Re-Audit Tasks
+  const filteredReAuditTasks = useMemo(() => {
+    return reAuditTasks.filter(t => {
+      if (reAuditCityFilter !== 'ALL') {
+        const c = t.facilityCode || t.city || '';
+        if (c.toLowerCase() !== reAuditCityFilter.toLowerCase()) return false;
+      }
+      if (reAuditSearchQuery.trim()) {
+        const q = reAuditSearchQuery.toLowerCase().trim();
+        const mId = String(t.taskId || t.id || '').toLowerCase().includes(q);
+        const mFe = String(t.feName || '').toLowerCase().includes(q);
+        const mCode = String(t.feCode || '').toLowerCase().includes(q);
+        if (!mId && !mFe && !mCode) return false;
+      }
+      return true;
+    });
+  }, [reAuditTasks, reAuditCityFilter, reAuditSearchQuery]);
+
+  // Distinct cities in Re-Audit tasks
+  const reAuditAvailableCities = useMemo(() => {
+    const s = new Set();
+    reAuditTasks.forEach(t => {
+      const c = t.facilityCode || t.city;
+      if (c) s.add(c);
+    });
+    return Array.from(s).sort();
+  }, [reAuditTasks]);
+
+  // Re-Audit Submission Handlers
+  const handleStartReAudit = (task) => {
+    setInspectingReAuditTask(task);
+  };
+
+  const handlePassReAudit = async (taskId, auditData) => {
+    try {
+      const auditorName = currentUser?.name || currentUser?.email || 'Clinical Auditor';
+      const targetTask = inspectingReAuditTask || tasks.find(t => String(t.id || t.taskId) === String(taskId));
+      const remarks = `[Clinical Re-Audit PASSED by ${auditorName}]: ${auditData?.remarks || 'Verified compliant with clinical SOP upon human re-inspection.'}`;
+
+      await tasksApi.passAudit({
+        taskId,
+        auditorName,
+        auditorLocation: targetTask?.facilityCode || 'Central QA',
+        remarks,
+        criteriaStatus: auditData?.criteriaStatus || {},
+        replacements: auditData?.replacements || [],
+        taskData: targetTask,
+        totalTokens: targetTask?.totalTokens || 0
+      });
+
+      // Remove from session re-audit map
+      setSessionReAuditMap(prev => {
+        const copy = { ...prev };
+        delete copy[String(taskId)];
+        return copy;
+      });
+
+      if (onTaskAudited) {
+        onTaskAudited(taskId, 'PASSED');
+      }
+
+      setInspectingReAuditTask(null);
+      alert(`Clinical Re-Audit successfully PASSED for Task #${targetTask?.taskId || taskId}!`);
+    } catch (err) {
+      alert(`Failed to submit re-audit pass: ${err.message}`);
+    }
+  };
+
+  const handleFatalReAudit = async (taskId, auditData) => {
+    try {
+      const auditorName = currentUser?.name || currentUser?.email || 'Clinical Auditor';
+      const targetTask = inspectingReAuditTask || tasks.find(t => String(t.id || t.taskId) === String(taskId));
+      const remarks = `[Clinical Re-Audit FATAL by ${auditorName}]: ${auditData?.remarks || 'Non-compliance confirmed upon human re-inspection.'}`;
+
+      await tasksApi.failAudit({
+        taskId,
+        taskData: targetTask,
+        failedReasons: auditData?.failedReasons || ['Human Re-Audit Clinical Non-Compliance'],
+        remarks,
+        criteriaStatus: auditData?.criteriaStatus || {},
+        replacements: auditData?.replacements || [],
+        auditorName,
+        auditorLocation: targetTask?.facilityCode || 'Central QA',
+        immediateEmail: false,
+        totalTokens: targetTask?.totalTokens || 0
+      });
+
+      // Remove from session re-audit map
+      setSessionReAuditMap(prev => {
+        const copy = { ...prev };
+        delete copy[String(taskId)];
+        return copy;
+      });
+
+      if (onTaskAudited) {
+        onTaskAudited(taskId, 'FATAL');
+      }
+
+      setInspectingReAuditTask(null);
+      alert(`Clinical Re-Audit FATAL STRIKE confirmed for Task #${targetTask?.taskId || taskId}!`);
+    } catch (err) {
+      alert(`Failed to submit re-audit fatal: ${err.message}`);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-fade-in max-w-7xl mx-auto">
       
@@ -824,9 +1032,31 @@ export default function AIAuditsConsole({
             {allAiAuditedTasks.length} AI Audits
           </span>
         </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveConsoleTab('REAUDIT')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            activeConsoleTab === 'REAUDIT'
+              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-lg shadow-amber-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+          }`}
+        >
+          <RotateCcw className="w-4 h-4 text-amber-400" />
+          <span>Clinical Re-Audit Queue</span>
+          {reAuditTasks.length > 0 ? (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-amber-500 text-black font-black text-[10px] animate-pulse">
+              {reAuditTasks.length} Needs Check
+            </span>
+          ) : (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-slate-400 border border-slate-800 font-mono">
+              0
+            </span>
+          )}
+        </button>
       </div>
 
-      {activeConsoleTab === 'EXECUTE' ? (
+      {activeConsoleTab === 'EXECUTE' && (
         <>
       {/* Google Gemini API Key & Model Configuration Bar */}
       <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-3">
@@ -1520,8 +1750,10 @@ export default function AIAuditsConsole({
         </div>
       )}
         </>
-      ) : (
-        /* TAB 2: HUMAN REVIEW & VERIFICATION HUB */
+      )}
+
+      {/* TAB 2: HUMAN REVIEW & VERIFICATION HUB */}
+      {activeConsoleTab === 'VERIFY' && (
         <div className="space-y-6">
           {/* Verification Summary KPIs Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -2011,6 +2243,18 @@ export default function AIAuditsConsole({
                             <span>Overturn to FATAL</span>
                           </button>
                         )}
+
+                        {/* Fail AI Audit / Send to Re-Audit Button */}
+                        <button
+                          type="button"
+                          onClick={handleOpenFailAiAuditModal}
+                          disabled={isVerifyingAction}
+                          className="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-rose-600 via-orange-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-rose-950/40"
+                          title="Reject this AI audit as inaccurate or inconclusive and route to human auditors for clinical re-check"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                          <span>Fail AI Audit (Send for Re-Audit)</span>
+                        </button>
                       </div>
                     </div>
                   </>
@@ -2080,7 +2324,288 @@ export default function AIAuditsConsole({
               </div>
             </div>
           )}
+
+          {/* Fail AI Audit & Request Human Re-Audit Modal */}
+          {failAiModalOpen && selectedVerifyTask && (
+            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-rose-500/40 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center">
+                      <RotateCcw className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white">Fail AI Audit & Queue for Re-Audit</h4>
+                      <p className="text-[11px] text-slate-400">Task #{selectedVerifyTask.taskId || selectedVerifyTask.id} • {selectedVerifyTask.feName}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setFailAiModalOpen(false)}
+                    className="text-slate-400 hover:text-white text-xs p-1 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs text-slate-300">
+                    Flag this AI evaluation as inaccurate, hallucinatory, or disputed. This task will be sent to the <strong className="text-amber-400">Clinical Re-Audit Queue</strong> where human auditors can re-audit the visit with all AI-selected criteria highlighted.
+                  </p>
+                  <label className="block font-bold text-slate-300 text-[11px] pt-1">
+                    Reason AI Audit Failed (Required for audit history):
+                  </label>
+                  <textarea
+                    value={failAiReasonInput}
+                    onChange={(e) => setFailAiReasonInput(e.target.value)}
+                    placeholder="e.g. AI incorrectly marked Torches as FAIL. Flash reflections in mirror verify both blue & yellow torches are present."
+                    rows={3}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500 font-medium"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => setFailAiModalOpen(false)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleExecuteFailAiAudit}
+                    disabled={!failAiReasonInput.trim() || isVerifyingAction}
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 transition-all cursor-pointer disabled:opacity-50 shadow-lg shadow-rose-950/40"
+                  >
+                    Confirm & Send to Re-Audit
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
+      )}
+
+      {/* TAB 3: CLINICAL RE-AUDIT QUEUE */}
+      {activeConsoleTab === 'REAUDIT' && (
+        <div className="space-y-6">
+          {/* Re-Audit KPIs Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-slate-900 border border-amber-500/30 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 block mb-1">
+                Needs Re-Audit
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-amber-300">{reAuditTasks.length}</span>
+                <span className="text-[10px] text-slate-500">Visits Flagged</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400 block mb-1">
+                Original AI Fatal
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-white">
+                  {reAuditTasks.filter(t => t.auditStatus === 'FATAL').length}
+                </span>
+                <span className="text-[10px] text-slate-500">Disputed</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
+                Original AI Pass
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-white">
+                  {reAuditTasks.filter(t => t.auditStatus === 'PASSED').length}
+                </span>
+                <span className="text-[10px] text-slate-500">Disputed</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
+                Showing in View
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-white">{filteredReAuditTasks.length}</span>
+                <span className="text-[10px] text-slate-500">Filtered</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Search & City Filter Bar */}
+          <div className="bg-slate-900 border border-slate-800 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-lg">
+            <div className="flex items-center gap-2 flex-1 min-w-[220px]">
+              <Search className="w-4 h-4 text-slate-400" />
+              <input
+                type="text"
+                value={reAuditSearchQuery}
+                onChange={(e) => setReAuditSearchQuery(e.target.value)}
+                placeholder="Search Re-Audit by Task ID, FE Name, or Code..."
+                className="bg-transparent border-none text-xs text-white placeholder-slate-500 focus:outline-none w-full"
+              />
+              {reAuditSearchQuery && (
+                <button
+                  onClick={() => setReAuditSearchQuery('')}
+                  className="text-slate-500 hover:text-white text-xs cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-slate-400 font-medium">City:</span>
+              <select
+                value={reAuditCityFilter}
+                onChange={(e) => setReAuditCityFilter(e.target.value)}
+                className="bg-slate-950 border border-slate-700 text-xs text-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500"
+              >
+                <option value="ALL">All Hubs ({reAuditAvailableCities.length})</option>
+                {reAuditAvailableCities.map(city => (
+                  <option key={city} value={city}>{city}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Re-Audit Cards List */}
+          {filteredReAuditTasks.length === 0 ? (
+            <div className="p-12 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3">
+              <div className="w-12 h-12 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center">
+                <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+              </div>
+              <h4 className="text-sm font-bold text-white">Re-Audit Queue is Empty</h4>
+              <p className="text-xs text-slate-400 max-w-md mx-auto">
+                No tasks are currently flagged for clinical re-audit. When a human reviewer fails an AI audit from the Human Review tab, it will appear here for full clinical re-inspection.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {filteredReAuditTasks.map(task => {
+                const taskId = task.taskId || task.id;
+                const criteria = task.criteriaStatus || {};
+                const aiReasons = task.failedReasons || [];
+                const origVerdict = task.auditStatus || 'UNKNOWN';
+
+                return (
+                  <div
+                    key={taskId}
+                    className="p-4 rounded-2xl bg-slate-900 border border-amber-500/30 hover:border-amber-500/60 transition-all shadow-xl space-y-3 flex flex-col justify-between"
+                  >
+                    <div className="space-y-2.5">
+                      {/* Top Header: ID & Badges */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-sm text-white">
+                              #{taskId}
+                            </span>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">
+                              {task.facilityCode || task.city || 'Hub'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-300 font-semibold pt-0.5">
+                            {task.feName || 'Unknown FE'} <span className="text-slate-500 font-mono text-[11px]">({task.feCode || 'FE'})</span>
+                          </p>
+                        </div>
+
+                        {/* Original AI Verdict Badge */}
+                        <div className="text-right">
+                          <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-black tracking-wide uppercase border ${
+                            origVerdict === 'PASSED'
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                              : 'bg-red-500/20 text-red-300 border-red-500/40'
+                          }`}>
+                            AI: {origVerdict}
+                          </span>
+                          <span className="block text-[9px] text-slate-500 font-mono mt-0.5">
+                            {task.auditedBy || 'Gemini Flash'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Re-Audit Reason Alert Box */}
+                      <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs space-y-1">
+                        <div className="flex items-center gap-1.5 font-bold text-[11px] text-amber-400">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>Flagged for Human Re-Audit:</span>
+                        </div>
+                        <p className="text-[11px] text-amber-100/90 leading-relaxed font-medium pl-5">
+                          "{task.reAuditReason || 'Flagged by QA Reviewer'}"
+                        </p>
+                      </div>
+
+                      {/* AI Selected Criteria Evaluation Strip */}
+                      <div className="space-y-1.5 pt-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                          AI Criteria Evaluation (Highlighted for Re-Check):
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            { key: 'selfie', label: '1. Selfie' },
+                            { key: 'torches', label: '2. Torches' },
+                            { key: 'visionChart', label: '3. Vision Chart' },
+                            { key: 'toolkit', label: '4. Toolkit' },
+                            { key: 'frameDisplay', label: '5. Frame/Trial' }
+                          ].map(c => {
+                            const st = criteria[c.key] || (task.audit_status === 'PASSED' ? 'PASS' : null);
+                            const isFail = st === 'FAIL' || aiReasons.some(r => r.toLowerCase().includes(c.key.toLowerCase()));
+                            const isPass = st === 'PASS' && !isFail;
+
+                            return (
+                              <span
+                                key={c.key}
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-md border flex items-center gap-1 ${
+                                  isFail
+                                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
+                                    : isPass
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                                }`}
+                              >
+                                {isFail ? '❌ AI FAIL:' : isPass ? '✅ AI PASS:' : '⚪'} {c.label}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bottom Action: Perform Clinical Re-Audit */}
+                    <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        {task.date || task.dispatch_date || 'Recent Dispatch'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleStartReAudit(task)}
+                        className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-black flex items-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-amber-950/40"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Perform Clinical Re-Audit</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Clinical Re-Audit Modal View (Opens Standard Audit Modal with AI Highlighting) */}
+      {inspectingReAuditTask && (
+        <AuditModal
+          task={inspectingReAuditTask}
+          isReAudit={true}
+          onClose={() => setInspectingReAuditTask(null)}
+          onPassAudit={handlePassReAudit}
+          onFatalAudit={handleFatalReAudit}
+          auditorName={currentUser?.name || currentUser?.email || 'Clinical Auditor'}
+          auditorLocation={inspectingReAuditTask.facilityCode || 'Central QA'}
+        />
       )}
 
       {/* Enlarged Photo Preview Modal */}

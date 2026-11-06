@@ -505,7 +505,17 @@ export const tasksApi = {
         disputeProofUrl: row.dispute_proof_url || null,
         totalTokens: row.total_tokens || 0,
         total_tokens: row.total_tokens || 0,
-        auditorModel: row.auditor_model || row.audited_by_name || null
+        auditorModel: row.auditor_model || row.audited_by_name || null,
+        needsReAudit: Boolean(
+          row.needs_reaudit || 
+          row.audit_status === 'NEEDS_REAUDIT' || 
+          (row.auditor_remarks && (row.auditor_remarks.includes('[AI Audit Failed') || row.auditor_remarks.includes('[AI Audit Rejected')))
+        ),
+        reAuditReason: (() => {
+          if (!row.auditor_remarks) return null;
+          const match = row.auditor_remarks.match(/\[AI Audit (?:Failed|Rejected) [^:]+: ([^\]]+)\]/);
+          return match ? match[1] : null;
+        })()
       }));
     } catch (e) {
       console.warn('tasksApi.getTasks error:', e.message);
@@ -667,6 +677,46 @@ export const tasksApi = {
       recipients,
       emailDispatch
     };
+  },
+
+  // Human reviewer fails an AI audit and queues it for clinical human re-audit
+  async failAiAudit({
+    taskId,
+    taskData,
+    reviewerName,
+    reason,
+    originalRemarks,
+    criteriaStatus,
+    failedReasons
+  }) {
+    if (supabase) {
+      const updatedRemarks = `[AI Audit Failed / Re-Audit Requested by ${reviewerName}: ${reason}] ${originalRemarks || ''}`.trim();
+      
+      const updatePayload = {
+        audit_status: 'NEEDS_REAUDIT',
+        auditor_remarks: updatedRemarks,
+        criteria_status: criteriaStatus || taskData?.criteriaStatus || taskData?.criteria_status || {},
+        failed_reasons: failedReasons || taskData?.failedReasons || taskData?.failed_reasons || [],
+        updated_at: new Date().toISOString()
+      };
+
+      let { error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+
+      // If 'NEEDS_REAUDIT' violates an audit_status check constraint in Supabase, fallback to 'PENDING'
+      if (error && (error.message.includes('check constraint') || error.message.includes('invalid input value for enum'))) {
+        console.warn('audit_status check constraint detected; falling back to PENDING with remarks stamp');
+        updatePayload.audit_status = 'PENDING';
+        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+        error = retry.error;
+      }
+
+      if (error) {
+        console.error('tasksApi.failAiAudit error:', error);
+        throw new Error(error.message || 'Failed to queue task for re-audit in Supabase');
+      }
+    }
+
+    return { success: true, status: 'NEEDS_REAUDIT' };
   },
 
   // Batch sync audits from local state / recovery cache to Supabase

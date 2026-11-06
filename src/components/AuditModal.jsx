@@ -73,6 +73,17 @@ export default function AuditModal({
   const verdictTimeoutRef = useRef(null);
   const remarksSelectRef = useRef(null);
 
+  // AI Re-Audit Detection & Criteria Resolution
+  const isAiReAudit = Boolean(
+    task?.isAiReAudit || 
+    task?.needsReAudit || 
+    task?.reAuditReason || 
+    (task?.auditor_remarks && (task.auditor_remarks.includes('[AI Audit Failed') || task.auditor_remarks.includes('[AI Audit Rejected')))
+  );
+
+  const aiCriteriaMap = useMemo(() => task?.criteriaStatus || task?.criteria_status || {}, [task]);
+  const aiFailedList = useMemo(() => task?.failedReasons || task?.failed_reasons || [], [task]);
+
   // Equipment Replacements Requisition State
   const [replacements, setReplacements] = useState([]);
   const [selectedItemToAdd, setSelectedItemToAdd] = useState('');
@@ -123,6 +134,31 @@ export default function AuditModal({
     u = u.replace(/^https:\/\/api\.locus-api\.com\/v1\/client\//, 'https://assets.locus-api.com/v1/client/');
     return u;
   })();
+
+  // Current criterion AI diagnostic
+  const currentCriterionAiStatus = useMemo(() => {
+    if (!currentCriterion) return null;
+    const cid = currentCriterion.id;
+    const fid = currentCriterion.field || currentCriterion.imageKey;
+    const st = aiCriteriaMap[cid] || (fid ? aiCriteriaMap[fid] : null);
+    
+    // Find matching AI failure reason
+    const matchingReason = aiFailedList.find(r => {
+      const lower = String(r).toLowerCase();
+      if ((cid === 'selfie' || fid === 'selfie') && (lower.includes('selfie') || lower.includes('t-shirt') || lower.includes('badge') || lower.includes('id card'))) return true;
+      if ((cid === 'torches' || fid === 'torches') && (lower.includes('torch') || lower.includes('penlight') || lower.includes('blue') || lower.includes('yellow'))) return true;
+      if ((cid === 'visionChart' || fid === 'visionChart') && (lower.includes('chart') || lower.includes('standee') || lower.includes('vision'))) return true;
+      if ((cid === 'toolkit' || fid === 'toolkit') && (lower.includes('toolkit') || lower.includes('sanitizer') || lower.includes('jcc') || lower.includes('frame') || lower.includes('ruler'))) return true;
+      if ((cid === 'trialLenses' || fid === 'trialLenses' || fid === 'frameDisplay') && (lower.includes('lens') || lower.includes('display') || lower.includes('tray'))) return true;
+      return false;
+    });
+
+    if (!st && !matchingReason && !isAiReAudit) return null;
+    return {
+      status: st || (matchingReason ? 'FAIL' : 'PASS'),
+      reason: matchingReason || null
+    };
+  }, [currentCriterion, aiCriteriaMap, aiFailedList, isAiReAudit]);
 
   const handleZoomIn = () => setZoomLevel(prev => Math.min(prev + 0.5, 3));
   const handleZoomOut = () => setZoomLevel(prev => Math.max(prev - 0.5, 0.75));
@@ -658,8 +694,48 @@ export default function AuditModal({
           </div>
         </div>
 
-        {/* Re-Audit Banner (if active) */}
-        {isReAudit && (
+        {/* AI Re-Audit Guidance Banner */}
+        {isAiReAudit && (
+          <div className="px-5 py-3 bg-gradient-to-r from-amber-950/80 via-slate-900 to-amber-950/80 border-b border-amber-500/40 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-200">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-white text-xs">Clinical Re-Audit (AI Audit Failed by QA)</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                    Orig Auditor: {task.auditedBy || task.audited_by_name || 'Gemini AI'}
+                  </span>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                    task.auditStatus === 'FATAL' ? 'bg-red-500/20 text-red-300 border border-red-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  }`}>
+                    AI Verdict: {task.auditStatus}
+                  </span>
+                </div>
+                {task.reAuditReason && (
+                  <p className="text-[11px] text-amber-300 mt-0.5 italic">
+                    <strong>Reviewer Reason for Re-Audit:</strong> &ldquo;{task.reAuditReason}&rdquo;
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-[11px] text-slate-300 font-mono bg-slate-950/70 border border-slate-800 px-3 py-1.5 rounded-lg">
+              <span>AI Criterias:</span>
+              <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white text-[10px] font-black">
+                🤖 AI FAIL
+              </span>
+              <span>and</span>
+              <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">
+                🤖 AI PASS
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Regular Re-Audit Banner (if active without AI context) */}
+        {isReAudit && !isAiReAudit && (
           <div className="px-5 py-2.5 bg-amber-500/10 border-b border-amber-500/30 flex items-center justify-between text-xs text-amber-200">
             <div className="flex items-center gap-2">
               <Scale className="w-4 h-4 text-amber-400 shrink-0" />
@@ -696,6 +772,11 @@ export default function AuditModal({
             const isCurrent = idx === activeCriterionIndex;
             const status = criteriaStatus[crit.id || fieldKey];
 
+            // AI Status for this criterion
+            const aiCritStatus = aiCriteriaMap[crit.id] || (fieldKey ? aiCriteriaMap[fieldKey] : null);
+            const isAiFail = aiCritStatus === 'FAIL';
+            const isAiPass = aiCritStatus === 'PASS';
+
             // Color titles background directly instead of inserting icons to eliminate layout jumping / sizing jumps
             let tabStyle = '';
             if (status === 'PASS') {
@@ -724,6 +805,18 @@ export default function AuditModal({
                 <span className="font-mono text-[11px] opacity-75">[{idx + 1}]</span>
                 <span>{crit.label || crit.title}</span>
                 {!hasMedia && <span className="text-[10px] text-slate-500">(No URL)</span>}
+
+                {/* AI Selected Criteria Badges */}
+                {isAiFail && (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white text-[9px] font-black uppercase tracking-wider shadow-sm flex items-center gap-0.5 animate-pulse">
+                    <span>🤖 AI FAIL</span>
+                  </span>
+                )}
+                {isAiPass && (
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold flex items-center gap-0.5">
+                    <span>🤖 AI PASS</span>
+                  </span>
+                )}
               </button>
             );
           })}
@@ -752,6 +845,27 @@ export default function AuditModal({
                   )}
                 </div>
                 <span className="text-slate-200 font-medium">{currentCriterion.description}</span>
+
+                {/* AI Evaluation Insight for Current Criterion */}
+                {currentCriterionAiStatus && (
+                  <div className={`mt-2 p-2 rounded-lg border text-xs flex items-start gap-2 ${
+                    currentCriterionAiStatus.status === 'FAIL'
+                      ? 'bg-rose-950/40 border-rose-500/50 text-rose-200'
+                      : 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                  }`}>
+                    <span className="text-sm shrink-0">{currentCriterionAiStatus.status === 'FAIL' ? '🤖⚠️' : '🤖✅'}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <strong className="text-[10px] font-black uppercase tracking-wider">
+                          AI Pre-Audit: {currentCriterionAiStatus.status === 'FAIL' ? 'FLAGGED NON-COMPLIANT (FAIL)' : 'VERIFIED COMPLIANT (PASS)'}
+                        </strong>
+                      </div>
+                      <p className="text-[10px] mt-0.5 leading-snug">
+                        {currentCriterionAiStatus.reason || (currentCriterionAiStatus.status === 'FAIL' ? 'The AI vision engine flagged non-compliance on this station photo.' : 'The AI vision engine verified this photo as compliant with DLC SOP.')}
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="flex items-center space-x-2 shrink-0">
                 <button

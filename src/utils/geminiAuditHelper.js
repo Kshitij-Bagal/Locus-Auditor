@@ -99,9 +99,17 @@ export async function compressAndResizeBlob(blob, maxDim = 1024, quality = 0.82)
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     try {
       return await new Promise((resolve) => {
+        let timer = null;
         const img = new Image();
         const url = URL.createObjectURL(blob);
+
+        timer = setTimeout(() => {
+          try { URL.revokeObjectURL(url); } catch (_) {}
+          resolve(null);
+        }, 8000); // Safety timeout: prevents hung promises on corrupt blobs
+
         img.onload = () => {
+          if (timer) clearTimeout(timer);
           URL.revokeObjectURL(url);
           let { width, height } = img;
           if (width > maxDim || height > maxDim) {
@@ -126,10 +134,13 @@ export async function compressAndResizeBlob(blob, maxDim = 1024, quality = 0.82)
             data: parts[1]
           });
         };
+
         img.onerror = () => {
+          if (timer) clearTimeout(timer);
           URL.revokeObjectURL(url);
           resolve(null);
         };
+
         img.src = url;
       });
     } catch (e) {
@@ -155,7 +166,7 @@ export async function compressAndResizeBlob(blob, maxDim = 1024, quality = 0.82)
 }
 
 /**
- * Downloads a remote image through the server-side image proxy,
+ * Downloads a remote image through the server-side image proxy with a strict 12s timeout,
  * automatically downscales to 1024px, and converts it to optimized base64.
  */
 export async function fetchImageAsBase64(rawUrl, taskId) {
@@ -165,7 +176,7 @@ export async function fetchImageAsBase64(rawUrl, taskId) {
 
   try {
     const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(cleanUrl)}`;
-    const response = await fetch(proxyUrl);
+    const response = await fetchWithTimeout(proxyUrl, {}, 12000);
     if (!response.ok) {
       console.warn(`Failed to fetch image via proxy (${response.status}):`, cleanUrl);
       return null;
@@ -306,12 +317,10 @@ export const GEMINI_MODEL_PRIORITY = [
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   'gemini-3.5-flash',
-  'gemini-flash-latest',
   'gemini-3-flash-preview',
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
-  'gemini-3.1-pro-preview',
-  'gemini-pro-latest'
+  'gemini-3.1-pro-preview'
 ];
 
 /**
@@ -372,16 +381,17 @@ export async function listAvailableGeminiModels(apiKey) {
           .filter(m => {
             const methods = m.supportedGenerationMethods || [];
             const id = m.name.replace(/^models\//, '');
-            // Only generateContent models, and exclude retired models that fail on generateContent
+            // Only generateContent models, and exclude retired/legacy aliases
             if (!methods.includes('generateContent')) return false;
             if (id.includes('1.5') || id.includes('2.5')) return false;
+            if (id.includes('flash-latest') || id.includes('pro-latest') || id.includes('-tts') || id.includes('preview-tts')) return false;
             return true;
           })
           .map(m => {
             const id = m.name.replace(/^models\//, '');
             const isFlash = id.toLowerCase().includes('flash');
             const isPro = id.toLowerCase().includes('pro');
-            const isLatestFlash = id === 'gemini-3.8-flash' || id === 'gemini-3.7-flash' || id === 'gemini-3.6-flash' || id === 'gemini-3.5-flash' || id === 'gemini-flash-latest';
+            const isLatestFlash = id === 'gemini-3.8-flash' || id === 'gemini-3.7-flash' || id === 'gemini-3.6-flash' || id === 'gemini-3.5-flash';
 
             // Token Limits
             const inputLimit = m.inputTokenLimit || (isPro ? 2097152 : 1048576);
@@ -506,13 +516,12 @@ export async function testGeminiApiKey(apiKey, targetModelId = null) {
       }
     });
   } else {
-    // If ListModels failed or returned 0, try modern 3.x Flash models only (NEVER 1.5/2.5)
+    // If ListModels failed or returned 0, try modern 3.x Flash models only (NEVER 1.5/2.5 or flash-latest)
     const fallbackList = [
       { id: 'gemini-3.8-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.8 Flash' },
       { id: 'gemini-3.7-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.7 Flash' },
       { id: 'gemini-3.6-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.6 Flash' },
       { id: 'gemini-3.5-flash', apiVersion: 'v1beta', displayName: 'Gemini 3.5 Flash' },
-      { id: 'gemini-flash-latest', apiVersion: 'v1beta', displayName: 'Gemini Flash Latest' },
       { id: 'gemini-3.1-flash-lite', apiVersion: 'v1beta', displayName: 'Gemini 3.1 Flash Lite' }
     ];
     candidates.push(...fallbackList);
@@ -583,7 +592,7 @@ export async function auditTaskWithGemini({
   apiVersion = null, 
   rules = INITIAL_CENTRAL_RULES, 
   onProgress,
-  allowModelFailover = true
+  allowModelFailover = false
 }) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('Google Gemini API Key is missing. Please configure it in the AI Audits console.');
@@ -725,38 +734,48 @@ export async function auditTaskWithGemini({
                      errorBody.includes('UNAVAILABLE');
 
       if (isHighDemand) {
-        // Fast retry after 1.2s on selected model in case it was a momentary spike
-        if (onProgress) onProgress({ step: 'RETRYING', message: `Google reports high demand on ${activeModel}. Retrying in 1.2s...` });
-        await waitMs(1200);
+        // Retry on selected activeModel with exponential backoff (2 attempts)
+        const retryDelays = [2000, 3800];
+        for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+          const delayMs = retryDelays[attempt];
+          if (onProgress) onProgress({ 
+            step: 'RETRYING', 
+            message: `Google reports high demand on ${activeModel}. Retrying in ${(delayMs / 1000).toFixed(1)}s (attempt ${attempt + 1}/${retryDelays.length})...` 
+          });
+          await waitMs(delayMs);
 
-        try {
-          response = await executeQuery(activeModel);
-        } catch (e) {
-          errorBody = e.message;
+          try {
+            response = await executeQuery(activeModel);
+            if (response && response.ok) {
+              errorBody = '';
+              break;
+            } else if (response) {
+              errorBody = await response.text();
+            }
+          } catch (e) {
+            errorBody = e.message;
+          }
         }
 
-        // If still 503 and auto-failover is enabled, try sister Flash models
+        // Only if user explicitly enabled allowModelFailover: try modern 3.x Flash models (NEVER legacy 1.5 or alias)
         if ((!response || !response.ok) && allowModelFailover) {
-          if (response) errorBody = await response.text();
-          
-          // Pool of available 3.x Flash models in project
           const sisterModels = [
             'gemini-3.7-flash',
             'gemini-3.6-flash',
             'gemini-3.5-flash',
-            'gemini-flash-latest',
             'gemini-3.1-flash-lite'
           ].filter(m => m !== activeModel);
 
           for (const sister of sisterModels) {
-            if (onProgress) onProgress({ step: 'FAILOVER', message: `${activeModel} still busy. Auto-routing to sister model ${sister}...` });
-            await waitMs(600);
+            if (onProgress) onProgress({ step: 'FAILOVER', message: `${activeModel} busy. Auto-routing to modern sister model ${sister}...` });
+            await waitMs(800);
 
             try {
               const sisterRes = await executeQuery(sister);
               if (sisterRes.ok) {
                 response = sisterRes;
                 activeModel = sister;
+                errorBody = '';
                 break;
               } else {
                 errorBody = await sisterRes.text();
