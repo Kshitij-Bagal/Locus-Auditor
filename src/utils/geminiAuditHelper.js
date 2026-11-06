@@ -5,8 +5,9 @@
 
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
 
-// Local storage key for Gemini API Key
+// Local storage key for Gemini API Key & Selected Model
 export const GEMINI_API_KEY_STORAGE_KEY = 'locus_gemini_api_key';
+export const GEMINI_MODEL_STORAGE_KEY = 'locus_gemini_active_model';
 
 export function getStoredGeminiApiKey() {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -22,6 +23,24 @@ export function saveStoredGeminiApiKey(key) {
       localStorage.setItem(GEMINI_API_KEY_STORAGE_KEY, key.trim());
     } else {
       localStorage.removeItem(GEMINI_API_KEY_STORAGE_KEY);
+    }
+  }
+}
+
+export function getStoredGeminiModel() {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    const saved = localStorage.getItem(GEMINI_MODEL_STORAGE_KEY);
+    if (saved && saved.trim()) return saved.trim();
+  }
+  return 'gemini-1.5-flash-latest';
+}
+
+export function saveStoredGeminiModel(model) {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    if (model && model.trim()) {
+      localStorage.setItem(GEMINI_MODEL_STORAGE_KEY, model.trim());
+    } else {
+      localStorage.removeItem(GEMINI_MODEL_STORAGE_KEY);
     }
   }
 }
@@ -206,53 +225,255 @@ You MUST respond strictly with valid JSON conforming to this exact structure:
 }
 
 /**
- * Tests connection to Google Gemini 1.5 Flash API with a lightweight ping.
+ * Model Priority Ranking:
+ * Prefers latest, ultra-fast multimodal Flash models with vision support.
  */
-export async function testGeminiApiKey(apiKey) {
+export const GEMINI_MODEL_PRIORITY = [
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-002',
+  'gemini-1.5-flash-001',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-exp',
+  'gemini-2.0-flash-001',
+  'gemini-1.5-flash-8b',
+  'gemini-1.5-flash-8b-latest',
+  'gemini-1.5-pro-latest',
+  'gemini-1.5-pro',
+  'gemini-1.5-pro-002',
+  'gemini-pro-vision',
+  'gemini-pro'
+];
+
+/**
+ * Robust JSON parser that handles markdown code blocks or conversational wrappers.
+ */
+export function extractJsonFromText(rawText) {
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('Empty or invalid response from AI model.');
+  }
+
+  let text = rawText.trim();
+
+  // 1. Remove markdown fences like ```json ... ``` or ``` ... ```
+  if (text.includes('```')) {
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeBlockMatch && codeBlockMatch[1]) {
+      text = codeBlockMatch[1].trim();
+    }
+  }
+
+  // 2. Direct JSON Parse attempt
+  try {
+    return JSON.parse(text);
+  } catch (e1) {
+    // 3. Fallback: locate outermost curly braces
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      const extracted = text.substring(firstBrace, lastBrace + 1);
+      try {
+        return JSON.parse(extracted);
+      } catch (e2) {
+        throw new Error('AI output could not be parsed as valid JSON: ' + e2.message);
+      }
+    }
+    throw new Error('AI output could not be parsed as valid JSON: ' + e1.message);
+  }
+}
+
+/**
+ * Dynamically queries Google Generative AI ModelService.ListModels
+ * to find the exact models available for this specific API key.
+ */
+export async function listAvailableGeminiModels(apiKey) {
+  if (!apiKey || !apiKey.trim()) return [];
+  const cleanKey = apiKey.trim();
+  const versions = ['v1beta', 'v1'];
+
+  for (const v of versions) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/${v}/models?key=${cleanKey}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+
+      const data = await res.json();
+      if (Array.isArray(data.models) && data.models.length > 0) {
+        const supported = data.models
+          .filter(m => {
+            const methods = m.supportedGenerationMethods || [];
+            return methods.includes('generateContent');
+          })
+          .map(m => {
+            const id = m.name.replace(/^models\//, '');
+            return {
+              id,
+              name: m.name,
+              displayName: m.displayName || id,
+              description: m.description || '',
+              apiVersion: v
+            };
+          });
+
+        if (supported.length > 0) {
+          // Sort according to preferred model priority
+          supported.sort((a, b) => {
+            let idxA = GEMINI_MODEL_PRIORITY.indexOf(a.id);
+            let idxB = GEMINI_MODEL_PRIORITY.indexOf(b.id);
+            if (idxA === -1) idxA = 999;
+            if (idxB === -1) idxB = 999;
+            return idxA - idxB;
+          });
+          return supported;
+        }
+      }
+    } catch (err) {
+      console.warn(`Gemini ModelService.ListModels (${v}) check warning:`, err.message);
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Selects the optimal model from the available models list based on priority.
+ */
+export function pickOptimalModel(availableModels) {
+  if (!availableModels || availableModels.length === 0) return null;
+
+  for (const prio of GEMINI_MODEL_PRIORITY) {
+    const match = availableModels.find(m => m.id.toLowerCase() === prio.toLowerCase());
+    if (match) return match;
+  }
+
+  const anyFlash = availableModels.find(m => m.id.toLowerCase().includes('flash'));
+  if (anyFlash) return anyFlash;
+
+  const anyGemini = availableModels.find(m => m.id.toLowerCase().includes('gemini'));
+  if (anyGemini) return anyGemini;
+
+  return availableModels[0];
+}
+
+/**
+ * Tests connection to Google Gemini API with dynamic model resolution.
+ * Auto-detects supported model variants for the user's API key.
+ */
+export async function testGeminiApiKey(apiKey, targetModelId = null) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('Please enter a valid Google Gemini API Key.');
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey.trim()}`;
-  
-  const payload = {
-    contents: [
-      {
-        parts: [
-          { text: 'Ping. Respond with valid JSON: {"status": "ok", "model": "gemini-1.5-flash"}' }
-        ]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: 'application/json'
+  const cleanKey = apiKey.trim();
+
+  // 1. Discover models via ModelService.ListModels
+  const availableModels = await listAvailableGeminiModels(cleanKey);
+
+  // 2. Assemble candidate models to test
+  const candidates = [];
+
+  // If target model specified, put it first
+  if (targetModelId) {
+    const match = availableModels.find(m => m.id === targetModelId);
+    if (match) {
+      candidates.push(match);
+    } else {
+      candidates.push({ id: targetModelId, apiVersion: 'v1beta', displayName: targetModelId });
     }
-  };
-
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    let msg = `API Error ${response.status}: ${response.statusText}`;
-    try {
-      const parsed = JSON.parse(errorBody);
-      if (parsed.error?.message) msg = parsed.error.message;
-    } catch (e) {}
-    throw new Error(msg);
   }
 
-  const data = await response.json();
-  return { success: true, model: 'gemini-1.5-flash', response: data };
+  // Next, pick optimal from discovered list
+  if (availableModels.length > 0) {
+    const optimal = pickOptimalModel(availableModels);
+    if (optimal && !candidates.some(c => c.id === optimal.id)) {
+      candidates.push(optimal);
+    }
+    availableModels.forEach(m => {
+      if (!candidates.some(c => c.id === m.id)) {
+        candidates.push(m);
+      }
+    });
+  } else {
+    // If ListModels failed or returned 0, try common default models
+    const fallbackList = [
+      { id: 'gemini-1.5-flash-latest', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash Latest' },
+      { id: 'gemini-1.5-flash', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash' },
+      { id: 'gemini-1.5-flash-002', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash 002' },
+      { id: 'gemini-2.0-flash', apiVersion: 'v1beta', displayName: 'Gemini 2.0 Flash' },
+      { id: 'gemini-2.0-flash-exp', apiVersion: 'v1beta', displayName: 'Gemini 2.0 Flash Exp' },
+      { id: 'gemini-1.5-flash-8b', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Flash 8B' },
+      { id: 'gemini-1.5-pro-latest', apiVersion: 'v1beta', displayName: 'Gemini 1.5 Pro Latest' },
+      { id: 'gemini-1.5-flash', apiVersion: 'v1', displayName: 'Gemini 1.5 Flash (v1)' }
+    ];
+    candidates.push(...fallbackList);
+  }
+
+  let lastError = null;
+
+  // 3. Test ping on candidate models until one succeeds
+  for (const candidate of candidates) {
+    const v = candidate.apiVersion || 'v1beta';
+    const endpoint = `https://generativelanguage.googleapis.com/${v}/models/${candidate.id}:generateContent?key=${cleanKey}`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            { text: 'Respond with valid JSON: {"status": "ok"}' }
+          ]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.1
+      }
+    };
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        saveStoredGeminiModel(candidate.id);
+        return {
+          success: true,
+          activeModel: candidate.id,
+          activeApiVersion: v,
+          displayName: candidate.displayName || candidate.id,
+          availableModels: availableModels.length > 0 ? availableModels : candidates,
+          response: data
+        };
+      } else {
+        const errorBody = await response.text();
+        let msg = `API Error ${response.status}: ${response.statusText}`;
+        try {
+          const parsed = JSON.parse(errorBody);
+          if (parsed.error?.message) msg = parsed.error.message;
+        } catch (_) {}
+        lastError = new Error(`${candidate.id} (${v}): ${msg}`);
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('Failed to connect to Google Gemini API. Please check your API key.');
 }
 
 /**
- * Audits a single task by packaging all 5 images into a single Gemini 1.5 Flash API call.
+ * Audits a single task by packaging all 5 images into a single Gemini API call.
  */
-export async function auditTaskWithGemini({ task, apiKey, rules = INITIAL_CENTRAL_RULES, onProgress }) {
+export async function auditTaskWithGemini({ 
+  task, 
+  apiKey, 
+  modelId = null, 
+  apiVersion = null, 
+  rules = INITIAL_CENTRAL_RULES, 
+  onProgress 
+}) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('Google Gemini API Key is missing. Please configure it in the AI Audits console.');
   }
@@ -311,17 +532,18 @@ export async function auditTaskWithGemini({ task, apiKey, rules = INITIAL_CENTRA
     }
   }
 
-  if (onProgress) onProgress({ step: 'QUERYING_AI', message: 'Sending consolidated 5-photo inspection request to Gemini 1.5 Flash...' });
+  // 2. Resolve active model and endpoint
+  let activeModel = modelId || getStoredGeminiModel() || 'gemini-1.5-flash-latest';
+  let activeVersion = apiVersion || 'v1beta';
 
-  // 2. Build multi-modal request
+  if (onProgress) onProgress({ step: 'QUERYING_AI', message: `Sending consolidated 5-photo inspection request to ${activeModel}...` });
+
   const promptText = buildAuditPrompt(task, rules);
   const parts = [
     { text: promptText },
     ...imageParts
   ];
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey.trim()}`;
-  
   const payload = {
     contents: [
       { parts }
@@ -332,20 +554,54 @@ export async function auditTaskWithGemini({ task, apiKey, rules = INITIAL_CENTRA
     }
   };
 
-  const response = await fetch(endpoint, {
+  let endpoint = `https://generativelanguage.googleapis.com/${activeVersion}/models/${activeModel}:generateContent?key=${apiKey.trim()}`;
+
+  let response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
 
+  // If response failed, handle auto-fallbacks (e.g. responseMimeType not supported, or model not found)
   if (!response.ok) {
     const errorBody = await response.text();
-    let msg = `Gemini API Error ${response.status}: ${response.statusText}`;
-    try {
-      const parsed = JSON.parse(errorBody);
-      if (parsed.error?.message) msg = parsed.error.message;
-    } catch (e) {}
-    throw new Error(msg);
+    let isMimeTypeError = errorBody.includes('response_mime_type') || errorBody.includes('responseMimeType');
+    let isModelNotFoundError = response.status === 404 || errorBody.includes('not found') || errorBody.includes('ListModels');
+
+    if (isMimeTypeError) {
+      delete payload.generationConfig.responseMimeType;
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } else if (isModelNotFoundError) {
+      // Dynamically discover models and fallback to the working one
+      const discovered = await listAvailableGeminiModels(apiKey);
+      const fallback = pickOptimalModel(discovered);
+      if (fallback && fallback.id !== activeModel) {
+        activeModel = fallback.id;
+        activeVersion = fallback.apiVersion || 'v1beta';
+        saveStoredGeminiModel(activeModel);
+
+        endpoint = `https://generativelanguage.googleapis.com/${activeVersion}/models/${activeModel}:generateContent?key=${apiKey.trim()}`;
+        response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      }
+    }
+
+    if (!response.ok) {
+      const finalErr = await response.text();
+      let msg = `Gemini API Error ${response.status}: ${response.statusText}`;
+      try {
+        const parsed = JSON.parse(finalErr);
+        if (parsed.error?.message) msg = parsed.error.message;
+      } catch (_) {}
+      throw new Error(msg);
+    }
   }
 
   if (onProgress) onProgress({ step: 'PROCESSING_RESULTS', message: 'Synthesizing scores, error margin & clinical checklist...' });
@@ -358,14 +614,8 @@ export async function auditTaskWithGemini({ task, apiKey, rules = INITIAL_CENTRA
     throw new Error('Gemini API returned an empty response.');
   }
 
-  // Parse structured JSON
-  let structuredResult;
-  try {
-    structuredResult = JSON.parse(responseText);
-  } catch (err) {
-    console.error('Failed to parse Gemini JSON output:', responseText);
-    throw new Error('Gemini output could not be parsed as valid JSON: ' + err.message);
-  }
+  // Parse structured JSON safely
+  const structuredResult = extractJsonFromText(responseText);
 
   // Ensure robust formatting
   const verdict = structuredResult.verdict === 'PASS' ? 'PASS' : 'FATAL';
@@ -379,6 +629,7 @@ export async function auditTaskWithGemini({ task, apiKey, rules = INITIAL_CENTRA
     overallScore,
     confidenceScore,
     errorMargin,
+    activeModelUsed: activeModel,
     rawAiResponse: structuredResult
   };
 }
