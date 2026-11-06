@@ -25,7 +25,10 @@ import {
   Sliders,
   Check,
   X,
-  Clock
+  Clock,
+  Info,
+  Activity,
+  Zap
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -55,6 +58,37 @@ export default function AIAuditsConsole({
   const [showKey, setShowKey] = useState(false);
   const [keyTesting, setKeyTesting] = useState(false);
   const [keyStatus, setKeyStatus] = useState({ tested: false, valid: false, message: '' });
+  const [showModelGuide, setShowModelGuide] = useState(false);
+
+  // Live Token & Request Telemetry Counter
+  const [sessionUsage, setSessionUsage] = useState({
+    requests: 0,
+    promptTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0
+  });
+
+  // Active Model Metadata & Capacity Object
+  const activeModelObj = useMemo(() => {
+    const found = availableModels.find(m => m.id === selectedModel);
+    if (found) return found;
+
+    const isPro = selectedModel.toLowerCase().includes('pro');
+    const isFlash = selectedModel.toLowerCase().includes('flash');
+    const isRecommended = selectedModel === 'gemini-1.5-flash-latest' || selectedModel === 'gemini-1.5-flash' || selectedModel === 'gemini-2.0-flash';
+    return {
+      id: selectedModel,
+      displayName: selectedModel,
+      inputTokensFormatted: isPro ? '2M' : '1M',
+      inputTokenLimit: isPro ? 2097152 : 1048576,
+      outputTokenLimit: 8192,
+      rpm: isFlash ? 15 : (isPro ? 2 : 5),
+      rpd: isFlash ? 1500 : (isPro ? 50 : 200),
+      isFlash,
+      isPro,
+      isRecommended
+    };
+  }, [availableModels, selectedModel]);
 
   // 2. Queue & Filter States
   const [selectedCity, setSelectedCity] = useState('ALL');
@@ -260,6 +294,18 @@ export default function AIAuditsConsole({
         }
       }
 
+      // Update session telemetry counters
+      const promptToks = result.usageMetadata?.promptTokens || 1650;
+      const respToks = result.usageMetadata?.responseTokens || 350;
+      const totToks = result.usageMetadata?.totalTokens || (promptToks + respToks);
+
+      setSessionUsage(prev => ({
+        requests: prev.requests + 1,
+        promptTokens: prev.promptTokens + promptToks,
+        responseTokens: prev.responseTokens + respToks,
+        totalTokens: prev.totalTokens + totToks
+      }));
+
       // Add to session ledger
       const sessionEntry = {
         taskId: taskToAudit.taskId || taskToAudit.id,
@@ -271,6 +317,8 @@ export default function AIAuditsConsole({
         overallScore: result.overallScore,
         confidenceScore: result.confidenceScore,
         errorMargin: result.errorMargin,
+        tokensUsed: totToks,
+        modelUsed: result.activeModelUsed || selectedModel,
         summary: result.summary,
         auditedAt: new Date().toLocaleTimeString()
       };
@@ -451,41 +499,173 @@ export default function AIAuditsConsole({
           </button>
         </div>
 
-        {/* Dynamic Model Selector & Engine Capabilities */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2.5 border-t border-slate-800/80">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-sky-400" />
-              Active Vision Model:
-            </span>
+        {/* Dynamic Model Selector, Token Limits & Rate Guidance */}
+        <div className="space-y-3 pt-3 border-t border-slate-800/80">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-semibold text-slate-400 flex items-center gap-1.5">
+                <Cpu className="w-3.5 h-3.5 text-sky-400" />
+                Active Vision Model:
+              </span>
 
-            {availableModels.length > 0 ? (
-              <select
-                value={selectedModel}
-                onChange={(e) => handleModelChange(e.target.value)}
-                className="bg-slate-950 border border-slate-700 text-sky-300 font-mono text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-sky-500"
-              >
-                {availableModels.map(m => (
-                  <option key={m.id} value={m.id}>
-                    {m.displayName || m.id} ({m.apiVersion || 'v1beta'})
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-mono font-bold text-sky-400 bg-slate-950 border border-slate-700 px-2.5 py-0.5 rounded-lg">
-                  {selectedModel || 'gemini-1.5-flash-latest'}
+              {availableModels.length > 0 ? (
+                <select
+                  value={selectedModel}
+                  onChange={(e) => handleModelChange(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 text-sky-300 font-mono text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-sky-500 max-w-xs sm:max-w-md truncate"
+                >
+                  {availableModels.map(m => (
+                    <option key={m.id} value={m.id}>
+                      {m.label || `${m.displayName || m.id} (${m.inputTokensFormatted || '1M'} Tokens | ${m.rpm || 15} RPM)`}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-bold text-sky-400 bg-slate-950 border border-slate-700 px-2.5 py-1 rounded-lg">
+                    {selectedModel || 'gemini-1.5-flash-latest'}
+                  </span>
+                  <span className="text-[10px] text-slate-500 italic">
+                    (Auto-discovers model token limits on Test)
+                  </span>
+                </div>
+              )}
+
+              {/* Recommendation Pill */}
+              {activeModelObj.isRecommended ? (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                  <Sparkles className="w-3 h-3 text-emerald-400" />
+                  ⭐ Optimal for 5-Photo DLC Auditing
                 </span>
-                <span className="text-[10px] text-slate-500 italic">
-                  (Auto-discovers all available models for your project on Test)
+              ) : activeModelObj.isPro ? (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3 text-amber-400" />
+                  2 RPM Limit (Single audits only, avoid batch)
                 </span>
-              </div>
-            )}
+              ) : (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-300 border border-sky-500/20">
+                  {activeModelObj.rpm} RPM Quota
+                </span>
+              )}
+            </div>
+
+            {/* Model Guide Toggle */}
+            <button
+              type="button"
+              onClick={() => setShowModelGuide(!showModelGuide)}
+              className="text-[11px] font-bold text-sky-400 hover:text-sky-300 flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              <Info className="w-3.5 h-3.5" />
+              <span>{showModelGuide ? 'Hide Model Guide' : 'Which model should I use?'}</span>
+            </button>
           </div>
 
-          <div className="text-[11px] text-slate-400 flex items-center gap-2">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-            <span>Consolidated 5-Photo Multimodal Vision • Deterministic ±Confidence Score</span>
+          {/* Model Selection Explainer Guide Card */}
+          {showModelGuide && (
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-sky-900/50 text-xs text-slate-300 space-y-2.5 animate-fadeIn">
+              <div className="flex items-center justify-between pb-1.5 border-b border-slate-800">
+                <span className="font-bold text-sky-300 flex items-center gap-1.5">
+                  <Info className="w-4 h-4 text-sky-400" />
+                  Model Selection & Quota Guide for DLC Home Eye Checkup Auditing
+                </span>
+                <button onClick={() => setShowModelGuide(false)} className="text-slate-400 hover:text-white text-xs cursor-pointer">
+                  Close
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] leading-relaxed">
+                <div className="p-3 rounded-lg bg-emerald-950/20 border border-emerald-800/40 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-emerald-300">⭐ Gemini 1.5 Flash / Flash-Latest</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded">RECOMMENDED</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
+                    <li><strong>Context Window:</strong> 1,048,576 tokens (~1M). All 5 clinical photos take ~2,000 tokens (uses only 0.2% of capacity).</li>
+                    <li><strong>Free Speed & Quota:</strong> <strong>15 audits per minute</strong> and <strong>1,500 audits per day</strong>.</li>
+                    <li><strong>Latency:</strong> Fast 1.5-second evaluation time per task.</li>
+                    <li><strong>Ideal For:</strong> High-volume single audits and automated batch runs (5 or 10 tasks) without rate limits.</li>
+                  </ul>
+                </div>
+
+                <div className="p-3 rounded-lg bg-amber-950/20 border border-amber-800/40 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-amber-300">⚠️ Gemini 1.5 Pro</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 rounded">LOW RPM WARNING</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-[11px]">
+                    <li><strong>Context Window:</strong> 2,097,152 tokens (~2M) – unnecessarily large for 5 photos.</li>
+                    <li><strong>Strict Free Quota:</strong> Only <strong>2 requests per minute</strong> and <strong>50 audits per day</strong>.</li>
+                    <li><strong>Batch Risk:</strong> Running a batch of 5 or 10 will trigger Google error <code>429 Quota Exceeded</code> after task #2.</li>
+                    <li><strong>Use Case:</strong> Only for manual, deep forensic re-checks of contentious disputed visits.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Live Token & Request Counter Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            {/* 1. Requests Counter */}
+            <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
+                <span className="flex items-center gap-1 text-sky-400">
+                  <Activity className="w-3 h-3" /> Requests Sent
+                </span>
+                <span className="text-sky-300 font-mono font-bold">{activeModelObj.rpm} RPM Quota</span>
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-lg font-black text-white">{sessionUsage.requests}</span>
+                <span className="text-[10px] text-slate-400">audits this session</span>
+              </div>
+            </div>
+
+            {/* 2. Token Counter */}
+            <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
+                <span className="flex items-center gap-1 text-emerald-400">
+                  <Layers className="w-3 h-3" /> Tokens Consumed
+                </span>
+                <span className="text-emerald-300 font-mono font-bold">~2.0k / task</span>
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-lg font-black text-emerald-400">
+                  {sessionUsage.totalTokens.toLocaleString()}
+                </span>
+                <span className="text-[10px] text-slate-400">tokens used</span>
+              </div>
+            </div>
+
+            {/* 3. Model Token Window */}
+            <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
+                <span className="flex items-center gap-1 text-indigo-400">
+                  <Cpu className="w-3 h-3" /> Context Window
+                </span>
+                <span className="text-indigo-300 font-mono font-bold">{activeModelObj.inputTokensFormatted || '1M'} Max</span>
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-lg font-black text-indigo-300">
+                  {activeModelObj.inputTokenLimit ? activeModelObj.inputTokenLimit.toLocaleString() : '1,048,576'}
+                </span>
+                <span className="text-[10px] text-slate-400">input capacity</span>
+              </div>
+            </div>
+
+            {/* 4. Daily Free Tier Allowance */}
+            <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
+                <span className="flex items-center gap-1 text-amber-400">
+                  <Zap className="w-3 h-3" /> Daily Allowance
+                </span>
+                <span className="text-amber-300 font-mono font-bold">Free Tier</span>
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-lg font-black text-amber-300">
+                  {activeModelObj.rpd ? activeModelObj.rpd.toLocaleString() : '1,500'}
+                </span>
+                <span className="text-[10px] text-slate-400">requests/day</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

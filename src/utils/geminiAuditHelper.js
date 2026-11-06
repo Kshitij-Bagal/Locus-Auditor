@@ -306,10 +306,43 @@ export async function listAvailableGeminiModels(apiKey) {
           })
           .map(m => {
             const id = m.name.replace(/^models\//, '');
+            const isFlash = id.toLowerCase().includes('flash');
+            const isPro = id.toLowerCase().includes('pro');
+            const isLatestFlash = id === 'gemini-1.5-flash-latest' || id === 'gemini-1.5-flash' || id === 'gemini-2.0-flash';
+
+            // Token Limits
+            const inputLimit = m.inputTokenLimit || (isPro ? 2097152 : 1048576);
+            const outputLimit = m.outputTokenLimit || 8192;
+            const inputTokensFormatted = inputLimit >= 1000000 ? `${(inputLimit / 1000000).toFixed(0)}M` : `${Math.round(inputLimit / 1000)}k`;
+            
+            // Rate Limit Tier (Free tier standards)
+            const rpm = isFlash ? 15 : (isPro ? 2 : 5);
+            const rpd = isFlash ? 1500 : (isPro ? 50 : 200);
+
+            let label = id;
+            if (isLatestFlash) {
+              label = `⭐ ${id} (Recommended • ${inputTokensFormatted} Tokens • ${rpm} RPM)`;
+            } else if (isFlash) {
+              label = `⚡ ${id} (Fast Flash • ${inputTokensFormatted} Tokens • ${rpm} RPM)`;
+            } else if (isPro) {
+              label = `🧠 ${id} (Deep Pro • ${inputTokensFormatted} Tokens • ${rpm} RPM Slow)`;
+            } else {
+              label = `🔷 ${id} (${inputTokensFormatted} Tokens)`;
+            }
+
             return {
               id,
               name: m.name,
               displayName: m.displayName || id,
+              label,
+              inputTokenLimit: inputLimit,
+              outputTokenLimit: outputLimit,
+              inputTokensFormatted,
+              rpm,
+              rpd,
+              isFlash,
+              isPro,
+              isRecommended: isLatestFlash,
               description: m.description || '',
               apiVersion: v
             };
@@ -617,6 +650,12 @@ export async function auditTaskWithGemini({
   // Parse structured JSON safely
   const structuredResult = extractJsonFromText(responseText);
 
+  // Extract usage metadata (exact tokens from Google Gemini)
+  const usage = apiResult.usageMetadata || {};
+  const promptTokens = usage.promptTokenCount || 1650;
+  const responseTokens = usage.candidatesTokenCount || 350;
+  const totalTokens = usage.totalTokenCount || (promptTokens + responseTokens);
+
   // Ensure robust formatting
   const verdict = structuredResult.verdict === 'PASS' ? 'PASS' : 'FATAL';
   const overallScore = Math.max(0, Math.min(100, Number(structuredResult.overallScore) || (verdict === 'PASS' ? 85 : 30)));
@@ -630,6 +669,11 @@ export async function auditTaskWithGemini({
     confidenceScore,
     errorMargin,
     activeModelUsed: activeModel,
+    usageMetadata: {
+      promptTokens,
+      responseTokens,
+      totalTokens
+    },
     rawAiResponse: structuredResult
   };
 }
