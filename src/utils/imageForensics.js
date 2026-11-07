@@ -178,6 +178,74 @@ export function analyzeImageIntegrity(img, buffer) {
 }
 
 /**
+ * Analyzes image sharpness / blur using 3x3 discrete Laplacian Variance.
+ * Fast client-side computation on a downscaled canvas (128x128).
+ * Low variance (< 28) indicates absence of high-frequency edges (severe blur/unreadable).
+ * 
+ * @param {HTMLImageElement} img 
+ * @returns {object} Blur diagnosis
+ */
+export function analyzeImageBlur(img) {
+  try {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return { isBlurry: false, blurVariance: 100, reason: null };
+
+    ctx.drawImage(img, 0, 0, size, size);
+    const imgData = ctx.getImageData(0, 0, size, size).data;
+
+    // Convert to grayscale 1D array
+    const gray = new Float32Array(size * size);
+    for (let i = 0; i < gray.length; i++) {
+      const idx = i * 4;
+      gray[i] = 0.299 * imgData[idx] + 0.587 * imgData[idx + 1] + 0.114 * imgData[idx + 2];
+    }
+
+    // Apply discrete 3x3 Laplacian operator: [0, 1, 0; 1, -4, 1; 0, 1, 0]
+    let sumLap = 0;
+    let sumSqLap = 0;
+    let count = 0;
+
+    for (let y = 1; y < size - 1; y++) {
+      for (let x = 1; x < size - 1; x++) {
+        const idx = y * size + x;
+        const lap = (
+          gray[idx - size] +
+          gray[idx + size] +
+          gray[idx - 1] +
+          gray[idx + 1] -
+          4 * gray[idx]
+        );
+        sumLap += lap;
+        sumSqLap += lap * lap;
+        count++;
+      }
+    }
+
+    const mean = sumLap / count;
+    const variance = (sumSqLap / count) - (mean * mean);
+
+    // Threshold: variance < 28 indicates severe blur (out of focus, motion blur, unreadable text)
+    const isBlurry = variance < 28;
+    const reason = isBlurry
+      ? `Extremely blurry / out-of-focus photo (Laplacian sharpness ${variance.toFixed(1)} < 28)`
+      : null;
+
+    return {
+      isBlurry,
+      blurVariance: Math.round(variance * 10) / 10,
+      reason
+    };
+  } catch (err) {
+    console.error('analyzeImageBlur failed:', err);
+    return { isBlurry: false, blurVariance: 100, reason: null };
+  }
+}
+
+/**
  * Computes 64-bit Perceptual Difference Hash (dHash) from an image element or canvas
  * @param {HTMLImageElement|ImageBitmap} img
  * @returns {{ hashHex: string, hashBinary: string, grid: number[][] }}
@@ -1067,4 +1135,133 @@ export async function runBatchForensicScan(imageItems, onProgress, abortSignal =
       affectedFeCodes: Array.from(affectedFEs)
     }
   };
+}
+
+/**
+ * Fast Client-Side Forensic Pre-Screener for AI Audits.
+ * Inspects all 5 checklist photos for blank/black/covered camera and severe blur defects.
+ * Runs in parallel batches without burning any AI model API quota.
+ * 
+ * @param {Array<object>} tasksList
+ * @param {Function} onProgress
+ * @param {AbortSignal} abortSignal
+ * @returns {Promise<Array<object>>} Flagged tasks with defect details and isExcludedFromAi = true
+ */
+export async function scanTasksForAiExclusion(tasksList = [], onProgress = null, abortSignal = null) {
+  const flaggedResults = [];
+  const total = tasksList.length;
+
+  for (let tIdx = 0; tIdx < total; tIdx++) {
+    if (abortSignal && abortSignal.aborted) break;
+
+    const task = tasksList[tIdx];
+    const taskId = String(task.id || task.taskId);
+    if (onProgress) {
+      onProgress({
+        current: tIdx + 1,
+        total,
+        taskName: `#${taskId}`,
+        message: `Forensic screening Task #${taskId} (${tIdx + 1}/${total})...`
+      });
+    }
+
+    const imgs = task.images || task.image_urls || {};
+    const slots = [
+      { key: 'selfie', label: '1. Selfie: T-Shirt & ID' },
+      { key: 'torches', label: '2. Working Torches' },
+      { key: 'visionChart', label: '3. Vision Chart' },
+      { key: 'toolkit', label: '4. Refraction Toolkit' },
+      { key: 'frameDisplay', label: '5. Frame Showcase' }
+    ];
+
+    const slotEvaluations = [];
+    let hasDefect = false;
+    let primaryDefectReason = '';
+
+    for (const slot of slots) {
+      const rawUrl = imgs[slot.key];
+      if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.trim() || rawUrl === '-' || rawUrl.toLowerCase() === 'null') {
+        continue;
+      }
+
+      let cleanUrl = rawUrl.trim();
+      if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://') && !cleanUrl.startsWith('data:') && !cleanUrl.startsWith('blob:')) {
+        const stripped = cleanUrl.replace(/^\/+/, '');
+        if (stripped.startsWith('v1/client/')) {
+          cleanUrl = `https://assets.locus-api.com/${stripped}`;
+        } else {
+          cleanUrl = `https://assets.locus-api.com/v1/client/lenskart-dlc/task/${taskId}/file/${stripped}`;
+        }
+      }
+
+      try {
+        const buffer = await fetchImageBuffer(cleanUrl);
+        const blob = new Blob([buffer], { type: 'image/jpeg' });
+        const objectUrl = URL.createObjectURL(blob);
+
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+
+        await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(), 5000);
+          img.onload = () => { clearTimeout(timer); resolve(); };
+          img.onerror = () => { clearTimeout(timer); resolve(); };
+          img.src = objectUrl;
+        });
+
+        if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+          const integrity = analyzeImageIntegrity(img, buffer);
+          const blur = analyzeImageBlur(img);
+
+          let isDefective = integrity.isBlankOrBlack || blur.isBlurry;
+          let defectType = null;
+          let defectReason = null;
+
+          if (integrity.isBlankOrBlack) {
+            defectType = integrity.reason?.includes('black') ? 'BLACK_SCREEN' : 
+                         (integrity.reason?.includes('white') ? 'BLANK_WHITE' : 
+                         (integrity.reason?.includes('Covered') ? 'COVERED_CAMERA' : 'SOLID_FLAT'));
+            defectReason = integrity.reason;
+          } else if (blur.isBlurry) {
+            defectType = 'EXTREME_BLUR';
+            defectReason = blur.reason;
+          }
+
+          if (isDefective) {
+            hasDefect = true;
+            if (!primaryDefectReason) {
+              primaryDefectReason = `${slot.label}: ${defectReason}`;
+            }
+          }
+
+          slotEvaluations.push({
+            slotKey: slot.key,
+            slotLabel: slot.label,
+            url: cleanUrl,
+            objectUrl,
+            isDefective,
+            defectType,
+            reason: defectReason,
+            integrity,
+            blur
+          });
+        }
+      } catch (imgErr) {
+        // Non-fatal image fetch error
+      }
+    }
+
+    if (hasDefect) {
+      flaggedResults.push({
+        taskId,
+        task,
+        isExcludedFromAi: true, // ON by default as requested!
+        primaryReason: primaryDefectReason || 'Defective photo detected (Blank/Black or Extreme Blur)',
+        flaggedSlots: slotEvaluations.filter(s => s.isDefective),
+        allSlots: slotEvaluations
+      });
+    }
+  }
+
+  return flaggedResults;
 }

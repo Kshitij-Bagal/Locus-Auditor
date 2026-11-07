@@ -324,7 +324,8 @@ export const GEMINI_MODEL_PRIORITY = [
 ];
 
 /**
- * Robust JSON parser that handles markdown code blocks or conversational wrappers.
+ * Robust JSON parser that handles markdown code blocks, conversational wrappers,
+ * trailing commentaries (e.g. text following the closing brace), trailing commas, and unescaped controls.
  */
 export function extractJsonFromText(rawText) {
   if (!rawText || typeof rawText !== 'string') {
@@ -333,31 +334,94 @@ export function extractJsonFromText(rawText) {
 
   let text = rawText.trim();
 
-  // 1. Remove markdown fences like ```json ... ``` or ``` ... ```
-  if (text.includes('```')) {
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (codeBlockMatch && codeBlockMatch[1]) {
-      text = codeBlockMatch[1].trim();
+  // Helper to sanitize common AI JSON syntax flaws (trailing commas, line comments, raw control codes)
+  const sanitizeJsonCandidate = (str) => {
+    return str
+      // Remove line comments // ...
+      .replace(/(^|[^\\:])\/\/.*$/gm, '$1')
+      // Remove trailing commas before } or ]
+      .replace(/,\s*([}\]])/g, '$1')
+      // Fix unescaped control characters (keep \n, \r, \t)
+      .replace(/[\u0000-\u001F]+/g, (m) => (m === '\n' || m === '\r' || m === '\t' ? m : ''));
+  };
+
+  const tryParse = (str) => {
+    if (!str) return null;
+    const trimmed = str.trim();
+    try {
+      return JSON.parse(trimmed);
+    } catch (_) {
+      try {
+        return JSON.parse(sanitizeJsonCandidate(trimmed));
+      } catch (__) {
+        return null;
+      }
+    }
+  };
+
+  // 1. Direct JSON parse attempt
+  const direct = tryParse(text);
+  if (direct && typeof direct === 'object') return direct;
+
+  // 2. Remove / inspect markdown fences ```json ... ``` or ``` ... ```
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
+  let match;
+  while ((match = fenceRegex.exec(text)) !== null) {
+    if (match[1]) {
+      const parsedFence = tryParse(match[1]);
+      if (parsedFence && typeof parsedFence === 'object') return parsedFence;
     }
   }
 
-  // 2. Direct JSON Parse attempt
-  try {
-    return JSON.parse(text);
-  } catch (e1) {
-    // 3. Fallback: locate outermost curly braces
-    const firstBrace = text.indexOf('{');
-    const lastBrace = text.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      const extracted = text.substring(firstBrace, lastBrace + 1);
-      try {
-        return JSON.parse(extracted);
-      } catch (e2) {
-        throw new Error('AI output could not be parsed as valid JSON: ' + e2.message);
+  // 3. Balanced curly brace extraction:
+  // Scans from the first '{' and tracks nesting depth (handling quotes & escapes).
+  // Stops precisely at the top-level closing '}', cleanly stripping any trailing conversational text
+  // that would otherwise trigger "Unexpected non-whitespace character after JSON at position...".
+  const firstBrace = text.indexOf('{');
+  if (firstBrace !== -1) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = firstBrace; i < text.length; i++) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (ch === '{') {
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            // Found exact matching outer closing brace
+            const candidate = text.substring(firstBrace, i + 1);
+            const parsed = tryParse(candidate);
+            if (parsed && typeof parsed === 'object') return parsed;
+          }
+        }
       }
     }
-    throw new Error('AI output could not be parsed as valid JSON: ' + e1.message);
+
+    // 4. Fallback: locate outermost curly braces
+    const lastBrace = text.lastIndexOf('}');
+    if (lastBrace > firstBrace) {
+      const fallbackCandidate = text.substring(firstBrace, lastBrace + 1);
+      const parsedFallback = tryParse(fallbackCandidate);
+      if (parsedFallback && typeof parsedFallback === 'object') return parsedFallback;
+    }
   }
+
+  throw new Error('AI output could not be parsed as valid JSON: Unexpected format or non-JSON response.');
 }
 
 /**

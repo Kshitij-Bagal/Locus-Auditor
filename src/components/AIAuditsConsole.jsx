@@ -41,6 +41,7 @@ import {
   listAvailableGeminiModels,
   normalizeLocusUrl 
 } from '../utils/geminiAuditHelper.js';
+import { scanTasksForAiExclusion } from '../utils/imageForensics.js';
 import {
   SUPPORTED_PROVIDERS,
   getActiveAiProvider,
@@ -154,6 +155,15 @@ export default function AIAuditsConsole({
   const [reAuditSearchQuery, setReAuditSearchQuery] = useState('');
   const [reAuditCityFilter, setReAuditCityFilter] = useState('ALL');
   const [reAuditVerdictFilter, setReAuditVerdictFilter] = useState('ALL'); // 'ALL' | 'PASSED' (False Positive) | 'FATAL' (False Negative)
+
+  // 8. Forensic Pre-Screening & AI Quota Guard States
+  const [isForensicScanning, setIsForensicScanning] = useState(false);
+  const [forensicProgress, setForensicProgress] = useState({ current: 0, total: 0, taskName: '', message: '' });
+  const [forensicFlags, setForensicFlags] = useState([]);
+  const [excludedTaskIds, setExcludedTaskIds] = useState(new Set());
+  const [forensicDefectFilter, setForensicDefectFilter] = useState('ALL'); // 'ALL' | 'BLUR' | 'BLACK_BLANK'
+  const [forensicSearchQuery, setForensicSearchQuery] = useState('');
+  const forensicAbortControllerRef = useRef(null);
 
   // Auto-discover models quietly when API key exists (Gemini)
   useEffect(() => {
@@ -428,7 +438,162 @@ export default function AIAuditsConsole({
     }
   };
 
-  // Run Batch AI Auditing Loop
+  // Filtered Forensic Flagged Tasks
+  const filteredForensicFlags = useMemo(() => {
+    return forensicFlags.filter(item => {
+      if (forensicDefectFilter === 'BLUR') {
+        const hasBlur = item.flaggedSlots?.some(s => s.defectType === 'EXTREME_BLUR');
+        if (!hasBlur) return false;
+      } else if (forensicDefectFilter === 'BLACK_BLANK') {
+        const hasBlackOrBlank = item.flaggedSlots?.some(s => s.defectType !== 'EXTREME_BLUR');
+        if (!hasBlackOrBlank) return false;
+      }
+
+      if (forensicSearchQuery.trim()) {
+        const q = forensicSearchQuery.toLowerCase().trim();
+        const mId = String(item.taskId).toLowerCase().includes(q);
+        const mFe = String(item.task?.feName || '').toLowerCase().includes(q);
+        const mCode = String(item.task?.feCode || '').toLowerCase().includes(q);
+        const mCity = String(item.task?.facilityCode || item.task?.city || '').toLowerCase().includes(q);
+        if (!mId && !mFe && !mCode && !mCity) return false;
+      }
+
+      return true;
+    });
+  }, [forensicFlags, forensicDefectFilter, forensicSearchQuery]);
+
+  // Forensic Pre-Screen Execution
+  const handleRunForensicPreScreen = async () => {
+    if (queueTasks.length === 0) {
+      alert('No pending tasks in queue to pre-screen.');
+      return;
+    }
+
+    setIsForensicScanning(true);
+    setForensicProgress({ current: 0, total: queueTasks.length, taskName: '', message: 'Starting Forensic Image Integrity & Blur Inspection...' });
+    forensicAbortControllerRef.current = new AbortController();
+
+    try {
+      const results = await scanTasksForAiExclusion(
+        queueTasks,
+        (prog) => setForensicProgress(prog),
+        forensicAbortControllerRef.current.signal
+      );
+
+      setForensicFlags(results);
+
+      // Exclude all flagged tasks by default, as requested!
+      const newExcluded = new Set(excludedTaskIds);
+      results.forEach(r => newExcluded.add(String(r.taskId)));
+      setExcludedTaskIds(newExcluded);
+
+      // Switch to FORENSICS tab so user can review the task cards immediately
+      setActiveConsoleTab('FORENSICS');
+    } catch (err) {
+      console.error('Forensic pre-screening error:', err);
+      alert('Forensic screening failed: ' + err.message);
+    } finally {
+      setIsForensicScanning(false);
+    }
+  };
+
+  // Toggle exclusion for a single task (user unchecks false-positive to allow AI audit)
+  const handleToggleExcludeTask = (taskId) => {
+    const sId = String(taskId);
+    setExcludedTaskIds(prev => {
+      const next = new Set(prev);
+      if (next.has(sId)) {
+        next.delete(sId);
+      } else {
+        next.add(sId);
+      }
+      return next;
+    });
+  };
+
+  // Bulk check or uncheck all flagged tasks
+  const handleToggleAllExcluded = (selectAll = true) => {
+    setExcludedTaskIds(prev => {
+      const next = new Set(prev);
+      forensicFlags.forEach(f => {
+        if (selectAll) next.add(String(f.taskId));
+        else next.delete(String(f.taskId));
+      });
+      return next;
+    });
+  };
+
+  // Direct Fatal Strike in DB with 0 AI tokens consumed
+  const handleDirectFatalStrike = async (flaggedItem) => {
+    const taskId = flaggedItem.taskId;
+    const reason = `FATAL: Image Forensics detected fraudulent blank / covered camera / blurry photo upload (${flaggedItem.primaryReason}).`;
+    try {
+      await tasksApi.failAudit({
+        taskId,
+        taskData: flaggedItem.task,
+        failedReasons: [flaggedItem.primaryReason || 'Fraudulent / Defective Photo Upload'],
+        remarks: reason,
+        criteriaStatus: {},
+        replacements: [],
+        auditorName: 'Image Forensics Engine',
+        auditorLocation: flaggedItem.task?.facilityCode || 'Forensic Lab',
+        immediateEmail: false,
+        totalTokens: 0
+      });
+      if (onTaskAudited) {
+        onTaskAudited(taskId, 'FATAL');
+      }
+      setForensicFlags(prev => prev.filter(f => String(f.taskId) !== String(taskId)));
+      setExcludedTaskIds(prev => {
+        const next = new Set(prev);
+        next.delete(String(taskId));
+        return next;
+      });
+      alert(`Task #${taskId} has been marked as FATAL in the database with 0 AI tokens consumed!`);
+    } catch (err) {
+      alert(`Failed to commit FATAL verdict: ${err.message}`);
+    }
+  };
+
+  // Bulk Auto-Fail all excluded tasks
+  const handleAutoFailAllExcluded = async () => {
+    const toFail = forensicFlags.filter(f => excludedTaskIds.has(String(f.taskId)));
+    if (toFail.length === 0) {
+      alert('No excluded tasks currently selected.');
+      return;
+    }
+    if (!confirm(`Are you sure you want to mark all ${toFail.length} excluded tasks as FATAL in the database? This consumes 0 AI tokens.`)) {
+      return;
+    }
+    let count = 0;
+    for (const item of toFail) {
+      try {
+        await tasksApi.failAudit({
+          taskId: item.taskId,
+          taskData: item.task,
+          failedReasons: [item.primaryReason || 'Fraudulent / Defective Photo Upload'],
+          remarks: `FATAL: Image Forensics detected fraudulent blank / covered camera / blurry photo upload (${item.primaryReason}).`,
+          criteriaStatus: {},
+          replacements: [],
+          auditorName: 'Image Forensics Engine',
+          auditorLocation: item.task?.facilityCode || 'Forensic Lab',
+          immediateEmail: false,
+          totalTokens: 0
+        });
+        if (onTaskAudited) onTaskAudited(item.taskId, 'FATAL');
+        count++;
+      } catch (_) {}
+    }
+    setForensicFlags(prev => prev.filter(f => !toFail.some(tf => String(tf.taskId) === String(f.taskId))));
+    setExcludedTaskIds(prev => {
+      const next = new Set(prev);
+      toFail.forEach(tf => next.delete(String(tf.taskId)));
+      return next;
+    });
+    alert(`Successfully marked ${count} tasks as FATAL in database with 0 AI tokens consumed!`);
+  };
+
+  // Run Batch AI Auditing Loop (automatically skips any tasks excluded by the forensic pre-screener)
   const runBatchAuditing = async (batchCount = 5) => {
     const prov = SUPPORTED_PROVIDERS.find(p => p.id === activeProvider) || SUPPORTED_PROVIDERS[0];
     if (!apiKey.trim()) {
@@ -440,7 +605,14 @@ export default function AIAuditsConsole({
       return;
     }
 
-    const tasksToProcess = queueTasks.slice(0, batchCount);
+    // Filter out tasks excluded by forensic screener
+    const eligibleTasks = queueTasks.filter(t => !excludedTaskIds.has(String(t.id || t.taskId)));
+    if (eligibleTasks.length === 0) {
+      alert(`All ${queueTasks.length} pending tasks in queue are currently excluded from AI audits by the Forensic Screener. Uncheck any false-positive tasks in the Forensic Screener tab to evaluate them.`);
+      return;
+    }
+
+    const tasksToProcess = eligibleTasks.slice(0, batchCount);
     setIsBatchRunning(true);
     isBatchCancelledRef.current = false;
 
@@ -1139,6 +1311,29 @@ export default function AIAuditsConsole({
             </span>
           )}
         </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveConsoleTab('FORENSICS')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            activeConsoleTab === 'FORENSICS'
+              ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-lg shadow-purple-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+          }`}
+          title="Identify black, blank, and blurry photos client-side to exclude from AI audits and save quota"
+        >
+          <ShieldAlert className="w-4 h-4 text-purple-400" />
+          <span>Forensic Defect Screener</span>
+          {forensicFlags.length > 0 ? (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-purple-500 text-white font-black text-[10px] animate-pulse">
+              {forensicFlags.length} Flagged
+            </span>
+          ) : (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-slate-400 border border-slate-800 font-mono">
+              0
+            </span>
+          )}
+        </button>
       </div>
 
       {activeConsoleTab === 'EXECUTE' && (
@@ -1533,6 +1728,22 @@ export default function AIAuditsConsole({
               <span>Audit Batch of 10</span>
             </button>
 
+            {/* Run Forensic Pre-Screen Button */}
+            <button
+              onClick={handleRunForensicPreScreen}
+              disabled={isForensicScanning || queueTasks.length === 0}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white shadow-lg shadow-purple-600/25 flex items-center gap-2 transition-all cursor-pointer"
+              title="Pre-screen queue for blank/black/blurry images to exclude from AI audit and save API quota"
+            >
+              {isForensicScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-200" /> : <ShieldAlert className="w-3.5 h-3.5 text-purple-200" />}
+              <span>Run Forensic Pre-Screen</span>
+              {forensicFlags.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-purple-950 text-purple-200 text-[10px] font-mono border border-purple-400/40">
+                  {forensicFlags.length} Excluded
+                </span>
+              )}
+            </button>
+
             {isBatchRunning && (
               <button
                 onClick={handleStopBatch}
@@ -1553,6 +1764,44 @@ export default function AIAuditsConsole({
           )}
 
         </div>
+
+        {/* Forensic Pre-Screening Progress Bar */}
+        {isForensicScanning && (
+          <div className="p-3 bg-purple-950/40 border border-purple-500/30 rounded-xl space-y-1.5 text-xs text-purple-300 animate-pulse">
+            <div className="flex items-center justify-between font-bold">
+              <span className="flex items-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-400" />
+                <span>Forensic Pre-Screening Running:</span>
+              </span>
+              <span>{forensicProgress.current} / {forensicProgress.total} Tasks</span>
+            </div>
+            <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden border border-purple-500/20">
+              <div 
+                className="bg-purple-500 h-full transition-all duration-300"
+                style={{ width: `${forensicProgress.total > 0 ? (forensicProgress.current / forensicProgress.total) * 100 : 0}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-slate-400">{forensicProgress.message}</p>
+          </div>
+        )}
+
+        {/* Forensic Pre-Screen Results Banner */}
+        {forensicFlags.length > 0 && !isForensicScanning && (
+          <div className="p-3 bg-purple-950/30 border border-purple-500/30 rounded-xl flex items-center justify-between flex-wrap gap-2 text-xs">
+            <div className="flex items-center gap-2 text-purple-300">
+              <ShieldAlert className="w-4 h-4 text-purple-400 shrink-0" />
+              <span>
+                <strong>Forensic Quality Gate:</strong> {forensicFlags.length} tasks flagged with blank, covered camera, or extremely blurry photos ({excludedTaskIds.size} excluded from AI audits to preserve 1,500 daily quota).
+              </span>
+            </div>
+            <button
+              onClick={() => setActiveConsoleTab('FORENSICS')}
+              className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition-all shadow-md shadow-purple-600/20 cursor-pointer"
+            >
+              Review Flagged Task Cards ({forensicFlags.length}) →
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Main Split-Screen Workspace: Task & 5 Photos (Left) + AI Audit Report (Right) */}
@@ -3215,6 +3464,329 @@ export default function AIAuditsConsole({
                   </div>
                 );
               })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 4: FORENSIC DEFECT SCREENER & QUOTA GUARD */}
+      {activeConsoleTab === 'FORENSICS' && (
+        <div className="space-y-6 animate-fade-in">
+          {/* Top Banner & KPI Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-purple-500/30 shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-400 block mb-1">
+                Total Flagged
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-purple-300">{forensicFlags.length}</span>
+                <span className="text-[10px] text-slate-500">Defective Visits</span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-rose-500/30 shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400 block mb-1">
+                Excluded from AI
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-rose-300">{excludedTaskIds.size}</span>
+                <span className="text-[10px] text-rose-400/80 font-bold">Quota Protected</span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-emerald-500/30 shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block mb-1">
+                AI Quota Preserved
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-emerald-300">~{excludedTaskIds.size} Requests</span>
+                <span className="text-[10px] text-slate-500">Free Tier</span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-900 border border-sky-500/30 shadow-lg">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
+                Tokens Saved
+              </span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-xl font-black text-sky-300">~{(excludedTaskIds.size * 2).toFixed(1)}k</span>
+                <span className="text-[10px] text-slate-500">API Tokens</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Screener Controls Bar */}
+          <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800 text-xs">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-purple-400" />
+                <span className="font-bold text-white uppercase tracking-wider">
+                  Forensic Screening Results ({filteredForensicFlags.length} Tasks Shown)
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={handleRunForensicPreScreen}
+                  disabled={isForensicScanning || queueTasks.length === 0}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-500 text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isForensicScanning ? 'animate-spin' : ''}`} />
+                  <span>{forensicFlags.length > 0 ? 'Re-Scan Queue' : 'Scan Queue Now'}</span>
+                </button>
+
+                {forensicFlags.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => handleToggleAllExcluded(true)}
+                      className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
+                    >
+                      Exclude All ({forensicFlags.length})
+                    </button>
+                    <button
+                      onClick={() => handleToggleAllExcluded(false)}
+                      className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 transition-colors cursor-pointer"
+                    >
+                      Clear Exclusions (Audit All)
+                    </button>
+                    <button
+                      onClick={handleAutoFailAllExcluded}
+                      className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/25 flex items-center gap-1.5 transition-all cursor-pointer"
+                      title="Directly commit all excluded tasks as FATAL in Supabase without using AI tokens"
+                    >
+                      <ShieldAlert className="w-3.5 h-3.5" />
+                      <span>⚡ Auto-Fail All Excluded in DB (0 Tokens)</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Filter Bar */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+                <span className="text-[10px] font-bold text-slate-400 block mb-1">Defect Category</span>
+                <select
+                  value={forensicDefectFilter}
+                  onChange={(e) => setForensicDefectFilter(e.target.value)}
+                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
+                >
+                  <option value="ALL" className="bg-slate-900">All Defect Types</option>
+                  <option value="BLACK_BLANK" className="bg-slate-900">Black & Blank Photos Only</option>
+                  <option value="BLUR" className="bg-slate-900">Extremely Blurry Photos Only</option>
+                </select>
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2 sm:col-span-2 flex items-center">
+                <Search className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
+                <input
+                  type="text"
+                  value={forensicSearchQuery}
+                  onChange={(e) => setForensicSearchQuery(e.target.value)}
+                  placeholder="Search by Task ID, FE Name, Employee Code, or City..."
+                  className="w-full bg-transparent text-xs text-white placeholder-slate-500 focus:outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Screener Progress Banner if running */}
+          {isForensicScanning && (
+            <div className="p-4 bg-purple-950/40 border border-purple-500/40 rounded-2xl space-y-2 text-xs text-purple-200">
+              <div className="flex items-center justify-between font-bold">
+                <span className="flex items-center gap-2">
+                  <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
+                  <span>Inspecting checklist photos for black, covered camera, and blurry images...</span>
+                </span>
+                <span>{forensicProgress.current} / {forensicProgress.total}</span>
+              </div>
+              <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-purple-500/20">
+                <div 
+                  className="bg-purple-500 h-full transition-all duration-300"
+                  style={{ width: `${forensicProgress.total > 0 ? (forensicProgress.current / forensicProgress.total) * 100 : 0}%` }}
+                />
+              </div>
+              <p className="text-[11px] text-slate-400">{forensicProgress.message}</p>
+            </div>
+          )}
+
+          {/* If No Flags yet */}
+          {forensicFlags.length === 0 && !isForensicScanning && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center space-y-3">
+              <div className="w-14 h-14 rounded-2xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mx-auto text-purple-400">
+                <ShieldAlert className="w-7 h-7" />
+              </div>
+              <h3 className="text-base font-bold text-white">Forensic Pre-Screener Ready</h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto">
+                Scan all {queueTasks.length} tasks in the current queue client-side before running AI audits. This flags black, covered camera, and extremely blurry photos and excludes them by default to protect your 1,500 daily Gemini quota.
+              </p>
+              <button
+                onClick={handleRunForensicPreScreen}
+                disabled={queueTasks.length === 0}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white shadow-lg shadow-purple-600/30 transition-all cursor-pointer inline-flex items-center gap-2"
+              >
+                <ShieldAlert className="w-4 h-4" />
+                <span>Start Forensic Screening ({queueTasks.length} Visits)</span>
+              </button>
+            </div>
+          )}
+
+          {/* TASK CARDS GRID */}
+          {filteredForensicFlags.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+                <span>Showing {filteredForensicFlags.length} flagged tasks</span>
+                <span className="text-[11px] text-slate-500">
+                  Tip: Uncheck "Exclude from AI Audits" if any task is a false-positive and you want AI to evaluate it.
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4">
+                {filteredForensicFlags.map((item) => {
+                  const isExcluded = excludedTaskIds.has(String(item.taskId));
+                  const t = item.task || {};
+                  return (
+                    <div
+                      key={item.taskId}
+                      className={`p-4 rounded-2xl border transition-all ${
+                        isExcluded
+                          ? 'bg-slate-900/90 border-rose-500/40 shadow-lg shadow-rose-950/20'
+                          : 'bg-slate-900/60 border-slate-800'
+                      }`}
+                    >
+                      {/* Card Header */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono font-bold text-sky-400">
+                              Task #{item.taskId}
+                            </span>
+                            <span className="text-xs font-bold text-white">
+                              {t.feName || 'FE'}
+                            </span>
+                            {t.feCode && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                                {t.feCode}
+                              </span>
+                            )}
+                            <span className="text-[11px] text-slate-400">
+                              • {t.facilityCode || t.city || 'Hub'} {t.zone ? `(${t.zone})` : ''}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">
+                            Dispatch Date: {(t.date || t.dispatch_date || '').slice(0, 10) || 'N/A'}
+                          </span>
+                        </div>
+
+                        {/* Defect Badge */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {item.flaggedSlots?.some(s => s.defectType === 'BLACK_SCREEN' || s.defectType === 'COVERED_CAMERA') && (
+                            <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1">
+                              <span>⬛</span> Covered Camera / Black Photo
+                            </span>
+                          )}
+                          {item.flaggedSlots?.some(s => s.defectType === 'EXTREME_BLUR') && (
+                            <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                              <span>🌀</span> Extremely Blurry Photo
+                            </span>
+                          )}
+                          {item.flaggedSlots?.some(s => s.defectType === 'BLANK_WHITE') && (
+                            <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 flex items-center gap-1">
+                              <span>⬜</span> Blank / White Screen
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Defect Reason Alert Banner */}
+                      <div className="mt-3 p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-xs text-rose-300 flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                        <div>
+                          <strong className="text-white">Forensic Detection: </strong>
+                          <span>{item.primaryReason}</span>
+                        </div>
+                      </div>
+
+                      {/* Task Photos Strip */}
+                      <div className="mt-3 space-y-1.5">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                          Inspection Photos:
+                        </span>
+                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                          {item.allSlots?.map((slot, sIdx) => (
+                            <div
+                              key={sIdx}
+                              onClick={() => setPreviewImage({ url: slot.url, title: `${slot.slotLabel} - Task #${item.taskId}` })}
+                              className={`relative rounded-xl overflow-hidden border cursor-pointer group bg-slate-950 ${
+                                slot.isDefective
+                                  ? 'border-rose-500 ring-2 ring-rose-500/50 shadow-md shadow-rose-950/50'
+                                  : 'border-slate-800 hover:border-slate-700'
+                              }`}
+                            >
+                              <div className="aspect-video w-full bg-slate-950 flex items-center justify-center overflow-hidden">
+                                <img
+                                  src={slot.url}
+                                  alt={slot.slotLabel}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                                  onError={(e) => {
+                                    e.target.style.display = 'none';
+                                  }}
+                                />
+                              </div>
+                              <div className="p-1.5 bg-slate-900 border-t border-slate-800 flex items-center justify-between text-[10px]">
+                                <span className="font-semibold text-slate-300 truncate">{slot.slotLabel}</span>
+                                {slot.isDefective ? (
+                                  <span className="px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 font-bold border border-rose-500/30 text-[9px] shrink-0">
+                                    DEFECT
+                                  </span>
+                                ) : (
+                                  <span className="text-emerald-400 font-bold text-[9px]">✓ Clean</span>
+                                )}
+                              </div>
+                              {slot.isDefective && (
+                                <div className="absolute inset-x-0 bottom-7 bg-rose-950/90 text-[9px] text-rose-200 px-1 py-0.5 text-center truncate">
+                                  {slot.reason}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Card Footer: Exclude Checkbox & Action Button */}
+                      <div className="mt-4 pt-3 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <label className="flex items-center gap-3 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={isExcluded}
+                            onChange={() => handleToggleExcludeTask(item.taskId)}
+                            className="w-4 h-4 rounded text-rose-600 focus:ring-0 bg-slate-950 border-rose-500/50 cursor-pointer"
+                          />
+                          <div>
+                            <span className={`text-xs font-bold ${isExcluded ? 'text-rose-300' : 'text-slate-400'}`}>
+                              {isExcluded ? 'Exclude from AI Audits (Active - Saves Quota)' : 'Exclude from AI Audits: OFF (Will be Audited by AI)'}
+                            </span>
+                            <span className="text-[10px] text-slate-500 block">
+                              {isExcluded
+                                ? 'Task will be skipped during AI Batch Auditing, preserving your daily quota.'
+                                : 'Human auditor marked this task as false-positive; AI model will audit this task.'}
+                            </span>
+                          </div>
+                        </label>
+
+                        <button
+                          onClick={() => handleDirectFatalStrike(item)}
+                          className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/25 flex items-center gap-1.5 transition-all cursor-pointer self-start sm:self-auto"
+                          title="Directly commit this task as FATAL in Supabase without spending AI tokens"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                          <span>Direct Fatal Strike (0 Tokens)</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
