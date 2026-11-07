@@ -103,7 +103,8 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
       const { data: dbTasks, error: taskErr } = await supabase
         .from('tasks')
         .select('*')
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(5000);
       if (!taskErr && dbTasks) tasks = dbTasks;
       else tasks = [];
     }
@@ -111,7 +112,8 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     if (!users || users.length === 0) {
       const { data: dbProfiles, error: profErr } = await supabase
         .from('profiles')
-        .select('*');
+        .select('*')
+        .limit(2000);
       if (!profErr && dbProfiles) users = dbProfiles;
       else users = [];
     }

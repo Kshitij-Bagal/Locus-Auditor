@@ -1013,6 +1013,116 @@ export const rulesApi = {
 
 const EMAIL_CONFIG_KEY = 'locus_email_gateway_config_v1';
 
+// Helper to safely parse API responses and produce clean errors instead of raw JSON syntax errors (e.g. HTTP 413)
+export async function safeParseJsonResponse(response, defaultErrorMessage = 'Request failed') {
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    if (response.status === 413 || text.toLowerCase().includes('request entity too large')) {
+      throw new Error('Payload size limit exceeded (HTTP 413 Request Entity Too Large). The request was blocked because the audit task data exceeded the server payload limit.');
+    }
+    throw new Error(`Server returned HTTP ${response.status}: ${text.slice(0, 160) || response.statusText}`);
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error || data.message || defaultErrorMessage);
+  }
+
+  return data;
+}
+
+// Helper to sanitize & prune tasks payload before sending over HTTP for email digest calculations
+export function pruneTasksForDigest(tasks, targetDate) {
+  if (!Array.isArray(tasks) || tasks.length === 0) return undefined;
+
+  // Filter tasks that belong to targetDate or are audited or have fatal strikes
+  const targetDateStr = targetDate ? String(targetDate).slice(0, 10) : null;
+  const filtered = targetDateStr
+    ? tasks.filter(t => {
+        const d = (t.date || t.auditDate || t.dispatch_date || t.uploadedAt || t.uploaded_at || t.created_at || '').slice(0, 10);
+        const status = t.auditStatus || t.audit_status;
+        return d === targetDateStr || status === 'FATAL' || status === 'PASSED';
+      })
+    : tasks;
+
+  const candidateTasks = filtered.length > 0 ? filtered : tasks;
+
+  // Strictly strip heavy fields (images, base64 data, raw AI responses, prescriptions, etc.)
+  const pruned = candidateTasks.slice(0, 600).map(t => ({
+    id: t.id || t.taskId,
+    taskId: t.taskId || t.id,
+    date: t.date || t.auditDate || t.dispatch_date || t.created_at,
+    auditDate: t.auditDate || t.date || t.created_at,
+    dispatch_date: t.dispatch_date || t.date,
+    dispatchDate: t.dispatchDate || t.dispatch_date || t.date,
+    uploaded_at: t.uploaded_at || t.uploadedAt || t.created_at,
+    uploadedAt: t.uploadedAt || t.uploaded_at || t.created_at,
+    created_at: t.created_at || t.createdAt,
+    audited_at: t.audited_at || t.auditedAt,
+    auditedAt: t.auditedAt || t.audited_at,
+    audit_status: t.auditStatus || t.audit_status,
+    auditStatus: t.auditStatus || t.audit_status,
+    feCode: t.feCode || t.fe_code || t.feId || t.fe_id,
+    fe_code: t.fe_code || t.feCode || t.feId || t.fe_id,
+    feName: t.feName || t.fe_name,
+    fe_name: t.fe_name || t.feName,
+    feEmail: t.feEmail || t.fe_email,
+    fe_email: t.fe_email || t.feEmail,
+    amName: t.amName || t.reporting_manager_name,
+    amEmail: t.amEmail || t.reporting_manager_email,
+    customerName: t.customerName || t.customer_name,
+    customer_name: t.customer_name || t.customerName,
+    facilityCode: t.facilityCode || t.facility_code || t.city || t.teamName,
+    facility_code: t.facility_code || t.facilityCode || t.city || t.teamName,
+    city: t.city || t.facilityCode,
+    failedReasons: Array.isArray(t.failedReasons) ? t.failedReasons : (Array.isArray(t.failed_reasons) ? t.failed_reasons : []),
+    failed_reasons: Array.isArray(t.failed_reasons) ? t.failed_reasons : (Array.isArray(t.failedReasons) ? t.failedReasons : []),
+    remarks: typeof t.remarks === 'string' ? t.remarks.slice(0, 300) : (typeof t.auditor_remarks === 'string' ? t.auditor_remarks.slice(0, 300) : ''),
+    auditedBy: t.auditedBy || t.audited_by_name,
+    audited_by_name: t.auditedBy || t.audited_by_name,
+    replacements: Array.isArray(t.replacements) ? t.replacements.map(r => ({
+      name: r.name || r.itemName || '',
+      category: r.category || 'Asset',
+      urgency: r.urgency || 'NORMAL'
+    })) : [],
+    email_sent: t.email_sent,
+    email_notified: t.email_notified
+  }));
+
+  // Double check payload size: if serialized length is > 600KB, omit tasks completely
+  // so the server automatically queries Supabase directly with zero HTTP payload restriction!
+  try {
+    const serialized = JSON.stringify(pruned);
+    if (serialized.length > 600000) {
+      return undefined;
+    }
+  } catch (e) {
+    return undefined;
+  }
+
+  return pruned;
+}
+
+// Helper to sanitize & prune users payload
+export function pruneUsersForDigest(users) {
+  if (!Array.isArray(users) || users.length === 0) return undefined;
+  return users.slice(0, 300).map(u => ({
+    id: u.id,
+    email: u.email,
+    full_name: u.full_name || u.name,
+    name: u.full_name || u.name,
+    employee_code: u.employee_code || u.person_id,
+    role: u.role,
+    roles: u.roles,
+    facility_code: u.facility_code || u.city,
+    city: u.city || u.facility_code,
+    reporting_manager_name: u.reporting_manager_name,
+    reporting_manager_email: u.reporting_manager_email
+  }));
+}
+
 export const emailApi = {
   // Read configured gateway credentials (Brevo, Resend or SMTP)
   getGatewayConfig() {
@@ -1101,10 +1211,7 @@ export const emailApi = {
       })
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to dispatch email notice');
-    }
+    const data = await safeParseJsonResponse(response, 'Failed to dispatch email notice');
     return data;
   },
 
@@ -1878,6 +1985,8 @@ export const dailyDigestApi = {
   // Trigger or run daily digest cron on demand
   async triggerDigest({ date, force = false, managerEmail, dryRun = false, tasks, users }) {
     const gatewayConfig = emailApi.getGatewayConfig();
+    const safeTasks = pruneTasksForDigest(tasks, date);
+    const safeUsers = pruneUsersForDigest(users);
 
     const response = await fetch('/api/cron/daily-digest', {
       method: 'POST',
@@ -1890,8 +1999,8 @@ export const dailyDigestApi = {
         force,
         managerEmail,
         dryRun,
-        tasks,
-        users,
+        tasks: safeTasks,
+        users: safeUsers,
         credentials: {
           resendApiKey: gatewayConfig.resendApiKey,
           smtpHost: gatewayConfig.smtpHost,
@@ -1903,10 +2012,7 @@ export const dailyDigestApi = {
       })
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to execute daily digest cron');
-    }
+    const data = await safeParseJsonResponse(response, 'Failed to execute daily digest cron');
     return data;
   },
 
@@ -2047,6 +2153,8 @@ export const feFatalDigestApi = {
   // Trigger or run FE fatal digest cron on demand (or dry run preview)
   async triggerFeFatalDispatch({ date, force = false, feCode, dryRun = false, tasks, users }) {
     const gatewayConfig = emailApi.getGatewayConfig();
+    const safeTasks = pruneTasksForDigest(tasks, date);
+    const safeUsers = pruneUsersForDigest(users);
 
     const response = await fetch('/api/cron/daily-fe-fatal-digest', {
       method: 'POST',
@@ -2059,8 +2167,8 @@ export const feFatalDigestApi = {
         force,
         feCode,
         dryRun,
-        tasks,
-        users,
+        tasks: safeTasks,
+        users: safeUsers,
         credentials: {
           brevoApiKey: gatewayConfig.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
           resendApiKey: gatewayConfig.resendApiKey,
@@ -2073,10 +2181,7 @@ export const feFatalDigestApi = {
       })
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to execute daily FE fatal digest cron');
-    }
+    const data = await safeParseJsonResponse(response, 'Failed to execute daily FE fatal digest cron');
 
     // Cache logs locally if live dispatch
     if (!dryRun && data.results) {
@@ -2105,6 +2210,8 @@ export const feFatalDigestApi = {
   // Dispatch General Executive Summary to GM, BH & SuperAdmin
   async dispatchGmBhExecutiveSummary({ date, tasks, users, dryRun = false, leadershipEmails }) {
     const gatewayConfig = emailApi.getGatewayConfig();
+    const safeTasks = pruneTasksForDigest(tasks, date);
+    const safeUsers = pruneUsersForDigest(users);
 
     const response = await fetch('/api/cron/daily-fe-fatal-digest', {
       method: 'POST',
@@ -2116,8 +2223,8 @@ export const feFatalDigestApi = {
         action: 'send_executive_summary',
         date,
         dryRun,
-        tasks,
-        users,
+        tasks: safeTasks,
+        users: safeUsers,
         leadershipEmails,
         credentials: {
           brevoApiKey: gatewayConfig.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
@@ -2131,16 +2238,14 @@ export const feFatalDigestApi = {
       })
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to dispatch GM & BH executive summary');
-    }
-    return data;
+    return await safeParseJsonResponse(response, 'Failed to dispatch GM & BH executive summary');
   },
 
   // Dispatch Consolidated Team Digest to AMs & RMs
   async dispatchTeamDigest({ date, managerEmail, role, dryRun = false, tasks, users }) {
     const gatewayConfig = emailApi.getGatewayConfig();
+    const safeTasks = pruneTasksForDigest(tasks, date);
+    const safeUsers = pruneUsersForDigest(users);
 
     const response = await fetch('/api/cron/daily-fe-fatal-digest', {
       method: 'POST',
@@ -2154,8 +2259,8 @@ export const feFatalDigestApi = {
         managerEmail,
         role,
         dryRun,
-        tasks,
-        users,
+        tasks: safeTasks,
+        users: safeUsers,
         credentials: {
           brevoApiKey: gatewayConfig.brevoApiKey || import.meta.env.VITE_BREVO_API_KEY || '',
           resendApiKey: gatewayConfig.resendApiKey,
@@ -2168,11 +2273,7 @@ export const feFatalDigestApi = {
       })
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to dispatch team digest');
-    }
-    return data;
+    return await safeParseJsonResponse(response, 'Failed to dispatch team digest');
   }
 };
 
