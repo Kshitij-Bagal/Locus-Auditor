@@ -211,6 +211,96 @@ export default function SuperAdminCronEngine({
     return list;
   }, [users]);
 
+  // Dynamic Recipient Management for Executive Summary (allows safe testing on oneself)
+  const [customLeadershipRecipients, setCustomLeadershipRecipients] = useState([]);
+  const [customEmailInput, setCustomEmailInput] = useState('');
+  const [selectedLeadershipEmails, setSelectedLeadershipEmails] = useState([]);
+  const [hasInitializedLeadershipEmails, setHasInitializedLeadershipEmails] = useState(false);
+
+  const allAvailableLeadershipRecipients = useMemo(() => {
+    const list = [...leadershipRecipients];
+    const seen = new Set(list.map(r => r.email.toLowerCase()));
+
+    // Include currentUser if available and valid
+    if (currentUser?.email) {
+      const curEmail = currentUser.email.trim().toLowerCase();
+      if (curEmail.includes('@') && !seen.has(curEmail)) {
+        seen.add(curEmail);
+        list.push({
+          name: currentUser.name || currentUser.full_name || 'You (Current User)',
+          email: curEmail,
+          role: currentUser.role || 'SuperAdmin'
+        });
+      }
+    }
+
+    // Include custom test recipients
+    customLeadershipRecipients.forEach(cr => {
+      const cEmail = cr.email.trim().toLowerCase();
+      if (cEmail && !seen.has(cEmail)) {
+        seen.add(cEmail);
+        list.push(cr);
+      }
+    });
+
+    return list;
+  }, [leadershipRecipients, currentUser, customLeadershipRecipients]);
+
+  // Initialize selected emails once recipients are computed
+  useEffect(() => {
+    if (!hasInitializedLeadershipEmails && allAvailableLeadershipRecipients.length > 0) {
+      setSelectedLeadershipEmails(allAvailableLeadershipRecipients.map(r => r.email));
+      setHasInitializedLeadershipEmails(true);
+    }
+  }, [allAvailableLeadershipRecipients, hasInitializedLeadershipEmails]);
+
+  const handleToggleLeadershipRecipient = (email) => {
+    const eNorm = email.trim().toLowerCase();
+    setSelectedLeadershipEmails(prev => 
+      prev.includes(eNorm) ? prev.filter(e => e !== eNorm) : [...prev, eNorm]
+    );
+  };
+
+  const handleSelectOnlyMyself = () => {
+    const myEmail = (currentUser?.email || 'kshitijbagal@lenskart.com').trim().toLowerCase();
+    if (!allAvailableLeadershipRecipients.some(r => r.email.toLowerCase() === myEmail)) {
+      setCustomLeadershipRecipients(prev => [...prev, {
+        name: currentUser?.name || 'You',
+        email: myEmail,
+        role: 'Tester'
+      }]);
+    }
+    setSelectedLeadershipEmails([myEmail]);
+  };
+
+  const handleSelectAllLeadershipRecipients = () => {
+    setSelectedLeadershipEmails(allAvailableLeadershipRecipients.map(r => r.email));
+  };
+
+  const handleClearAllLeadershipRecipients = () => {
+    setSelectedLeadershipEmails([]);
+  };
+
+  const handleAddCustomLeadershipEmail = (e) => {
+    if (e) e.preventDefault();
+    const cleanEmail = customEmailInput.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+      alert('Please enter a valid email address (e.g. your email or test address).');
+      return;
+    }
+    if (!allAvailableLeadershipRecipients.some(r => r.email.toLowerCase() === cleanEmail)) {
+      setCustomLeadershipRecipients(prev => [...prev, {
+        name: 'Custom Tester',
+        email: cleanEmail,
+        role: 'Test'
+      }]);
+    }
+    if (!selectedLeadershipEmails.includes(cleanEmail)) {
+      setSelectedLeadershipEmails(prev => [...prev, cleanEmail]);
+    }
+    setCustomEmailInput('');
+  };
+
   // Filter FE digests by search query
   const filteredFeDigests = useMemo(() => {
     if (!searchQuery.trim()) return feDigests;
@@ -363,9 +453,22 @@ export default function SuperAdminCronEngine({
 
   // Handle GM & BH Executive Summary Dispatch (Trial Mode to Leadership)
   const handleDispatchExecutiveSummary = async (isDryRun = false) => {
-    const actionName = isDryRun ? 'Dry-Run Simulation' : 'Live Brevo Dispatch';
+    if (!selectedLeadershipEmails || selectedLeadershipEmails.length === 0) {
+      alert('Please select at least one recipient checkbox before dispatching.');
+      return;
+    }
 
-    if (!isDryRun && !window.confirm(`Are you sure you want to trigger ${actionName} of today's Executive Audit Summary?\n\nThis will send a comprehensive briefing of all hubs, SOP failure Pareto, and fatal strikes exclusively to General Managers (GM), Business Heads (BH), and SuperAdmins.`)) {
+    const actionName = isDryRun ? 'Dry-Run Simulation' : 'Live Brevo Dispatch';
+    const isSingleSelf = selectedLeadershipEmails.length === 1 && 
+      (currentUser?.email && selectedLeadershipEmails.includes(currentUser.email.toLowerCase()));
+
+    const confirmMsg = isDryRun
+      ? `Run ${actionName} for ${selectedLeadershipEmails.length} recipient(s)?\n\nRecipients:\n• ${selectedLeadershipEmails.join('\n• ')}`
+      : isSingleSelf
+        ? `Send Executive Quality Briefing to YOURSELF ONLY (${selectedLeadershipEmails[0]})?\n\nGM (Mayank Gupta) and BH (Ankita Aggarwal) will NOT receive this test email.`
+        : `Are you sure you want to trigger ${actionName} of today's Executive Audit Summary?\n\nRecipients (${selectedLeadershipEmails.length}):\n• ${selectedLeadershipEmails.join('\n• ')}`;
+
+    if (!window.confirm(confirmMsg)) {
       return;
     }
 
@@ -378,7 +481,7 @@ export default function SuperAdminCronEngine({
         tasks,
         users,
         dryRun: isDryRun,
-        leadershipEmails: leadershipRecipients.map(r => r.email)
+        leadershipEmails: selectedLeadershipEmails
       });
 
       setExecutiveDispatchResult(res);
@@ -1165,32 +1268,132 @@ export default function SuperAdminCronEngine({
 
                 <button
                   onClick={() => handleDispatchExecutiveSummary(false)}
-                  disabled={isDispatchingExecutive}
-                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-sky-900/40 transition-all cursor-pointer disabled:opacity-50"
+                  disabled={isDispatchingExecutive || selectedLeadershipEmails.length === 0}
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-sky-900/40 transition-all cursor-pointer disabled:opacity-40"
                 >
                   {isDispatchingExecutive ? (
                     <RefreshCw className="w-4 h-4 animate-spin" />
                   ) : (
                     <Send className="w-4 h-4" />
                   )}
-                  Dispatch to GM, BH &amp; SuperAdmin
+                  {selectedLeadershipEmails.length === 1 && (currentUser?.email && selectedLeadershipEmails.includes(currentUser.email.toLowerCase()))
+                    ? 'Dispatch to Myself (Test Mode)'
+                    : `Dispatch to ${selectedLeadershipEmails.length} Recipient(s)`}
                 </button>
               </div>
             </div>
 
-            {/* Target leadership recipients list */}
-            <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="font-semibold text-slate-300">Executive Leadership Group:</span>
-                {leadershipRecipients.map(r => (
-                  <span key={r.email} className="px-2 py-0.5 rounded bg-slate-800/80 text-sky-300 font-mono text-[11px] border border-slate-700/60 shadow-sm">
-                    {r.name} ({r.role}): {r.email}
+            {/* Dynamic Recipient Selector */}
+            <div className="mt-5 pt-4 border-t border-slate-800/80 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-sky-400" />
+                    Select Briefing Recipients ({selectedLeadershipEmails.length} Selected)
                   </span>
-                ))}
+                  {selectedLeadershipEmails.length === 0 ? (
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20">
+                      ⚠️ No recipients selected
+                    </span>
+                  ) : selectedLeadershipEmails.length === 1 ? (
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      Safe Test Mode Active
+                    </span>
+                  ) : null}
+                </div>
+
+                {/* Quick Selection Shortcuts */}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleSelectOnlyMyself}
+                    className="px-2.5 py-1 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border border-sky-500/30 text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                    title="Check only your email so GM & BH do not receive this test dispatch"
+                  >
+                    <Zap className="w-3 h-3 text-sky-400" />
+                    Test on Myself Only
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSelectAllLeadershipRecipients}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] font-medium transition-all cursor-pointer"
+                  >
+                    Select All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearAllLeadershipRecipients}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700 text-[11px] font-medium transition-all cursor-pointer"
+                  >
+                    Clear All
+                  </button>
+                </div>
               </div>
 
-              <div className="text-[11px] text-slate-400">
-                Macro Snapshot: <strong className="text-white">{executiveSummary.totalAudited}</strong> Audited &bull; <strong className="text-emerald-400">{executiveSummary.passRate}%</strong> Pass &bull; <strong className="text-red-400">{executiveSummary.totalFatal}</strong> Fatals
+              {/* Recipient Checkbox Badges */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {allAvailableLeadershipRecipients.map(r => {
+                  const isChecked = selectedLeadershipEmails.includes(r.email.toLowerCase());
+                  const isSeniorExec = r.role === 'GM' || r.role === 'BH';
+                  return (
+                    <div
+                      key={r.email}
+                      onClick={() => handleToggleLeadershipRecipient(r.email)}
+                      className={`flex items-start gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer select-none transition-all ${
+                        isChecked
+                          ? 'bg-sky-950/40 border-sky-500/40 text-sky-100 shadow-sm'
+                          : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:bg-slate-900 hover:text-slate-300'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {}} // handled by wrapper onClick
+                        className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-sky-500 cursor-pointer shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={`font-semibold truncate ${isChecked ? 'text-white' : 'text-slate-300'}`}>
+                            {r.name}
+                          </span>
+                          <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded border ${
+                            isSeniorExec
+                              ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
+                              : 'bg-slate-800 text-slate-400 border-slate-700'
+                          }`}>
+                            {r.role}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-400 truncate mt-0.5">
+                          {r.email}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Add custom test email */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
+                <form onSubmit={handleAddCustomLeadershipEmail} className="flex items-center gap-2 flex-1 max-w-md">
+                  <input
+                    type="email"
+                    placeholder="Enter custom test email (e.g. personal email)..."
+                    value={customEmailInput}
+                    onChange={(e) => setCustomEmailInput(e.target.value)}
+                    className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/30 text-xs font-semibold transition-colors cursor-pointer shrink-0"
+                  >
+                    + Add Email
+                  </button>
+                </form>
+
+                <div className="text-[11px] text-slate-400 text-right">
+                  Macro Snapshot: <strong className="text-white">{executiveSummary.totalAudited}</strong> Audited &bull; <strong className="text-emerald-400">{executiveSummary.passRate}%</strong> Pass &bull; <strong className="text-red-400">{executiveSummary.totalFatal}</strong> Fatals
+                </div>
               </div>
             </div>
 
@@ -1421,10 +1624,13 @@ export default function SuperAdminCronEngine({
                     setShowExecutivePreviewModal(false);
                     handleDispatchExecutiveSummary(false);
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  disabled={selectedLeadershipEmails.length === 0}
+                  className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  Dispatch This Email Now
+                  {selectedLeadershipEmails.length === 1 && (currentUser?.email && selectedLeadershipEmails.includes(currentUser.email.toLowerCase()))
+                    ? 'Dispatch to Myself Only'
+                    : `Dispatch to ${selectedLeadershipEmails.length} Selected`}
                 </button>
                 <button
                   onClick={() => setShowExecutivePreviewModal(false)}
@@ -1437,15 +1643,22 @@ export default function SuperAdminCronEngine({
 
             <div className="p-3 bg-slate-950/70 border-b border-slate-800 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-bold text-slate-400">Target Leadership Group:</span>
-                {leadershipRecipients.map((r, i) => (
-                  <span key={r.email} className="text-sky-300">
-                    {r.name} ({r.role}): {r.email}{i < leadershipRecipients.length - 1 ? ' • ' : ''}
+                <span className="font-bold text-slate-400">Target Recipients ({selectedLeadershipEmails.length}):</span>
+                {selectedLeadershipEmails.length === 0 ? (
+                  <span className="text-red-400 font-semibold flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    None selected &mdash; please check recipients on the main page
                   </span>
-                ))}
+                ) : (
+                  selectedLeadershipEmails.map((email, i) => (
+                    <span key={email} className="px-2 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20 font-mono text-[11px]">
+                      {email}
+                    </span>
+                  ))
+                )}
               </div>
               <span className="text-[11px] text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                Trial Mode: 0 Emails Sent to Field Executives
+                Safe Test Mode: Only selected recipients receive this dispatch
               </span>
             </div>
 
