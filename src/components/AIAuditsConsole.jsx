@@ -55,9 +55,45 @@ import {
   testAnyProviderApiKey,
   auditTaskMultiProvider
 } from '../utils/multiAiAuditHelper.js';
-import { tasksApi } from '../api/client.js';
+import { tasksApi, settingsApi } from '../api/client.js';
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
 import AuditModal from './AuditModal.jsx';
+
+/**
+ * Returns today's date in local YYYY-MM-DD format (resets cleanly at 00:00 local midnight)
+ */
+export function getTodayDateString() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Computes the total count of AI-audited tasks performed today directly from verified Supabase tasks
+ */
+function getTodayAiAuditedCountFromTasks(tasksList, dateStr) {
+  if (!Array.isArray(tasksList)) return 0;
+  return tasksList.filter(t => {
+    const isAudited = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
+    if (!isAudited) return false;
+    const by = (t.auditedBy || t.audited_by_name || '').toLowerCase();
+    const rem = (t.remarks || t.auditor_remarks || '').toLowerCase();
+    const isAi = by.includes('gemini') || by.includes('ai') || by.includes('gpt') || by.includes('claude') || by.includes('llama') || by.includes('groq') || by.includes('openrouter') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
+    if (!isAi) return false;
+
+    const auditedAt = t.auditedAt || t.audited_at;
+    if (!auditedAt) return false;
+    try {
+      const audDate = new Date(auditedAt);
+      const audDateStr = `${audDate.getFullYear()}-${String(audDate.getMonth() + 1).padStart(2, '0')}-${String(audDate.getDate()).padStart(2, '0')}`;
+      return audDateStr === dateStr;
+    } catch (_) {
+      return String(auditedAt).slice(0, 10) === dateStr;
+    }
+  }).length;
+}
 
 export default function AIAuditsConsole({
   tasks = [],
@@ -80,7 +116,20 @@ export default function AIAuditsConsole({
   const [showModelGuide, setShowModelGuide] = useState(false);
   const [allowFailover, setAllowFailover] = useState(() => getProviderFailoverEnabled());
 
-  // Live Token & Request Telemetry Counter
+  // Persistent Daily AI Audit Task Request Tracker (stored in Supabase website storage & resets at 00:00)
+  const [dailyAiUsage, setDailyAiUsage] = useState(() => {
+    const today = getTodayDateString();
+    try {
+      const saved = localStorage.getItem(`locus_daily_ai_audit_tracker_${today}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.date === today) return parsed;
+      }
+    } catch (_) {}
+    return { date: today, requests: 0, totalTokens: 0, lastUpdated: null };
+  });
+
+  // Ephemeral live session counters
   const [sessionUsage, setSessionUsage] = useState({
     requests: 0,
     promptTokens: 0,
@@ -184,6 +233,99 @@ export default function AIAuditsConsole({
       }).catch(() => {});
     }
   }, [apiKey, activeProvider]);
+
+  // 1. Sync Daily AI Task Request Count from Supabase website storage & tasks table on load & refresh
+  useEffect(() => {
+    let isMounted = true;
+    const today = getTodayDateString();
+
+    // A. Count tasks audited by AI today directly from tasks state
+    const dbTodayCount = getTodayAiAuditedCountFromTasks(tasks, today);
+    const dbTodayTokens = tasks.reduce((sum, t) => {
+      const isAudited = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
+      if (!isAudited) return sum;
+      const by = (t.auditedBy || t.audited_by_name || '').toLowerCase();
+      const isAi = by.includes('gemini') || by.includes('ai') || by.includes('gpt') || by.includes('claude') || by.includes('llama') || by.includes('groq') || by.includes('openrouter');
+      if (!isAi) return sum;
+      const auditedAt = t.auditedAt || t.audited_at;
+      if (!auditedAt) return sum;
+      try {
+        const audDate = new Date(auditedAt);
+        const audDateStr = `${audDate.getFullYear()}-${String(audDate.getMonth() + 1).padStart(2, '0')}-${String(audDate.getDate()).padStart(2, '0')}`;
+        if (audDateStr === today) {
+          return sum + (Number(t.totalTokens || t.total_tokens) || 2000);
+        }
+      } catch (_) {}
+      return sum;
+    }, 0);
+
+    // B. Fetch persistent tracker from Supabase system_settings table (website backend)
+    settingsApi.getSetting(`daily_ai_audit_tracker_${today}`, null).then(remote => {
+      if (!isMounted) return;
+      const remoteReqs = (remote && remote.date === today && typeof remote.requests === 'number') ? remote.requests : 0;
+      const remoteToks = (remote && remote.date === today && typeof remote.totalTokens === 'number') ? remote.totalTokens : 0;
+
+      const finalRequests = Math.max(remoteReqs, dbTodayCount, dailyAiUsage.date === today ? (dailyAiUsage.requests || 0) : 0);
+      const finalTokens = Math.max(remoteToks, dbTodayTokens, dailyAiUsage.date === today ? (dailyAiUsage.totalTokens || 0) : 0);
+
+      const record = {
+        date: today,
+        requests: finalRequests,
+        totalTokens: finalTokens,
+        lastUpdated: new Date().toISOString()
+      };
+
+      setDailyAiUsage(record);
+      try {
+        localStorage.setItem(`locus_daily_ai_audit_tracker_${today}`, JSON.stringify(record));
+      } catch (_) {}
+
+      // Keep Supabase updated with the highest accurate count
+      if (remoteReqs < finalRequests) {
+        settingsApi.setSetting(`daily_ai_audit_tracker_${today}`, record).catch(() => {});
+      }
+    }).catch(() => {
+      if (!isMounted) return;
+      const finalRequests = Math.max(dbTodayCount, dailyAiUsage.date === today ? (dailyAiUsage.requests || 0) : 0);
+      const finalTokens = Math.max(dbTodayTokens, dailyAiUsage.date === today ? (dailyAiUsage.totalTokens || 0) : 0);
+      setDailyAiUsage({
+        date: today,
+        requests: finalRequests,
+        totalTokens: finalTokens,
+        lastUpdated: new Date().toISOString()
+      });
+    });
+
+    return () => { isMounted = false; };
+  }, [tasks]);
+
+  // 2. 00:00 Midnight Auto-Reset Timer: automatically resets count to 0 at midnight every day
+  useEffect(() => {
+    const checkMidnight = () => {
+      const currentDay = getTodayDateString();
+      setDailyAiUsage(prev => {
+        if (prev.date !== currentDay) {
+          // 00:00 Midnight has passed! Start new daily tracker at 0
+          const fresh = {
+            date: currentDay,
+            requests: 0,
+            totalTokens: 0,
+            lastUpdated: new Date().toISOString()
+          };
+          try {
+            localStorage.setItem(`locus_daily_ai_audit_tracker_${currentDay}`, JSON.stringify(fresh));
+          } catch (_) {}
+          settingsApi.setSetting(`daily_ai_audit_tracker_${currentDay}`, fresh).catch(() => {});
+          return fresh;
+        }
+        return prev;
+      });
+    };
+
+    // Check every 30 seconds for 00:00 date crossover
+    const interval = setInterval(checkMidnight, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Provider Selection Switcher
   const handleSelectProvider = (provId) => {
@@ -400,6 +542,26 @@ export default function AIAuditsConsole({
         responseTokens: prev.responseTokens + respToks,
         totalTokens: prev.totalTokens + totToks
       }));
+
+      // Update and persist daily AI task request counter to website storage (resets at 00:00 everyday)
+      const currentToday = getTodayDateString();
+      setDailyAiUsage(prev => {
+        const isSameDay = prev.date === currentToday;
+        const nextRequests = (isSameDay ? prev.requests : 0) + 1;
+        const nextTokens = (isSameDay ? prev.totalTokens : 0) + totToks;
+        const updatedDaily = {
+          date: currentToday,
+          requests: nextRequests,
+          totalTokens: nextTokens,
+          lastUpdated: new Date().toISOString()
+        };
+        try {
+          localStorage.setItem(`locus_daily_ai_audit_tracker_${currentToday}`, JSON.stringify(updatedDaily));
+        } catch (_) {}
+        // Persist to Supabase website storage so it survives refreshes across all users
+        settingsApi.setSetting(`daily_ai_audit_tracker_${currentToday}`, updatedDaily).catch(() => {});
+        return updatedDaily;
+      });
 
       // Add to session ledger
       const sessionEntry = {
@@ -1248,9 +1410,19 @@ export default function AIAuditsConsole({
               <span className="text-[9px] uppercase font-bold text-slate-400 block">Pending Audits</span>
               <span className="text-base font-black text-amber-400">{queueTasks.length}</span>
             </div>
+            <div className="bg-slate-950/80 border border-slate-800 px-3.5 py-1.5 rounded-xl text-center" title="Total AI audit requests sent today across the website (resets at 00:00 every day)">
+              <span className="text-[9px] uppercase font-bold text-sky-400 block">AI Requests Today</span>
+              <span className="text-base font-black text-white">{dailyAiUsage.requests}</span>
+            </div>
+            <div className="bg-slate-950/80 border border-slate-800 px-3.5 py-1.5 rounded-xl text-center" title="Remaining requests out of 1,500 daily quota">
+              <span className="text-[9px] uppercase font-bold text-emerald-400 block">Daily Quota Left</span>
+              <span className="text-base font-black text-emerald-400">
+                {Math.max(0, (activeModelObj.rpd || 1500) - dailyAiUsage.requests)}
+              </span>
+            </div>
             <div className="bg-slate-950/80 border border-slate-800 px-3.5 py-1.5 rounded-xl text-center">
-              <span className="text-[9px] uppercase font-bold text-slate-400 block">Audited This Session</span>
-              <span className="text-base font-black text-emerald-400">{sessionHistory.length}</span>
+              <span className="text-[9px] uppercase font-bold text-slate-400 block">This Session</span>
+              <span className="text-base font-black text-indigo-400">{sessionHistory.length}</span>
             </div>
           </div>
         </div>
@@ -1553,19 +1725,23 @@ export default function AIAuditsConsole({
             </div>
           )}
 
-          {/* Live Token & Request Counter Strip */}
+          {/* Live Token & Daily Request Counter Strip (Website-wide daily tracking, resets 00:00 midnight) */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-            {/* 1. Requests Counter */}
+            {/* 1. Daily Requests Counter (Persistent on Website, Resets at 00:00) */}
             <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
               <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
-                <span className="flex items-center gap-1 text-sky-400">
-                  <Activity className="w-3 h-3" /> Requests Sent
+                <span className="flex items-center gap-1 text-sky-400" title="Daily AI audit requests sent across website today. Persists on refresh and automatically resets to 0 at 00:00 everyday.">
+                  <Activity className="w-3 h-3" /> Daily Requests
                 </span>
-                <span className="text-sky-300 font-mono font-bold">{activeModelObj.rpm} RPM Quota</span>
+                <span className="text-sky-300 font-mono font-bold">Resets 00:00</span>
               </div>
               <div className="flex items-baseline gap-1.5">
-                <span className="text-lg font-black text-white">{sessionUsage.requests}</span>
-                <span className="text-[10px] text-slate-400">audits this session</span>
+                <span className="text-lg font-black text-white">{dailyAiUsage.requests}</span>
+                <span className="text-[10px] text-slate-400">requests today</span>
+              </div>
+              <div className="mt-1 text-[10px] text-sky-400 font-mono flex items-center justify-between">
+                <span>{((dailyAiUsage.requests / (activeModelObj.rpd || 1500)) * 100).toFixed(1)}% of 1,500</span>
+                <span className="text-slate-500">Session: {sessionUsage.requests}</span>
               </div>
             </div>
 
@@ -1573,15 +1749,18 @@ export default function AIAuditsConsole({
             <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
               <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
                 <span className="flex items-center gap-1 text-emerald-400">
-                  <Layers className="w-3 h-3" /> Tokens Consumed
+                  <Layers className="w-3 h-3" /> Today's Tokens
                 </span>
                 <span className="text-emerald-300 font-mono font-bold">~2.0k / task</span>
               </div>
               <div className="flex items-baseline gap-1.5">
                 <span className="text-lg font-black text-emerald-400">
-                  {sessionUsage.totalTokens.toLocaleString()}
+                  {dailyAiUsage.totalTokens.toLocaleString()}
                 </span>
-                <span className="text-[10px] text-slate-400">tokens used</span>
+                <span className="text-[10px] text-slate-400">tokens consumed</span>
+              </div>
+              <div className="mt-1 text-[10px] text-slate-500 font-mono">
+                Session: {sessionUsage.totalTokens.toLocaleString()}
               </div>
             </div>
 
@@ -1599,21 +1778,30 @@ export default function AIAuditsConsole({
                 </span>
                 <span className="text-[10px] text-slate-400">input capacity</span>
               </div>
+              <div className="mt-1 text-[10px] text-slate-500 font-mono">
+                Rate: {activeModelObj.rpm || 15} RPM
+              </div>
             </div>
 
-            {/* 4. Daily Free Tier Allowance */}
+            {/* 4. Daily Free Tier Allowance Remaining */}
             <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl">
               <div className="flex items-center justify-between text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">
                 <span className="flex items-center gap-1 text-amber-400">
-                  <Zap className="w-3 h-3" /> Daily Allowance
+                  <Zap className="w-3 h-3" /> Quota Remaining
                 </span>
-                <span className="text-amber-300 font-mono font-bold">Free Tier</span>
+                <span className="text-amber-300 font-mono font-bold">1,500/day</span>
               </div>
               <div className="flex items-baseline gap-1.5">
                 <span className="text-lg font-black text-amber-300">
-                  {activeModelObj.rpd ? activeModelObj.rpd.toLocaleString() : '1,500'}
+                  {Math.max(0, (activeModelObj.rpd || 1500) - dailyAiUsage.requests).toLocaleString()}
                 </span>
-                <span className="text-[10px] text-slate-400">requests/day</span>
+                <span className="text-[10px] text-slate-400">requests left today</span>
+              </div>
+              <div className="mt-1 w-full bg-slate-900 rounded-full h-1 overflow-hidden border border-slate-800">
+                <div 
+                  className="bg-amber-400 h-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, (dailyAiUsage.requests / (activeModelObj.rpd || 1500)) * 100)}%` }}
+                />
               </div>
             </div>
           </div>
