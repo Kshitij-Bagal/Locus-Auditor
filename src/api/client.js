@@ -1076,6 +1076,7 @@ export function pruneTasksForDigest(tasks, targetDate) {
     customer_name: t.customer_name || t.customerName,
     facilityCode: t.facilityCode || t.facility_code || t.city || t.teamName,
     facility_code: t.facility_code || t.facilityCode || t.city || t.teamName,
+    zone: t.zone || t.Zone || t.zone_name || t.hub_zone || '',
     city: t.city || t.facilityCode,
     failedReasons: Array.isArray(t.failedReasons) ? t.failedReasons : (Array.isArray(t.failed_reasons) ? t.failed_reasons : []),
     failed_reasons: Array.isArray(t.failed_reasons) ? t.failed_reasons : (Array.isArray(t.failedReasons) ? t.failedReasons : []),

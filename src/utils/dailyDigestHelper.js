@@ -1390,9 +1390,45 @@ export function resolveAmForTask(t, users = []) {
 }
 
 /**
+ * Extract the authoritative operations Zone from a task record.
+ * Prioritizes the tasks table's zone column (t.zone) to accurately group all tasks by zone.
+ */
+export function extractTaskZone(t) {
+  if (!t) return 'Central Zone';
+  const rawZone = String(
+    t.zone || 
+    t.Zone || 
+    t.zone_name || 
+    t.hub_zone || 
+    t.facility_zone || 
+    ''
+  ).trim();
+
+  if (rawZone && 
+      rawZone.toLowerCase() !== 'unknown' && 
+      rawZone.toLowerCase() !== 'unknown zone' &&
+      rawZone.toLowerCase() !== 'null' &&
+      rawZone.toLowerCase() !== 'undefined') {
+    return rawZone;
+  }
+
+  // Fallback to city or facility code only if zone column is unpopulated
+  const rawCity = String(t.city || t.teamName || t.facilityCode || t.facility_code || '').trim();
+  if (rawCity && 
+      rawCity.toLowerCase() !== 'unknown' && 
+      rawCity.toLowerCase() !== 'unknown zone' &&
+      rawCity.toLowerCase() !== 'null' &&
+      rawCity.toLowerCase() !== 'undefined') {
+    return rawCity;
+  }
+
+  return 'Central Operations Zone';
+}
+
+/**
  * Aggregate complete day's audit snapshot for executive leadership (GM & BH)
- * Optimized for high-level governance: Macro Overview, City/Zone Scorecard, AM Supervisory Performance, Top SOP Pareto.
- * (FE-level fatal records & hub codes are excluded to ensure minimal email size and executive clarity)
+ * Optimized for high-level governance: Macro Overview, Zone Scorecard, AM Supervisory Performance, Top SOP Pareto.
+ * (Tasks are grouped strictly by the tasks table's zone section)
  */
 export function aggregateGmBhExecutiveSummary({
   tasks = [],
@@ -1426,23 +1462,23 @@ export function aggregateGmBhExecutiveSummary({
   const passRate = totalAudited > 0 ? Math.round((totalPassed / totalAudited) * 100) : 100;
   const fatalRate = totalAudited > 0 ? Math.round((totalFatal / totalAudited) * 100) : 0;
 
-  // 2. City / Zone Performance Breakdown (Replaces raw Hub codes)
-  const cityMap = new Map();
+  // 2. Zone Performance Scorecard (Grouped strictly by the tasks table's zone section)
+  const zoneMap = new Map();
   auditedToday.forEach(t => {
-    const rawCity = String(t.city || t.facilityCode || t.facility_code || 'Central Zone').trim();
-    const city = rawCity.toUpperCase();
-    if (!cityMap.has(city)) {
-      cityMap.set(city, { city: rawCity, audited: 0, passed: 0, fatal: 0 });
+    const rawZone = extractTaskZone(t);
+    const zoneKey = rawZone.toUpperCase();
+    if (!zoneMap.has(zoneKey)) {
+      zoneMap.set(zoneKey, { zone: rawZone, audited: 0, passed: 0, fatal: 0 });
     }
-    const entry = cityMap.get(city);
+    const entry = zoneMap.get(zoneKey);
     entry.audited++;
     if ((t.auditStatus || t.audit_status) === 'FATAL') entry.fatal++;
     else entry.passed++;
   });
 
-  const cityBreakdown = Array.from(cityMap.values()).map(c => ({
-    ...c,
-    passRate: c.audited > 0 ? Math.round((c.passed / c.audited) * 100) : 100
+  const zoneBreakdown = Array.from(zoneMap.values()).map(z => ({
+    ...z,
+    passRate: z.audited > 0 ? Math.round((z.passed / z.audited) * 100) : 100
   })).sort((a, b) => b.fatal - a.fatal || b.audited - a.audited);
 
   // 3. Area Manager (AM) Supervisory Breakdown (Replaces FE-level fatal details)
@@ -1452,12 +1488,13 @@ export function aggregateGmBhExecutiveSummary({
     const amKey = (amInfo.amEmail || amInfo.amName || 'unassigned').toLowerCase().trim();
     const isFatal = (t.auditStatus || t.audit_status) === 'FATAL';
     const feIdentifier = String(t.feCode || t.fe_code || t.feId || t.feName || 'unknown').trim().toLowerCase();
+    const taskZone = extractTaskZone(t);
 
     if (!amMap.has(amKey)) {
       amMap.set(amKey, {
         amName: amInfo.amName,
         amEmail: amInfo.amEmail,
-        cities: new Set(),
+        zones: new Set(),
         audited: 0,
         passed: 0,
         fatal: 0,
@@ -1467,7 +1504,7 @@ export function aggregateGmBhExecutiveSummary({
 
     const entry = amMap.get(amKey);
     entry.audited++;
-    if (amInfo.city) entry.cities.add(amInfo.city);
+    if (taskZone) entry.zones.add(taskZone);
     if (isFatal) {
       entry.fatal++;
       entry.fatalFEs.add(feIdentifier);
@@ -1479,7 +1516,8 @@ export function aggregateGmBhExecutiveSummary({
   const amBreakdown = Array.from(amMap.values()).map(m => ({
     amName: m.amName,
     amEmail: m.amEmail,
-    cityList: Array.from(m.cities).join(', ') || 'Central Zone',
+    zoneList: Array.from(m.zones).join(', ') || 'Central Zone',
+    cityList: Array.from(m.zones).join(', ') || 'Central Zone',
     audited: m.audited,
     passed: m.passed,
     fatal: m.fatal,
@@ -1513,12 +1551,13 @@ export function aggregateGmBhExecutiveSummary({
     totalFatal,
     passRate,
     fatalRate,
-    cityBreakdown,
+    zoneBreakdown,
+    cityBreakdown: zoneBreakdown.map(z => ({ ...z, city: z.zone })),
     amBreakdown,
     topFailureReasons,
     portalBaseUrl,
     // Backwards-compatibility aliases
-    hubBreakdown: cityBreakdown.map(c => ({ hub: c.city, ...c })),
+    hubBreakdown: zoneBreakdown.map(z => ({ hub: z.zone, ...z })),
     feFatalList: []
   };
 }
@@ -1535,33 +1574,37 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
     totalFatal,
     passRate,
     fatalRate,
+    zoneBreakdown = [],
     cityBreakdown = [],
     amBreakdown = [],
     topFailureReasons = []
   } = summaryData;
 
+  const effectiveZones = (zoneBreakdown && zoneBreakdown.length > 0) ? zoneBreakdown : cityBreakdown;
+
   const rulesUrl = `${portalBaseUrl}/rules`;
   const auditsUrl = `${portalBaseUrl}/audits`;
 
-  // City & Zone Scorecard Rows
-  const cityRowsHtml = cityBreakdown.length > 0 ? cityBreakdown.map(c => {
-    const statusColor = c.fatal > 0 ? '#DC2626' : '#16A34A';
-    const statusBg = c.fatal > 0 ? '#FEF2F2' : '#F0FDF4';
+  // Zone Performance Scorecard Rows
+  const zoneRowsHtml = effectiveZones.length > 0 ? effectiveZones.map(z => {
+    const zoneName = z.zone || z.city || 'Central Zone';
+    const statusColor = z.fatal > 0 ? '#DC2626' : '#16A34A';
+    const statusBg = z.fatal > 0 ? '#FEF2F2' : '#F0FDF4';
     return `
       <tr style="border-bottom: 1px solid #E2E8F0;">
-        <td style="padding: 10px 14px; font-weight: 700; color: #0F172A; font-size: 13px;">${c.city}</td>
-        <td style="padding: 10px 14px; text-align: center; color: #334155; font-size: 13px;">${c.audited}</td>
-        <td style="padding: 10px 14px; text-align: center; color: #16A34A; font-weight: 700; font-size: 13px;">${c.passed}</td>
-        <td style="padding: 10px 14px; text-align: center; color: ${c.fatal > 0 ? '#DC2626' : '#94A3B8'}; font-weight: 700; font-size: 13px;">${c.fatal}</td>
+        <td style="padding: 10px 14px; font-weight: 700; color: #0F172A; font-size: 13px;">${zoneName}</td>
+        <td style="padding: 10px 14px; text-align: center; color: #334155; font-size: 13px;">${z.audited}</td>
+        <td style="padding: 10px 14px; text-align: center; color: #16A34A; font-weight: 700; font-size: 13px;">${z.passed}</td>
+        <td style="padding: 10px 14px; text-align: center; color: ${z.fatal > 0 ? '#DC2626' : '#94A3B8'}; font-weight: 700; font-size: 13px;">${z.fatal}</td>
         <td style="padding: 10px 14px; text-align: right;">
           <span style="display: inline-block; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; background-color: ${statusBg}; color: ${statusColor};">
-            ${c.passRate}% Pass
+            ${z.passRate}% Pass
           </span>
         </td>
       </tr>
     `;
   }).join('') : `
-    <tr><td colspan="5" style="padding: 16px; text-align: center; color: #94A3B8;">No city activity recorded today.</td></tr>
+    <tr><td colspan="5" style="padding: 16px; text-align: center; color: #94A3B8;">No zone activity recorded today.</td></tr>
   `;
 
   // Area Manager (AM) Supervisory Rows
@@ -1574,7 +1617,7 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
           <strong style="color: #0F172A; font-size: 13px;">${m.amName}</strong>
           ${m.amEmail ? `<br/><span style="color: #64748B; font-size: 11px;">${m.amEmail}</span>` : ''}
         </td>
-        <td style="padding: 10px 14px; font-size: 12px; color: #475569; font-weight: 600;">${m.cityList}</td>
+        <td style="padding: 10px 14px; font-size: 12px; color: #475569; font-weight: 600;">${m.zoneList || m.cityList}</td>
         <td style="padding: 10px 14px; text-align: center; font-size: 13px; color: #334155;">${m.audited}</td>
         <td style="padding: 10px 14px; text-align: center; font-size: 13px; font-weight: 800; color: ${m.fatal > 0 ? '#DC2626' : '#94A3B8'};">
           ${m.fatal}
@@ -1679,14 +1722,14 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
         <!-- Main Body -->
         <div style="padding: 24px;">
 
-          <!-- SECTION 1: City & Zone Quality Scorecard -->
+          <!-- SECTION 1: Zone Quality Performance Scorecard -->
           <h2 style="font-size: 14px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
-            City &amp; Zone Quality Scorecard
+            Zone Quality Performance Scorecard
           </h2>
           <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
             <thead>
               <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
-                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">City / Zone</th>
+                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Zone</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Audited</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #16A34A; text-transform: uppercase;">Passed</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Fatal</th>
@@ -1694,7 +1737,7 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
               </tr>
             </thead>
             <tbody>
-              ${cityRowsHtml}
+              ${zoneRowsHtml}
             </tbody>
           </table>
 
@@ -1706,7 +1749,7 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
             <thead>
               <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
                 <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Area Manager</th>
-                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Zone</th>
+                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Supervised Zone(s)</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Audited</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Fatals</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Pass %</th>
@@ -1769,17 +1812,20 @@ export function buildGmBhExecutiveSummaryText({ summaryData, portalBaseUrl = 'ht
     totalFatal,
     passRate,
     fatalRate,
+    zoneBreakdown = [],
     cityBreakdown = [],
     amBreakdown = [],
     topFailureReasons = []
   } = summaryData;
 
-  const cityText = cityBreakdown.map(c => 
-    `- ${c.city}: Audited: ${c.audited} | Passed: ${c.passed} | Fatal: ${c.fatal} | Pass Rate: ${c.passRate}%`
+  const effectiveZones = (zoneBreakdown && zoneBreakdown.length > 0) ? zoneBreakdown : cityBreakdown;
+
+  const zoneText = effectiveZones.map(z => 
+    `- ${z.zone || z.city}: Audited: ${z.audited} | Passed: ${z.passed} | Fatal: ${z.fatal} | Pass Rate: ${z.passRate}%`
   ).join('\n');
 
   const amText = amBreakdown.map(m =>
-    `- ${m.amName} (${m.cityList}): Audited: ${m.audited} | Passed: ${m.passed} | Fatal: ${m.fatal} | Pass Rate: ${m.passRate}% | Affected FEs: ${m.fatalFEsCount}`
+    `- ${m.amName} (${m.zoneList || m.cityList}): Audited: ${m.audited} | Passed: ${m.passed} | Fatal: ${m.fatal} | Pass Rate: ${m.passRate}% | Affected FEs: ${m.fatalFEsCount}`
   ).join('\n');
 
   const failureText = topFailureReasons.map((r, i) =>
@@ -1800,9 +1846,9 @@ Fatal Strikes:        ${totalFatal}
 Fatal Incident Rate:  ${fatalRate}%
 
 ============================================================
-CITY & ZONE PERFORMANCE SCORECARD:
+ZONE QUALITY PERFORMANCE SCORECARD:
 ============================================================
-${cityText || 'No city activity recorded today.'}
+${zoneText || 'No zone activity recorded today.'}
 
 ============================================================
 AREA MANAGER (AM) SUPERVISORY GOVERNANCE:

@@ -22,7 +22,8 @@ import {
   Play,
   Award,
   Sparkles,
-  Building2
+  Building2,
+  Trash2
 } from 'lucide-react';
 import { 
   normalizeDateToYMD, 
@@ -239,7 +240,7 @@ export default function SuperAdminCronEngine({
       const cEmail = cr.email.trim().toLowerCase();
       if (cEmail && !seen.has(cEmail)) {
         seen.add(cEmail);
-        list.push(cr);
+        list.push({ ...cr, isCustom: true });
       }
     });
 
@@ -267,7 +268,8 @@ export default function SuperAdminCronEngine({
       setCustomLeadershipRecipients(prev => [...prev, {
         name: currentUser?.name || 'You',
         email: myEmail,
-        role: 'Tester'
+        role: 'Tester',
+        isCustom: true
       }]);
     }
     setSelectedLeadershipEmails([myEmail]);
@@ -292,13 +294,24 @@ export default function SuperAdminCronEngine({
       setCustomLeadershipRecipients(prev => [...prev, {
         name: 'Custom Tester',
         email: cleanEmail,
-        role: 'Test'
+        role: 'Test',
+        isCustom: true
       }]);
     }
     if (!selectedLeadershipEmails.includes(cleanEmail)) {
       setSelectedLeadershipEmails(prev => [...prev, cleanEmail]);
     }
     setCustomEmailInput('');
+  };
+
+  const handleDeleteCustomRecipient = (emailToDelete, e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const eNorm = emailToDelete.trim().toLowerCase();
+    setCustomLeadershipRecipients(prev => prev.filter(cr => cr.email.trim().toLowerCase() !== eNorm));
+    setSelectedLeadershipEmails(prev => prev.filter(e => e.trim().toLowerCase() !== eNorm));
   };
 
   // Filter FE digests by search query
@@ -1335,11 +1348,12 @@ export default function SuperAdminCronEngine({
                 {allAvailableLeadershipRecipients.map(r => {
                   const isChecked = selectedLeadershipEmails.includes(r.email.toLowerCase());
                   const isSeniorExec = r.role === 'GM' || r.role === 'BH';
+                  const isCustomRecipient = Boolean(r.isCustom || customLeadershipRecipients.some(cr => cr.email.toLowerCase() === r.email.toLowerCase()));
                   return (
                     <div
                       key={r.email}
                       onClick={() => handleToggleLeadershipRecipient(r.email)}
-                      className={`flex items-start gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer select-none transition-all ${
+                      className={`group flex items-start gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer select-none transition-all ${
                         isChecked
                           ? 'bg-sky-950/40 border-sky-500/40 text-sky-100 shadow-sm'
                           : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:bg-slate-900 hover:text-slate-300'
@@ -1352,17 +1366,31 @@ export default function SuperAdminCronEngine({
                         className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-sky-500 cursor-pointer shrink-0"
                       />
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className={`font-semibold truncate ${isChecked ? 'text-white' : 'text-slate-300'}`}>
-                            {r.name}
-                          </span>
-                          <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded border ${
-                            isSeniorExec
-                              ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
-                              : 'bg-slate-800 text-slate-400 border-slate-700'
-                          }`}>
-                            {r.role}
-                          </span>
+                        <div className="flex items-center justify-between gap-1">
+                          <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                            <span className={`font-semibold truncate ${isChecked ? 'text-white' : 'text-slate-300'}`}>
+                              {r.name}
+                            </span>
+                            <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded border ${
+                              isSeniorExec
+                                ? 'bg-purple-500/10 text-purple-300 border-purple-500/30'
+                                : isCustomRecipient
+                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                  : 'bg-slate-800 text-slate-400 border-slate-700'
+                            }`}>
+                              {r.role}
+                            </span>
+                          </div>
+                          {isCustomRecipient && (
+                            <button
+                              type="button"
+                              onClick={(e) => handleDeleteCustomRecipient(r.email, e)}
+                              title="Delete this test email ID"
+                              className="p-1 rounded-md text-slate-500 hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer shrink-0"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                         <div className="text-[11px] font-mono text-slate-400 truncate mt-0.5">
                           {r.email}
@@ -1504,7 +1532,7 @@ export default function SuperAdminCronEngine({
       {/* EMAIL PREVIEW MODAL */}
       {previewDigest && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-3xl h-[90vh] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
               <div className="flex items-center gap-2">
                 <Mail className="w-4 h-4 text-red-400" />
@@ -1526,8 +1554,12 @@ export default function SuperAdminCronEngine({
               <span><strong>Subject:</strong> [FORMAL WARNING] Lenskart DLC Quality Audit - {previewDigest.fatalCount} Fatal Strike(s)</span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 bg-slate-100">
+            <div 
+              className="flex-1 min-h-0 overflow-y-scroll p-4 bg-slate-100 flex justify-center"
+              style={{ scrollbarWidth: 'thin', scrollbarColor: '#EF4444 #E2E8F0' }}
+            >
               <div 
+                className="w-full max-w-[700px] shadow-2xl rounded-xl overflow-hidden self-start my-2"
                 dangerouslySetInnerHTML={{ 
                   __html: buildFeFatalWarningEmailHtml({ 
                     feDigest: previewDigest, 
@@ -1543,7 +1575,7 @@ export default function SuperAdminCronEngine({
       {/* TEAM DIGEST PREVIEW MODAL (CONSOLIDATED FOR AM & RM) */}
       {previewTeamDigest && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl h-[92vh] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
               <div className="flex items-center gap-2">
                 <Building2 className="w-5 h-5 text-purple-400" />
@@ -1587,9 +1619,12 @@ export default function SuperAdminCronEngine({
               </span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 bg-slate-900/60 flex justify-center">
+            <div 
+              className="flex-1 min-h-0 overflow-y-scroll p-4 bg-slate-900/60 flex justify-center"
+              style={{ scrollbarWidth: 'thin', scrollbarColor: '#A855F7 #0F172A' }}
+            >
               <div 
-                className="w-full max-w-[700px] shadow-2xl rounded-xl overflow-hidden"
+                className="w-full max-w-[700px] shadow-2xl rounded-xl overflow-hidden self-start my-2"
                 dangerouslySetInnerHTML={{ 
                   __html: buildAmRmConsolidatedTeamDigestHtml({ 
                     managerSummary: previewTeamDigest, 
@@ -1605,7 +1640,7 @@ export default function SuperAdminCronEngine({
       {/* GM & BH EXECUTIVE SUMMARY EMAIL PREVIEW MODAL */}
       {showExecutivePreviewModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl h-[92vh] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
               <div className="flex items-center gap-2">
                 <Award className="w-5 h-5 text-amber-400" />
@@ -1662,9 +1697,15 @@ export default function SuperAdminCronEngine({
               </span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 bg-slate-900/60 flex justify-center">
+            <div 
+              className="flex-1 min-h-0 overflow-y-scroll p-4 bg-slate-950/80 flex justify-center"
+              style={{
+                scrollbarWidth: 'thin',
+                scrollbarColor: '#38BDF8 #0F172A'
+              }}
+            >
               <div 
-                className="w-full max-w-[700px] shadow-2xl rounded-xl overflow-hidden"
+                className="w-full max-w-[700px] shadow-2xl rounded-xl overflow-hidden self-start my-2"
                 dangerouslySetInnerHTML={{ 
                   __html: buildGmBhExecutiveSummaryHtml({ 
                     summaryData: executiveSummary, 
