@@ -894,12 +894,10 @@ export default function App() {
         setUsers(prev => [...result.imported, ...prev]);
       }
 
-      if (result.insertedCount > 0 && result.skippedCount > 0) {
-        showToast(`Imported ${result.insertedCount} new users into Supabase. Skipped ${result.skippedCount} existing.`, 'success');
-      } else if (result.insertedCount > 0) {
-        showToast(`Successfully added ${result.insertedCount} users directly to Supabase!`, 'success');
+      if (result.updatedCount > 0 || result.insertedCount > 0) {
+        showToast(`Sync complete: ${result.insertedCount} new users added, ${result.updatedCount} manager mappings updated in Supabase!`, 'success');
       } else {
-        showToast(`All ${result.skippedCount} users already exist in Supabase database (skipped).`, 'info');
+        showToast(`Sync complete: All ${result.unchangedCount || result.skippedCount || parsedRows.length} users are already up-to-date.`, 'info');
       }
 
       return result;

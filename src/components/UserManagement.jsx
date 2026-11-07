@@ -18,7 +18,9 @@ import {
   ChevronUp,
   X,
   Info,
-  Key
+  Key,
+  RefreshCw,
+  Check
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parseRoles, normalizeRoleName, displayRoleName } from '../utils/accessHelper.js';
@@ -49,6 +51,7 @@ export default function UserManagement({
   const [showAddModal, setShowAddModal] = useState(false);
   const [importNotification, setImportNotification] = useState(null);
   const [showSkippedDetails, setShowSkippedDetails] = useState(false);
+  const [showUpdatedDetails, setShowUpdatedDetails] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -269,17 +272,38 @@ export default function UserManagement({
             return '';
           };
 
-          const employeeCode = findVal(['employee_code', 'employeecode', 'employee code', 'person code', 'person id', 'rider id']) || `EMP_${idx + 1}`;
-          const facilityCode = findVal(['facility_code', 'facilitycode', 'facility code', 'hub']) || 'Ahmedabad';
-          const fullName = findVal(['name', 'full name', 'employee name']) || '';
+          const employeeCode = findVal(['employee_code', 'employeecode', 'employee code', 'person code', 'person id', 'rider id', 'riderid', 'fe code', 'fecode', 'fe id']) || `EMP_${idx + 1}`;
+          const facilityCode = findVal(['facility_code', 'facilitycode', 'facility code', 'hub']) || '';
+          let fullName = findVal(['name', 'full name', 'employee name', 'rider name', 'ridername', 'fe name', 'fename']) || '';
           const rawRole = findVal(['role', 'user role', 'designation']) || 'Auditor';
           const mobile = findVal(['mobile', 'phone', 'phone no', 'contact']) || '';
-          const email = findVal(['email', 'users email', 'user email', 'mail']).toLowerCase();
-          const amName = findVal(['am', 'area manager', 'reporting manager', 'reporting_manager']);
-          const rmName = findVal(['rm', 'regional manager', 'regional_manager']);
+          let email = findVal(['email', 'users email', 'user email', 'mail', 'fe email', 'feemail', 'rider email']).toLowerCase();
+          const amName = findVal(['am', 'area manager', 'reporting manager', 'reporting_manager', 'am name', 'amname', 'areamanager']);
+          const amEmailDirect = findVal(['am_email', 'amemail', 'am email', 'reporting_manager_email', 'reporting manager email']).toLowerCase();
+          const rmName = findVal(['rm', 'regional manager', 'regional_manager', 'rm name', 'rmname', 'regionalmanager']);
+          const rmEmailDirect = findVal(['rm_email', 'rmemail', 'rm email', 'regional_manager_email', 'regional manager email']).toLowerCase();
           const isActiveRaw = findVal(['is_active', 'isactive', 'is active', 'status', 'active']);
-          const city = findVal(['city']) || facilityCode || 'Ahmedabad';
-          const zone = findVal(['zone']) || 'Ahmedabad_Zone1';
+          const city = findVal(['city', 'city name', 'location']) || facilityCode || '';
+          const zone = findVal(['zone', 'hub zone', 'operations zone', 'territory', 'cluster zone']) || '';
+
+          // Backfill email or name from existing profiles if omitted in sheet row
+          if (!email && employeeCode) {
+            const matchedUser = (users || []).find(u => 
+              String(u.employee_code || u.person_id || '').trim().toLowerCase() === employeeCode.toLowerCase()
+            );
+            if (matchedUser?.email) {
+              email = matchedUser.email.toLowerCase();
+            }
+          }
+          if (!fullName && employeeCode) {
+            const matchedUser = (users || []).find(u => 
+              String(u.employee_code || u.person_id || '').trim().toLowerCase() === employeeCode.toLowerCase() ||
+              (email && u.email?.toLowerCase() === email.toLowerCase())
+            );
+            if (matchedUser?.full_name) {
+              fullName = matchedUser.full_name;
+            }
+          }
 
           // Validate or fallback roles (supports multi-role strings like "City Admin, Auditor" or "SuperAdmin, Admin")
           const finalRoles = parseRoles(rawRole);
@@ -304,16 +328,18 @@ export default function UserManagement({
             mobile,
             is_active: isActive,
             am_name: amName,
+            am_email: amEmailDirect,
             rm_name: rmName,
+            rm_email: rmEmailDirect,
             reporting_manager_name: amName,
             regional_manager_name: rmName,
             reporting_manager_id: null,
             regional_manager_id: null,
-            reporting_manager_email: '',
-            regional_manager_email: '',
+            reporting_manager_email: amEmailDirect,
+            regional_manager_email: rmEmailDirect,
             created_at: new Date().toISOString()
           };
-        }).filter(u => u.email && u.full_name);
+        }).filter(u => u.email || u.employee_code);
 
         // Pass 2: Relational Foreign Key Resolution (match AM & RM names to profile UUID and email)
         const allKnown = [...users, ...rawParsedUsers];
@@ -339,18 +365,21 @@ export default function UserManagement({
             );
           }
 
+          const finalAmEmail = u.am_email || (amMatch ? amMatch.email : (u.am_name && u.am_name.includes('@') ? u.am_name : ''));
+          const finalRmEmail = u.rm_email || (rmMatch ? rmMatch.email : (u.rm_name && u.rm_name.includes('@') ? u.rm_name : ''));
+
           return {
             ...u,
             reporting_manager_id: amMatch ? amMatch.id : null,
             reporting_manager_name: amMatch ? amMatch.full_name : u.am_name,
-            reporting_manager_email: amMatch ? amMatch.email : (u.am_name.includes('@') ? u.am_name : ''),
+            reporting_manager_email: finalAmEmail,
             regional_manager_id: rmMatch ? rmMatch.id : null,
             regional_manager_name: rmMatch ? rmMatch.full_name : u.rm_name,
-            regional_manager_email: rmMatch ? rmMatch.email : (u.rm_name.includes('@') ? u.rm_name : '')
+            regional_manager_email: finalRmEmail
           };
         });
 
-        // Step 3: Trigger Supabase Direct Import with single-row skip deduplication
+        // Step 3: Trigger Supabase Direct Differential Synchronization
         let result = null;
         if (onImportUsers) {
           result = await onImportUsers(newUsers);
@@ -362,16 +391,23 @@ export default function UserManagement({
           }
         }
 
-        const insertedCount = result?.insertedCount ?? newUsers.length;
-        const skippedCount = result?.skippedCount ?? 0;
+        const insertedCount = result?.insertedCount ?? 0;
+        const updatedCount = result?.updatedCount ?? 0;
+        const unchangedCount = result?.unchangedCount ?? (result?.skippedCount ?? 0);
+        const updated = result?.updated ?? [];
         const skipped = result?.skipped ?? [];
+        const errors = result?.errors ?? [];
 
         setImportNotification({
           fileName: file.name,
           total: newUsers.length,
           insertedCount,
-          skippedCount,
-          skipped
+          updatedCount,
+          unchangedCount,
+          skippedCount: unchangedCount,
+          updated,
+          skipped,
+          errors
         });
         setShowSkippedDetails(false);
       } catch (err) {
@@ -445,12 +481,12 @@ export default function UserManagement({
             {isImporting ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Syncing to Supabase...</span>
+                <span>Syncing Mappings to Supabase...</span>
               </>
             ) : (
               <>
                 <Upload className="w-3.5 h-3.5" />
-                <span>Import Users from Excel</span>
+                <span>Sync &amp; Update Mappings (Excel)</span>
               </>
             )}
           </button>
@@ -466,26 +502,28 @@ export default function UserManagement({
         </div>
       </div>
 
-      {/* Import Notification Banner with Duplicate Skipped Breakdown */}
+      {/* Import Notification Banner with Differential Sync Breakdown */}
       {importNotification && (
         <div className={`p-4 rounded-xl border text-xs animate-in fade-in space-y-3 ${
-          importNotification.insertedCount > 0 
+          (importNotification.insertedCount > 0 || importNotification.updatedCount > 0)
             ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200' 
-            : 'bg-amber-950/40 border-amber-500/40 text-amber-200'
+            : 'bg-slate-900 border-slate-700 text-slate-200'
         }`}>
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-2.5">
-              {importNotification.insertedCount > 0 ? (
+              {(importNotification.insertedCount > 0 || importNotification.updatedCount > 0) ? (
                 <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
               ) : (
-                <Info className="w-5 h-5 text-amber-400 shrink-0" />
+                <Info className="w-5 h-5 text-sky-400 shrink-0" />
               )}
               <div>
                 <span className="font-bold text-white text-sm">
-                  {importNotification.insertedCount > 0 ? 'Supabase Sync Completed' : 'Import Complete (No New Users Needed)'}
+                  {(importNotification.insertedCount > 0 || importNotification.updatedCount > 0)
+                    ? 'Supabase Mapping Sync Completed' 
+                    : 'Mapping Sync Complete (No Database Changes Needed)'}
                 </span>
                 <p className="text-slate-300 text-xs mt-0.5">
-                  Processed <code className="font-mono text-white font-semibold">{importNotification.fileName}</code> with automatic duplicate protection.
+                  Processed <code className="font-mono text-white font-semibold">{importNotification.fileName}</code>. New users were added and updated manager mappings were saved directly into Supabase.
                 </p>
               </div>
             </div>
@@ -501,39 +539,94 @@ export default function UserManagement({
 
           {/* Summary Badges */}
           <div className="flex flex-wrap items-center gap-2 pt-1">
-            <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>+{importNotification.insertedCount} New Users Added to Supabase</span>
+            {importNotification.updatedCount > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-sky-500/20 text-sky-300 font-bold border border-sky-500/30 flex items-center gap-1.5">
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>{importNotification.updatedCount} Manager &amp; Zone Mappings Updated</span>
+              </span>
+            )}
+
+            {importNotification.insertedCount > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>+{importNotification.insertedCount} New Users Added to Supabase</span>
+              </span>
+            )}
+
+            <span className="px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 font-medium border border-slate-700 flex items-center gap-1.5">
+              <Check className="w-3.5 h-3.5 text-slate-400" />
+              <span>{importNotification.unchangedCount || importNotification.skippedCount || 0} Already Up-to-Date</span>
             </span>
 
-            <span className={`px-2.5 py-1 rounded-lg font-bold border flex items-center gap-1.5 ${
-              importNotification.skippedCount > 0 
-                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' 
-                : 'bg-slate-800 text-slate-400 border-slate-700'
-            }`}>
-              <AlertCircle className="w-3.5 h-3.5" />
-              <span>{importNotification.skippedCount} Existing Users Skipped</span>
-            </span>
+            {importNotification.errors && importNotification.errors.length > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-red-500/20 text-red-300 font-bold border border-red-500/30 flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>{importNotification.errors.length} Warning(s)</span>
+              </span>
+            )}
+
+            {importNotification.updatedCount > 0 && (
+              <button
+                onClick={() => setShowUpdatedDetails(prev => !prev)}
+                className="ml-auto text-xs font-semibold text-sky-400 hover:text-sky-300 underline flex items-center gap-1 cursor-pointer"
+              >
+                <span>{showUpdatedDetails ? 'Hide' : 'View'} Updated Mappings ({importNotification.updatedCount})</span>
+                {showUpdatedDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+            )}
 
             {importNotification.skippedCount > 0 && (
               <button
                 onClick={() => setShowSkippedDetails(prev => !prev)}
-                className="ml-auto text-xs font-semibold text-sky-400 hover:text-sky-300 underline flex items-center gap-1 cursor-pointer"
+                className="text-xs font-semibold text-slate-400 hover:text-slate-200 underline flex items-center gap-1 cursor-pointer ml-2"
               >
-                <span>{showSkippedDetails ? 'Hide' : 'View'} Skipped Details ({importNotification.skippedCount})</span>
+                <span>{showSkippedDetails ? 'Hide' : 'View'} Unchanged ({importNotification.skippedCount})</span>
                 {showSkippedDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               </button>
             )}
           </div>
 
-          {/* Collapsible Skipped Rows Details Table */}
+          {/* Collapsible Updated Mappings Details Table */}
+          {showUpdatedDetails && importNotification.updated && importNotification.updated.length > 0 && (
+            <div className="mt-3 bg-slate-950/80 rounded-xl border border-sky-500/30 p-3 space-y-2">
+              <div className="font-semibold text-sky-300 text-[11px] flex items-center justify-between">
+                <span>Updated Profiles in Supabase ({importNotification.updated.length}):</span>
+                <span className="text-slate-500 font-mono text-[10px]">Changes saved directly to database</span>
+              </div>
+              <div className="max-h-56 overflow-y-auto space-y-2 pr-1" style={{ scrollbarWidth: 'thin' }}>
+                {importNotification.updated.map((u, uIdx) => (
+                  <div key={uIdx} className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 space-y-1.5 text-[11px]">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                      <div>
+                        <strong className="text-white text-xs mr-2">{u.full_name}</strong>
+                        <span className="font-mono text-sky-400 text-[10px]">[{u.employee_code || 'ID'}]</span>
+                        <span className="text-slate-400 font-mono ml-2">{u.email}</span>
+                      </div>
+                      <span className="text-sky-300 font-bold text-[10px] bg-sky-500/10 px-2 py-0.5 rounded border border-sky-500/20 self-start sm:self-auto">
+                        {u.changeLogs?.length || 1} Field(s) Updated
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                      {u.changeLogs?.map((log, li) => (
+                        <span key={li} className="px-2 py-0.5 rounded bg-slate-800/90 text-slate-200 border border-slate-700 font-mono text-[10px]">
+                          {log}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Collapsible Unchanged Rows Details Table */}
           {showSkippedDetails && importNotification.skipped && importNotification.skipped.length > 0 && (
             <div className="mt-3 bg-slate-950/80 rounded-xl border border-slate-800 p-3 space-y-2">
               <div className="font-semibold text-slate-300 text-[11px] flex items-center justify-between">
-                <span>Skipped Rows (Already Registered in Supabase):</span>
-                <span className="text-slate-500 font-mono">Row-by-row bypass</span>
+                <span>Unchanged Profiles (Already Matching Sheet Mappings):</span>
+                <span className="text-slate-500 font-mono text-[10px]">No database writes needed</span>
               </div>
-              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1" style={{ scrollbarWidth: 'thin' }}>
                 {importNotification.skipped.map((s, sIdx) => (
                   <div key={sIdx} className="p-2 rounded-lg bg-slate-900 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
                     <div>
@@ -541,8 +634,8 @@ export default function UserManagement({
                       <span className="font-mono text-sky-400 text-[10px]">[{s.employee_code || s.person_id || 'ID'}]</span>
                       <span className="text-slate-400 ml-2 font-mono">{s.email}</span>
                     </div>
-                    <span className="text-amber-400/90 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20 font-mono text-[10px] shrink-0">
-                      {s.skipReason || 'Already exists in database'}
+                    <span className="text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700 font-mono text-[10px] shrink-0">
+                      {s.skipReason || 'Already Up-to-Date'}
                     </span>
                   </div>
                 ))}

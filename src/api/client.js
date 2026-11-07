@@ -1456,248 +1456,326 @@ export const usersApi = {
     }
   },
 
-  // Bulk import users with automatic duplicate checking and direct database insertion
+  // Smart sync & differential update for user profiles and manager mappings
+  // Inserts new users, updates existing users when AM/RM/Zone/City mappings change, and skips unchanged rows
   async importUsers(parsedUsers) {
     if (!parsedUsers || parsedUsers.length === 0) {
-      return { insertedCount: 0, skippedCount: 0, imported: [], skipped: [] };
+      return { 
+        totalProcessed: 0,
+        insertedCount: 0, 
+        updatedCount: 0, 
+        unchangedCount: 0, 
+        skippedCount: 0, 
+        imported: [], 
+        updated: [], 
+        skipped: [],
+        errors: [] 
+      };
     }
 
     if (!supabase) {
       // Local fallback mode when Supabase is not configured
       return {
+        totalProcessed: parsedUsers.length,
         insertedCount: parsedUsers.length,
+        updatedCount: 0,
+        unchangedCount: 0,
         skippedCount: 0,
         imported: parsedUsers,
-        skipped: []
+        updated: [],
+        skipped: [],
+        errors: []
       };
     }
 
-    // Step A: Fetch all existing user emails and employee codes from Supabase
-    let existingEmails = new Set();
-    let existingPersonIds = new Set();
-
+    // Step A: Fetch all existing profiles from Supabase
+    let existingProfiles = [];
     try {
-      const { data: existingProfiles, error: fetchErr } = await supabase
-        .from('profiles')
-        .select('id, email, person_id, employee_code, full_name');
+      let from = 0;
+      const pageSize = 1000;
+      let hasMore = true;
 
-      if (!fetchErr && existingProfiles) {
-        existingProfiles.forEach(p => {
-          if (p.email) existingEmails.add(p.email.trim().toLowerCase());
-          if (p.person_id) existingPersonIds.add(String(p.person_id).trim().toLowerCase());
-          if (p.employee_code) existingPersonIds.add(String(p.employee_code).trim().toLowerCase());
-        });
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('id, email, full_name, role, roles, facility_code, city, zone, person_id, employee_code, phone, mobile, reporting_manager_name, reporting_manager_email, reporting_manager_id, regional_manager_name, regional_manager_email, regional_manager_id, is_active')
+          .range(from, from + pageSize - 1);
+
+        if (error) {
+          console.warn('Could not query existing profiles for differential sync:', error.message);
+          break;
+        }
+
+        if (data && data.length > 0) {
+          existingProfiles.push(...data);
+          if (data.length < pageSize) hasMore = false;
+          else from += pageSize;
+        } else {
+          hasMore = false;
+        }
       }
     } catch (fetchEx) {
-      console.warn('Could not query existing profiles for deduplication:', fetchEx.message);
+      console.warn('Exception querying existing profiles:', fetchEx.message);
     }
+
+    // Step B: Index existing profiles by email and employee_code / person_id
+    const existingByEmail = new Map();
+    const existingByCode = new Map();
+
+    existingProfiles.forEach(p => {
+      const em = (p.email || '').trim().toLowerCase();
+      const code = String(p.employee_code || p.person_id || '').trim().toLowerCase();
+      if (em) existingByEmail.set(em, p);
+      if (code) existingByCode.set(code, p);
+    });
+
+    // Step C: Build a comprehensive directory of all known users (existing + sheet) for AM/RM relational resolution
+    const allKnownUsers = [...existingProfiles, ...parsedUsers];
+    const findManager = (targetQuery) => {
+      if (!targetQuery) return null;
+      const target = String(targetQuery).trim().toLowerCase();
+      if (!target) return null;
+      return allKnownUsers.find(u => {
+        const uEmail = String(u.email || '').trim().toLowerCase();
+        const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+        const uCode = String(u.employee_code || u.person_id || '').trim().toLowerCase();
+        return uEmail === target || uName === target || uCode === target;
+      });
+    };
+
+    const strDiffers = (newVal, oldVal) => {
+      if (newVal === undefined || newVal === null) return false;
+      const sNew = String(newVal).trim();
+      if (!sNew) return false; // don't overwrite existing with blank
+      const sOld = String(oldVal || '').trim();
+      return sNew.toLowerCase() !== sOld.toLowerCase();
+    };
 
     const rowsToInsert = [];
-    const skippedRows = [];
+    const usersToUpdate = [];
+    const unchangedUsers = [];
+    const errors = [];
 
-    // Step B: Check each row — if user already exists, SKIP THAT ROW ONLY and proceed!
+    // Step D: Differential Comparison for each row
     for (const row of parsedUsers) {
-      const email = (row.email || '').trim().toLowerCase();
+      const email = String(row.email || '').trim().toLowerCase();
       const code = String(row.employee_code || row.person_id || '').trim().toLowerCase();
 
-      const emailMatches = email && existingEmails.has(email);
-      const codeMatches = code && existingPersonIds.has(code);
+      // Find match in existing database records
+      const existing = (email && existingByEmail.get(email)) || (code && existingByCode.get(code));
 
-      if (emailMatches || codeMatches) {
-        const reason = emailMatches 
-          ? `Email '${email}' is already registered` 
-          : `Employee Code '${code}' already exists in database`;
-        
-        skippedRows.push({
-          ...row,
-          skipReason: reason
-        });
-        continue; // SKIP THIS ROW ONLY!
-      }
+      // Resolve Area Manager (AM)
+      const rawAmName = String(row.am_name || row.reporting_manager_name || row.amName || '').trim();
+      const rawAmEmail = String(row.reporting_manager_email || row.am_email || row.amEmail || '').trim().toLowerCase();
+      const resolvedAm = findManager(rawAmEmail || rawAmName);
+      const finalAmName = rawAmName || (resolvedAm?.full_name || '');
+      const finalAmEmail = rawAmEmail || (resolvedAm?.email || (rawAmName.includes('@') ? rawAmName : ''));
+      const finalAmId = resolvedAm?.id || null;
 
-      // Track within this batch to prevent intra-sheet duplicates
-      if (email) existingEmails.add(email);
-      if (code) existingPersonIds.add(code);
+      // Resolve Regional Manager (RM)
+      const rawRmName = String(row.rm_name || row.regional_manager_name || row.rmName || '').trim();
+      const rawRmEmail = String(row.regional_manager_email || row.rm_email || row.rmEmail || '').trim().toLowerCase();
+      const resolvedRm = findManager(rawRmEmail || rawRmName);
+      const finalRmName = rawRmName || (resolvedRm?.full_name || '');
+      const finalRmEmail = rawRmEmail || (resolvedRm?.email || (rawRmName.includes('@') ? rawRmName : ''));
+      const finalRmId = resolvedRm?.id || null;
 
-      rowsToInsert.push(row);
-    }
-
-    if (rowsToInsert.length === 0) {
-      return {
-        insertedCount: 0,
-        skippedCount: skippedRows.length,
-        imported: [],
-        skipped: skippedRows
-      };
-    }
-
-    // Step C: Attempt direct server-side auth & profile creation via RPC in micro-batches (e.g. 60 rows)
-    // Micro-batching prevents statement timeouts and HTTP limits when importing large spreadsheets (500+ rows)!
-    const BATCH_SIZE = 60;
-    let rpcSuccess = false;
-    let totalRpcInserted = 0;
-    let totalRpcSkipped = 0;
-    const allRpcInserted = [];
-    const allRpcSkipped = [...skippedRows];
-
-    try {
-      for (let i = 0; i < rowsToInsert.length; i += BATCH_SIZE) {
-        const batch = rowsToInsert.slice(i, i + BATCH_SIZE);
-        const { data: rpcResult, error: rpcError } = await supabase.rpc('bulk_register_lenskart_users', {
-          users_payload: batch
-        });
-
-        if (rpcError) {
-          throw rpcError;
-        }
-
-        if (rpcResult) {
-          rpcSuccess = true;
-          totalRpcInserted += (rpcResult.insertedCount ?? 0);
-          totalRpcSkipped += (rpcResult.skippedCount ?? 0);
-          if (rpcResult.inserted) allRpcInserted.push(...rpcResult.inserted);
-          if (rpcResult.skipped) allRpcSkipped.push(...rpcResult.skipped);
-        }
-      }
-
-      if (rpcSuccess) {
-        return {
-          insertedCount: totalRpcInserted,
-          skippedCount: totalRpcSkipped + skippedRows.length,
-          imported: allRpcInserted,
-          skipped: allRpcSkipped
+      if (!existing) {
+        // CASE 1: Brand New User -> Prepare for Insertion
+        const fallbackEmail = email || `${code || 'user_' + Date.now()}@lenskart.in`;
+        const newRecord = {
+          email: fallbackEmail,
+          full_name: (row.full_name || row.name || fallbackEmail.split('@')[0] || 'Employee').trim(),
+          role: row.role || 'Auditor',
+          roles: Array.isArray(row.roles) && row.roles.length > 0 ? row.roles : [row.role || 'Auditor'],
+          facility_code: row.facility_code || row.city || 'Ahmedabad Hub',
+          city: row.city || row.facility_code || 'Ahmedabad',
+          zone: row.zone || 'Ahmedabad_Zone1',
+          person_id: row.employee_code || row.person_id || code,
+          employee_code: row.employee_code || row.person_id || code,
+          phone: row.phone || row.mobile || '',
+          reporting_manager_name: finalAmName,
+          reporting_manager_email: finalAmEmail,
+          reporting_manager_id: finalAmId,
+          regional_manager_name: finalRmName,
+          regional_manager_email: finalRmEmail,
+          regional_manager_id: finalRmId,
+          is_active: row.is_active !== undefined ? row.is_active : true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
         };
+        rowsToInsert.push(newRecord);
+      } else {
+        // CASE 2: Existing User -> Check for Mapping & Attribute Updates
+        const diff = {};
+        const changeLogs = [];
+
+        // AM Mapping (Area Manager)
+        if (finalAmName && strDiffers(finalAmName, existing.reporting_manager_name)) {
+          diff.reporting_manager_name = finalAmName;
+          changeLogs.push(`AM: "${existing.reporting_manager_name || 'None'}" → "${finalAmName}"`);
+        }
+        if (finalAmEmail && strDiffers(finalAmEmail, existing.reporting_manager_email)) {
+          diff.reporting_manager_email = finalAmEmail;
+          changeLogs.push(`AM Email: "${existing.reporting_manager_email || 'None'}" → "${finalAmEmail}"`);
+        }
+        if (finalAmId && finalAmId !== existing.reporting_manager_id) {
+          diff.reporting_manager_id = finalAmId;
+        }
+
+        // RM Mapping (Regional Manager)
+        if (finalRmName && strDiffers(finalRmName, existing.regional_manager_name)) {
+          diff.regional_manager_name = finalRmName;
+          changeLogs.push(`RM: "${existing.regional_manager_name || 'None'}" → "${finalRmName}"`);
+        }
+        if (finalRmEmail && strDiffers(finalRmEmail, existing.regional_manager_email)) {
+          diff.regional_manager_email = finalRmEmail;
+          changeLogs.push(`RM Email: "${existing.regional_manager_email || 'None'}" → "${finalRmEmail}"`);
+        }
+        if (finalRmId && finalRmId !== existing.regional_manager_id) {
+          diff.regional_manager_id = finalRmId;
+        }
+
+        // Operations Zone
+        if (row.zone && row.zone !== 'Unknown Zone' && strDiffers(row.zone, existing.zone)) {
+          diff.zone = row.zone;
+          changeLogs.push(`Zone: "${existing.zone || 'None'}" → "${row.zone}"`);
+        }
+
+        // City & Hub
+        if (row.city && strDiffers(row.city, existing.city)) {
+          diff.city = row.city;
+          changeLogs.push(`City: "${existing.city || 'None'}" → "${row.city}"`);
+        }
+        if (row.facility_code && strDiffers(row.facility_code, existing.facility_code)) {
+          diff.facility_code = row.facility_code;
+        }
+
+        // Phone / Mobile
+        const sheetPhone = row.phone || row.mobile || '';
+        if (sheetPhone && strDiffers(sheetPhone, existing.phone || existing.mobile)) {
+          diff.phone = sheetPhone;
+          diff.mobile = sheetPhone;
+          changeLogs.push(`Phone: "${existing.phone || existing.mobile || 'None'}" → "${sheetPhone}"`);
+        }
+
+        // Full Name
+        if (row.full_name && strDiffers(row.full_name, existing.full_name) && !row.full_name.startsWith('Employee ')) {
+          diff.full_name = row.full_name;
+          changeLogs.push(`Name: "${existing.full_name}" → "${row.full_name}"`);
+        }
+
+        // Employee Code (backfill if existing was blank)
+        if (code && !existing.employee_code && !existing.person_id) {
+          diff.employee_code = code;
+          diff.person_id = code;
+          changeLogs.push(`Employee Code backfilled: "${code}"`);
+        }
+
+        if (Object.keys(diff).length > 0) {
+          diff.updated_at = new Date().toISOString();
+          usersToUpdate.push({
+            id: existing.id,
+            email: existing.email,
+            full_name: existing.full_name,
+            employee_code: existing.employee_code || existing.person_id || '',
+            updates: diff,
+            changeLogs
+          });
+        } else {
+          unchangedUsers.push({
+            id: existing.id,
+            email: existing.email,
+            full_name: existing.full_name,
+            employee_code: existing.employee_code || existing.person_id || '',
+            reporting_manager_name: existing.reporting_manager_name,
+            regional_manager_name: existing.regional_manager_name,
+            zone: existing.zone
+          });
+        }
       }
-    } catch (rpcEx) {
-      console.warn('RPC bulk_register_lenskart_users fallback to direct table write:', rpcEx.message);
     }
 
-    // Fallback: Direct insert/sync profiles into public.profiles
+    // Step E: Apply Updates in Supabase
+    const successfullyUpdated = [];
+    const UPDATE_CHUNK_SIZE = 25;
+    for (let i = 0; i < usersToUpdate.length; i += UPDATE_CHUNK_SIZE) {
+      const chunk = usersToUpdate.slice(i, i + UPDATE_CHUNK_SIZE);
+      await Promise.all(chunk.map(async (u) => {
+        try {
+          let query = supabase.from('profiles').update(u.updates);
+          if (u.id && !String(u.id).startsWith('usr_')) {
+            query = query.eq('id', u.id);
+          } else if (u.email) {
+            query = query.eq('email', u.email);
+          } else {
+            query = query.eq('id', u.id);
+          }
+
+          const { error: updErr } = await query;
+          if (updErr) {
+            console.warn(`Error updating profile ${u.email}:`, updErr.message);
+            errors.push(`${u.full_name} (${u.email}): ${updErr.message}`);
+          } else {
+            successfullyUpdated.push(u);
+          }
+        } catch (updEx) {
+          errors.push(`${u.full_name} (${u.email}): ${updEx.message}`);
+        }
+      }));
+    }
+
+    // Step F: Apply Inserts in Supabase
     const successfullyInserted = [];
-
-    for (const u of rowsToInsert) {
-      const cleanEmail = u.email.trim().toLowerCase();
-      const cleanName = (u.full_name || cleanEmail.split('@')[0]).trim();
-      const cleanCode = String(u.employee_code || u.person_id || '').trim();
-
-      const profilePayload = {
-        email: cleanEmail,
-        full_name: cleanName,
-        role: u.role || 'Auditor',
-        roles: Array.isArray(u.roles) && u.roles.length > 0 ? u.roles : [u.role || 'Auditor'],
-        facility_code: u.facility_code || u.city || 'Ahmedabad Hub',
-        city: u.city || u.facility_code || 'Ahmedabad',
-        zone: u.zone || 'Ahmedabad_Zone1',
-        person_id: cleanCode,
-        employee_code: cleanCode,
-        phone: u.phone || u.mobile || '',
-        reporting_manager_name: u.am_name || u.reporting_manager_name || '',
-        regional_manager_name: u.rm_name || u.regional_manager_name || '',
-        reporting_manager_email: u.reporting_manager_email || '',
-        regional_manager_email: u.regional_manager_email || '',
-        is_active: u.is_active !== undefined ? u.is_active : true,
-        updated_at: new Date().toISOString()
-      };
-
+    const INSERT_CHUNK_SIZE = 50;
+    for (let i = 0; i < rowsToInsert.length; i += INSERT_CHUNK_SIZE) {
+      const chunk = rowsToInsert.slice(i, i + INSERT_CHUNK_SIZE);
       try {
-        const { data: inserted, error: insertErr } = await supabase
+        const { data: insData, error: insErr } = await supabase
           .from('profiles')
-          .insert(profilePayload)
-          .select()
-          .single();
+          .insert(chunk)
+          .select('id, email, full_name, employee_code, role, reporting_manager_name, regional_manager_name, zone');
 
-        if (insertErr) {
-          console.warn(`Profile insert error for ${cleanEmail}:`, insertErr.message);
-          // Fallback to upsert on email conflict
-          const { data: upserted } = await supabase
-            .from('profiles')
-            .upsert(profilePayload, { onConflict: 'email' })
-            .select()
-            .single();
-
-          if (upserted) successfullyInserted.push(upserted);
-        } else if (inserted) {
-          successfullyInserted.push(inserted);
-        }
-      } catch (insertEx) {
-        console.warn(`Error writing profile for ${cleanEmail}:`, insertEx.message);
-      }
-    }
-
-    // Step D: Pass 2 — Establish Relational Foreign Keys (UUID) for AM and RM
-    try {
-      const { data: allCurrentProfiles } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, person_id, employee_code');
-
-      if (allCurrentProfiles && allCurrentProfiles.length > 0) {
-        for (const prof of successfullyInserted) {
-          const amTarget = (prof.reporting_manager_name || '').trim().toLowerCase();
-          const rmTarget = (prof.regional_manager_name || '').trim().toLowerCase();
-
-          if (!amTarget && !rmTarget) continue;
-
-          let amMatch = null;
-          let rmMatch = null;
-
-          if (amTarget) {
-            amMatch = allCurrentProfiles.find(p => 
-              p.full_name?.trim().toLowerCase() === amTarget ||
-              p.email?.trim().toLowerCase() === amTarget ||
-              p.person_id?.trim().toLowerCase() === amTarget ||
-              p.employee_code?.trim().toLowerCase() === amTarget
-            );
-          }
-
-          if (rmTarget) {
-            rmMatch = allCurrentProfiles.find(p => 
-              p.full_name?.trim().toLowerCase() === rmTarget ||
-              p.email?.trim().toLowerCase() === rmTarget ||
-              p.person_id?.trim().toLowerCase() === rmTarget ||
-              p.employee_code?.trim().toLowerCase() === rmTarget
-            );
-          }
-
-          if (amMatch || rmMatch) {
-            const updates = {};
-            if (amMatch) {
-              updates.reporting_manager_id = amMatch.id;
-              updates.reporting_manager_name = amMatch.full_name;
-              updates.reporting_manager_email = amMatch.email;
-            }
-            if (rmMatch) {
-              updates.regional_manager_id = rmMatch.id;
-              updates.regional_manager_name = rmMatch.full_name;
-              updates.regional_manager_email = rmMatch.email;
-            }
-
-            await supabase
+        if (!insErr && insData) {
+          successfullyInserted.push(...insData);
+        } else if (insErr) {
+          // Fallback row-by-row
+          for (const row of chunk) {
+            const { data: sData, error: sErr } = await supabase
               .from('profiles')
-              .update(updates)
-              .eq('id', prof.id);
-
-            // Reflect in returned object
-            if (amMatch) {
-              prof.reporting_manager_id = amMatch.id;
-              prof.reporting_manager_email = amMatch.email;
-            }
-            if (rmMatch) {
-              prof.regional_manager_id = rmMatch.id;
-              prof.regional_manager_email = rmMatch.email;
-            }
+              .insert(row)
+              .select('id, email, full_name, employee_code, role, reporting_manager_name, regional_manager_name, zone')
+              .maybeSingle();
+            if (!sErr && sData) successfullyInserted.push(sData);
+            else if (sErr) errors.push(`Insert failed for ${row.email}: ${sErr.message}`);
           }
         }
+      } catch (insEx) {
+        errors.push(`Batch insert error: ${insEx.message}`);
       }
-    } catch (linkErr) {
-      console.warn('Linking manager UUIDs note:', linkErr.message);
     }
 
     return {
+      totalProcessed: parsedUsers.length,
       insertedCount: successfullyInserted.length,
-      skippedCount: skippedRows.length,
+      updatedCount: successfullyUpdated.length,
+      unchangedCount: unchangedUsers.length,
+      skippedCount: unchangedUsers.length,
       imported: successfullyInserted,
-      skipped: skippedRows
+      updated: successfullyUpdated,
+      skipped: unchangedUsers.map(u => ({
+        full_name: u.full_name,
+        email: u.email,
+        employee_code: u.employee_code,
+        skipReason: 'Already Up-to-Date (No Mapping Changes Needed)'
+      })),
+      errors
     };
+  },
+
+  // Alias for smart mapping sync
+  async syncUserMappings(parsedUsers) {
+    return this.importUsers(parsedUsers);
   },
 
   // Add a single user directly to Supabase
