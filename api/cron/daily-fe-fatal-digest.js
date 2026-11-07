@@ -417,8 +417,10 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
           totalFatal: summaryData.totalFatal,
           passRate: summaryData.passRate,
           fatalRate: summaryData.fatalRate,
-          hubsCovered: summaryData.hubBreakdown.length,
-          fatalFEsCount: summaryData.feFatalList.length
+          citiesCovered: (summaryData.cityBreakdown || []).length,
+          amsCovered: (summaryData.amBreakdown || []).length,
+          hubsCovered: (summaryData.cityBreakdown || []).length,
+          fatalFEsCount: summaryData.totalFatal
         }
       }));
       return;

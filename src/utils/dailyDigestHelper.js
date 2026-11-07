@@ -1318,6 +1318,82 @@ Lenskart Central Quality & Governance Division`;
 /**
  * Aggregate complete day's audit snapshot for executive leadership (GM & BH)
  */
+/**
+ * Helper to resolve the supervisory Area Manager (AM) for a given task
+ */
+export function resolveAmForTask(t, users = []) {
+  const tCode = String(t.feCode || t.fe_code || t.feId || '').trim().toLowerCase();
+  const tEmail = String(t.feEmail || t.fe_email || '').trim().toLowerCase();
+  const tName = String(t.feName || t.fe_name || '').trim().toLowerCase();
+
+  const feUser = users.find(u => {
+    if (!u) return false;
+    const uCode = String(u.employee_code || u.person_id || '').trim().toLowerCase();
+    const uEmail = String(u.email || '').trim().toLowerCase();
+    const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+
+    if (tCode && (uCode === tCode || uEmail.startsWith(tCode) || uEmail.includes(tCode) || uName.includes(tCode))) {
+      return true;
+    }
+    if (tEmail && uEmail && tEmail === uEmail) return true;
+    if (tName && tName.length >= 3 && (uName === tName || uName.includes(tName) || tName.includes(uName))) {
+      return true;
+    }
+    return false;
+  });
+
+  let amName = feUser?.reporting_manager_name || t.amName || t.reporting_manager_name;
+  let amEmail = feUser?.reporting_manager_email || t.amEmail || t.reporting_manager_email;
+
+  if (!amEmail && amName) {
+    const target = String(amName).trim().toLowerCase();
+    const amObj = users.find(u => {
+      const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+      return (uName === target || uName.includes(target) || target.includes(uName)) && u.email;
+    });
+    if (amObj) amEmail = amObj.email;
+  }
+
+  if ((!amEmail || !amName) && feUser?.reporting_manager_id) {
+    const amObj = users.find(u => String(u.id) === String(feUser.reporting_manager_id));
+    if (amObj) {
+      if (!amEmail) amEmail = amObj.email;
+      if (!amName) amName = amObj.full_name || amObj.name;
+    }
+  }
+
+  // Fallback to City Admin or unassigned
+  if (!amName) {
+    const city = String(t.city || t.facilityCode || t.facility_code || '').trim();
+    if (city) {
+      const cityAdmin = users.find(u => {
+        const roles = Array.isArray(u.roles) ? u.roles : [u.role];
+        const isMgr = roles.some(r => {
+          const norm = String(r || '').toLowerCase();
+          return norm.includes('am') || norm.includes('area manager') || norm.includes('city admin');
+        });
+        const uCity = String(u.facility_code || u.city || '').toLowerCase();
+        return isMgr && uCity === city.toLowerCase() && u.email;
+      });
+      if (cityAdmin) {
+        amName = cityAdmin.full_name || cityAdmin.name;
+        amEmail = cityAdmin.email;
+      }
+    }
+  }
+
+  return {
+    amName: amName || 'Central Operations',
+    amEmail: amEmail || '',
+    city: String(t.city || t.facilityCode || t.facility_code || feUser?.city || 'Central Zone').trim()
+  };
+}
+
+/**
+ * Aggregate complete day's audit snapshot for executive leadership (GM & BH)
+ * Optimized for high-level governance: Macro Overview, City/Zone Scorecard, AM Supervisory Performance, Top SOP Pareto.
+ * (FE-level fatal records & hub codes are excluded to ensure minimal email size and executive clarity)
+ */
 export function aggregateGmBhExecutiveSummary({
   tasks = [],
   users = [],
@@ -1326,7 +1402,7 @@ export function aggregateGmBhExecutiveSummary({
 }) {
   const targetDateStr = normalizeDateToYMD(targetDate);
 
-  // 1. Identify tasks audited on target date (or tasks dispatch on target date)
+  // 1. Identify tasks audited on target date (or tasks dispatched on target date)
   let auditedToday = (tasks || []).filter(t => {
     const dStr = getTaskAuditDateYMD(t);
     const status = t.auditStatus || t.audit_status;
@@ -1350,25 +1426,68 @@ export function aggregateGmBhExecutiveSummary({
   const passRate = totalAudited > 0 ? Math.round((totalPassed / totalAudited) * 100) : 100;
   const fatalRate = totalAudited > 0 ? Math.round((totalFatal / totalAudited) * 100) : 0;
 
-  // 2. Hub / Facility Performance Breakdown
-  const hubMap = new Map();
+  // 2. City / Zone Performance Breakdown (Replaces raw Hub codes)
+  const cityMap = new Map();
   auditedToday.forEach(t => {
-    const hub = t.facilityCode || t.teamName || t.city || 'Central Hub';
-    if (!hubMap.has(hub)) {
-      hubMap.set(hub, { hub, audited: 0, passed: 0, fatal: 0 });
+    const rawCity = String(t.city || t.facilityCode || t.facility_code || 'Central Zone').trim();
+    const city = rawCity.toUpperCase();
+    if (!cityMap.has(city)) {
+      cityMap.set(city, { city: rawCity, audited: 0, passed: 0, fatal: 0 });
     }
-    const entry = hubMap.get(hub);
+    const entry = cityMap.get(city);
     entry.audited++;
     if ((t.auditStatus || t.audit_status) === 'FATAL') entry.fatal++;
     else entry.passed++;
   });
 
-  const hubBreakdown = Array.from(hubMap.values()).map(h => ({
-    ...h,
-    passRate: h.audited > 0 ? Math.round((h.passed / h.audited) * 100) : 100
+  const cityBreakdown = Array.from(cityMap.values()).map(c => ({
+    ...c,
+    passRate: c.audited > 0 ? Math.round((c.passed / c.audited) * 100) : 100
   })).sort((a, b) => b.fatal - a.fatal || b.audited - a.audited);
 
-  // 3. Pareto of SOP Non-Compliance Reasons
+  // 3. Area Manager (AM) Supervisory Breakdown (Replaces FE-level fatal details)
+  const amMap = new Map();
+  auditedToday.forEach(t => {
+    const amInfo = resolveAmForTask(t, users);
+    const amKey = (amInfo.amEmail || amInfo.amName || 'unassigned').toLowerCase().trim();
+    const isFatal = (t.auditStatus || t.audit_status) === 'FATAL';
+    const feIdentifier = String(t.feCode || t.fe_code || t.feId || t.feName || 'unknown').trim().toLowerCase();
+
+    if (!amMap.has(amKey)) {
+      amMap.set(amKey, {
+        amName: amInfo.amName,
+        amEmail: amInfo.amEmail,
+        cities: new Set(),
+        audited: 0,
+        passed: 0,
+        fatal: 0,
+        fatalFEs: new Set()
+      });
+    }
+
+    const entry = amMap.get(amKey);
+    entry.audited++;
+    if (amInfo.city) entry.cities.add(amInfo.city);
+    if (isFatal) {
+      entry.fatal++;
+      entry.fatalFEs.add(feIdentifier);
+    } else {
+      entry.passed++;
+    }
+  });
+
+  const amBreakdown = Array.from(amMap.values()).map(m => ({
+    amName: m.amName,
+    amEmail: m.amEmail,
+    cityList: Array.from(m.cities).join(', ') || 'Central Zone',
+    audited: m.audited,
+    passed: m.passed,
+    fatal: m.fatal,
+    passRate: m.audited > 0 ? Math.round((m.passed / m.audited) * 100) : 100,
+    fatalFEsCount: m.fatalFEs.size
+  })).sort((a, b) => b.fatal - a.fatal || b.audited - a.audited);
+
+  // 4. Pareto of SOP Non-Compliance Reasons
   const reasonMap = new Map();
   fatalTasks.forEach(t => {
     const reasons = Array.isArray(t.failedReasons) ? t.failedReasons : (t.failed_reasons || []);
@@ -1387,32 +1506,6 @@ export function aggregateGmBhExecutiveSummary({
     }))
     .sort((a, b) => b.count - a.count);
 
-  // 4. Field Executives (FEs) with Fatal Strikes
-  const feFatalList = aggregateFeFatalDigests({
-    tasks: auditedToday,
-    users,
-    targetDate: targetDateStr,
-    portalBaseUrl
-  });
-
-  // 5. Flagged Faulty Tools / Replacement Orders
-  const replacementOrders = [];
-  auditedToday.forEach(t => {
-    const reps = t.replacements || [];
-    if (Array.isArray(reps)) {
-      reps.forEach(r => {
-        replacementOrders.push({
-          taskId: t.id || t.taskId,
-          feName: t.feName || t.fe_name || 'Field Executive',
-          hub: t.facilityCode || t.teamName || t.city || 'Hub',
-          itemName: r.name || r.itemName || 'Equipment Item',
-          category: r.category || 'Asset',
-          urgency: r.urgency || 'NORMAL'
-        });
-      });
-    }
-  });
-
   return {
     digestDate: targetDateStr,
     totalAudited,
@@ -1420,16 +1513,19 @@ export function aggregateGmBhExecutiveSummary({
     totalFatal,
     passRate,
     fatalRate,
-    hubBreakdown,
+    cityBreakdown,
+    amBreakdown,
     topFailureReasons,
-    feFatalList,
-    replacementOrders,
-    portalBaseUrl
+    portalBaseUrl,
+    // Backwards-compatibility aliases
+    hubBreakdown: cityBreakdown.map(c => ({ hub: c.city, ...c })),
+    feFatalList: []
   };
 }
 
 /**
  * Generate responsive, executive HTML email for GM, BH, and SuperAdmin
+ * Clean, lightweight, high-level governance briefing with City/Zone & AM Scorecards.
  */
 export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'https://locus-auditor.vercel.app' }) {
   const {
@@ -1439,35 +1535,62 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
     totalFatal,
     passRate,
     fatalRate,
-    hubBreakdown = [],
-    topFailureReasons = [],
-    feFatalList = [],
-    replacementOrders = []
+    cityBreakdown = [],
+    amBreakdown = [],
+    topFailureReasons = []
   } = summaryData;
 
   const rulesUrl = `${portalBaseUrl}/rules`;
   const auditsUrl = `${portalBaseUrl}/audits`;
-  const managerUrl = `${portalBaseUrl}/manager`;
 
-  // Hub breakdown rows
-  const hubRowsHtml = hubBreakdown.length > 0 ? hubBreakdown.map(h => {
-    const statusColor = h.fatal > 0 ? '#DC2626' : '#16A34A';
-    const statusBg = h.fatal > 0 ? '#FEF2F2' : '#F0FDF4';
+  // City & Zone Scorecard Rows
+  const cityRowsHtml = cityBreakdown.length > 0 ? cityBreakdown.map(c => {
+    const statusColor = c.fatal > 0 ? '#DC2626' : '#16A34A';
+    const statusBg = c.fatal > 0 ? '#FEF2F2' : '#F0FDF4';
     return `
       <tr style="border-bottom: 1px solid #E2E8F0;">
-        <td style="padding: 10px 14px; font-weight: 700; color: #0F172A; font-size: 13px;">${h.hub}</td>
-        <td style="padding: 10px 14px; text-align: center; color: #334155; font-size: 13px;">${h.audited}</td>
-        <td style="padding: 10px 14px; text-align: center; color: #16A34A; font-weight: 700; font-size: 13px;">${h.passed}</td>
-        <td style="padding: 10px 14px; text-align: center; color: ${h.fatal > 0 ? '#DC2626' : '#94A3B8'}; font-weight: 700; font-size: 13px;">${h.fatal}</td>
+        <td style="padding: 10px 14px; font-weight: 700; color: #0F172A; font-size: 13px;">${c.city}</td>
+        <td style="padding: 10px 14px; text-align: center; color: #334155; font-size: 13px;">${c.audited}</td>
+        <td style="padding: 10px 14px; text-align: center; color: #16A34A; font-weight: 700; font-size: 13px;">${c.passed}</td>
+        <td style="padding: 10px 14px; text-align: center; color: ${c.fatal > 0 ? '#DC2626' : '#94A3B8'}; font-weight: 700; font-size: 13px;">${c.fatal}</td>
         <td style="padding: 10px 14px; text-align: right;">
           <span style="display: inline-block; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; background-color: ${statusBg}; color: ${statusColor};">
-            ${h.passRate}% Pass
+            ${c.passRate}% Pass
           </span>
         </td>
       </tr>
     `;
   }).join('') : `
-    <tr><td colspan="5" style="padding: 16px; text-align: center; color: #94A3B8;">No hub activity recorded today.</td></tr>
+    <tr><td colspan="5" style="padding: 16px; text-align: center; color: #94A3B8;">No city activity recorded today.</td></tr>
+  `;
+
+  // Area Manager (AM) Supervisory Rows
+  const amRowsHtml = amBreakdown.length > 0 ? amBreakdown.map(m => {
+    const statusColor = m.fatal > 0 ? '#DC2626' : '#16A34A';
+    const statusBg = m.fatal > 0 ? '#FEF2F2' : '#F0FDF4';
+    return `
+      <tr style="border-bottom: 1px solid #E2E8F0;">
+        <td style="padding: 10px 14px; font-size: 12px;">
+          <strong style="color: #0F172A; font-size: 13px;">${m.amName}</strong>
+          ${m.amEmail ? `<br/><span style="color: #64748B; font-size: 11px;">${m.amEmail}</span>` : ''}
+        </td>
+        <td style="padding: 10px 14px; font-size: 12px; color: #475569; font-weight: 600;">${m.cityList}</td>
+        <td style="padding: 10px 14px; text-align: center; font-size: 13px; color: #334155;">${m.audited}</td>
+        <td style="padding: 10px 14px; text-align: center; font-size: 13px; font-weight: 800; color: ${m.fatal > 0 ? '#DC2626' : '#94A3B8'};">
+          ${m.fatal}
+        </td>
+        <td style="padding: 10px 14px; text-align: center;">
+          <span style="display: inline-block; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; background-color: ${statusBg}; color: ${statusColor};">
+            ${m.passRate}%
+          </span>
+        </td>
+        <td style="padding: 10px 14px; text-align: center; font-size: 12px; color: ${m.fatalFEsCount > 0 ? '#DC2626' : '#64748B'}; font-weight: ${m.fatalFEsCount > 0 ? '700' : '400'};">
+          ${m.fatalFEsCount > 0 ? `${m.fatalFEsCount} FE${m.fatalFEsCount > 1 ? 's' : ''}` : '&mdash;'}
+        </td>
+      </tr>
+    `;
+  }).join('') : `
+    <tr><td colspan="6" style="padding: 16px; text-align: center; color: #94A3B8;">No manager data available.</td></tr>
   `;
 
   // Top failure reasons rows
@@ -1479,27 +1602,6 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
     </tr>
   `).join('') : `
     <tr><td colspan="3" style="padding: 12px; text-align: center; color: #16A34A; font-size: 12px; font-weight: 600;">Clean record: Zero SOP fatal failures recorded today!</td></tr>
-  `;
-
-  // Affected FEs table
-  const feRowsHtml = feFatalList.length > 0 ? feFatalList.map(fe => `
-    <tr style="border-bottom: 1px solid #E2E8F0;">
-      <td style="padding: 10px 12px; font-size: 12px;">
-        <strong style="color: #0F172A;">${fe.feName}</strong><br/>
-        <span style="font-family: monospace; font-size: 10px; color: #64748B;">${fe.feCode} &bull; ${fe.hub}</span>
-      </td>
-      <td style="padding: 10px 12px; font-size: 12px; text-align: center;">
-        <span style="display: inline-block; padding: 2px 7px; border-radius: 4px; background: #FEF2F2; color: #DC2626; font-weight: 800; font-size: 11px;">
-          ${fe.fatalCount} Strike${fe.fatalCount > 1 ? 's' : ''}
-        </span>
-      </td>
-      <td style="padding: 10px 12px; font-size: 11px; color: #475569;">
-        <strong>AM:</strong> ${fe.amName || 'Unassigned'}<br/>
-        <span style="color: #64748B;">RM: ${fe.rmName || 'Unassigned'}</span>
-      </td>
-    </tr>
-  `).join('') : `
-    <tr><td colspan="3" style="padding: 16px; text-align: center; color: #16A34A; font-size: 12px;">All Field Executives met 100% compliance criteria today.</td></tr>
   `;
 
   return `
@@ -1559,7 +1661,7 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
                 <div style="background: #FFFFFF; border: 1px solid ${totalFatal > 0 ? '#FECACA' : '#E2E8F0'}; border-radius: 10px; padding: 14px 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                   <div style="font-size: 11px; color: #DC2626; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Fatal Strikes</div>
                   <div style="font-size: 26px; font-weight: 900; color: #DC2626; margin-top: 4px;">${totalFatal}</div>
-                  <div style="font-size: 10px; color: #DC2626; margin-top: 2px;">${feFatalList.length} FEs Impacted</div>
+                  <div style="font-size: 10px; color: #DC2626; margin-top: 2px;">SOP Violations</div>
                 </div>
               </td>
               <!-- Fatal Rate -->
@@ -1577,14 +1679,14 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
         <!-- Main Body -->
         <div style="padding: 24px;">
 
-          <!-- SECTION 1: Facility / Hub Performance Scorecard -->
-          <h2 style="font-size: 15px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
-            Facility Hub Performance Scorecard
+          <!-- SECTION 1: City & Zone Quality Scorecard -->
+          <h2 style="font-size: 14px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+            City &amp; Zone Quality Scorecard
           </h2>
           <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
             <thead>
               <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
-                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Facility / Hub</th>
+                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">City / Zone</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Audited</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #16A34A; text-transform: uppercase;">Passed</th>
                 <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Fatal</th>
@@ -1592,12 +1694,32 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
               </tr>
             </thead>
             <tbody>
-              ${hubRowsHtml}
+              ${cityRowsHtml}
             </tbody>
           </table>
 
-          <!-- SECTION 2: Top SOP Failure Reasons Pareto -->
-          <h2 style="font-size: 15px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+          <!-- SECTION 2: Area Manager (AM) Supervisory Scorecard -->
+          <h2 style="font-size: 14px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+            Area Manager (AM) Supervisory Governance
+          </h2>
+          <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+            <thead>
+              <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
+                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Area Manager</th>
+                <th style="padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Zone</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Audited</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Fatals</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Pass %</th>
+                <th style="padding: 10px 14px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Affected FEs</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${amRowsHtml}
+            </tbody>
+          </table>
+
+          <!-- SECTION 3: Top SOP Non-Compliance Criteria Pareto -->
+          <h2 style="font-size: 14px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
             Top SOP Non-Compliance Criteria Pareto
           </h2>
           <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
@@ -1606,27 +1728,10 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
             </tbody>
           </table>
 
-          <!-- SECTION 3: Field Executives Flagged for Fatal Strikes -->
-          <h2 style="font-size: 15px; font-weight: 800; color: #0F172A; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.5px;">
-            Field Executives with Fatal Strikes Today (${feFatalList.length})
-          </h2>
-          <table style="width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
-            <thead>
-              <tr style="background-color: #F8FAFC; border-bottom: 2px solid #E2E8F0;">
-                <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Field Executive</th>
-                <th style="padding: 10px 12px; text-align: center; font-size: 11px; font-weight: 800; color: #DC2626; text-transform: uppercase;">Strikes</th>
-                <th style="padding: 10px 12px; text-align: left; font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Supervisory AM &amp; RM</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${feRowsHtml}
-            </tbody>
-          </table>
-
           <!-- SECTION 4: Executive Action Buttons -->
           <div style="background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%); border-radius: 10px; padding: 22px 24px; text-align: center; margin-top: 12px;">
             <p style="color: #F8FAFC; font-size: 13px; font-weight: 600; margin: 0 0 14px 0;">
-              Need to calibrate audit rules, review disputes, or audit escalated visits?
+              Calibrate audit rules, review disputes, or inspect quality queues:
             </p>
             <div style="display: inline-block;">
               <a href="${rulesUrl}" target="_blank" style="display: inline-block; background-color: #38BDF8; color: #0F172A; font-weight: 800; font-size: 12px; padding: 10px 18px; border-radius: 6px; text-decoration: none; margin-right: 8px;">
@@ -1644,7 +1749,7 @@ export function buildGmBhExecutiveSummaryHtml({ summaryData, portalBaseUrl = 'ht
         <div style="background-color: #F8FAFC; border-top: 1px solid #E2E8F0; padding: 20px 24px; font-size: 11px; color: #94A3B8; text-align: center; line-height: 1.6;">
           <strong>Lenskart Solutions Pvt. Ltd. &bull; Central Quality Operations &amp; Governance</strong><br/>
           Confidential leadership briefing for General Managers (GM), Business Heads (BH), and SuperAdmins.<br/>
-          Automated Daily FE Fatal Dispatch Engine &bull; Dispatched via Brevo Mail Gateway
+          Automated Daily Executive Dispatch Engine &bull; Dispatched via Brevo Mail Gateway
         </div>
 
       </div>
@@ -1664,21 +1769,21 @@ export function buildGmBhExecutiveSummaryText({ summaryData, portalBaseUrl = 'ht
     totalFatal,
     passRate,
     fatalRate,
-    hubBreakdown = [],
-    topFailureReasons = [],
-    feFatalList = []
+    cityBreakdown = [],
+    amBreakdown = [],
+    topFailureReasons = []
   } = summaryData;
 
-  const hubText = hubBreakdown.map(h => 
-    `- ${h.hub}: Audited: ${h.audited} | Passed: ${h.passed} | Fatal: ${h.fatal} | Pass Rate: ${h.passRate}%`
+  const cityText = cityBreakdown.map(c => 
+    `- ${c.city}: Audited: ${c.audited} | Passed: ${c.passed} | Fatal: ${c.fatal} | Pass Rate: ${c.passRate}%`
+  ).join('\n');
+
+  const amText = amBreakdown.map(m =>
+    `- ${m.amName} (${m.cityList}): Audited: ${m.audited} | Passed: ${m.passed} | Fatal: ${m.fatal} | Pass Rate: ${m.passRate}% | Affected FEs: ${m.fatalFEsCount}`
   ).join('\n');
 
   const failureText = topFailureReasons.map((r, i) =>
     `#${i + 1} ${r.reason}: ${r.count} strike(s) (${r.percent}%)`
-  ).join('\n');
-
-  const feText = feFatalList.map(fe =>
-    `- ${fe.feName} (${fe.feCode}, ${fe.hub}): ${fe.fatalCount} strike(s) | AM: ${fe.amName} | RM: ${fe.rmName}`
   ).join('\n');
 
   return `LENSKART DLC & HTO - EXECUTIVE QUALITY AUDIT BRIEFING
@@ -1695,19 +1800,19 @@ Fatal Strikes:        ${totalFatal}
 Fatal Incident Rate:  ${fatalRate}%
 
 ============================================================
-FACILITY / HUB PERFORMANCE SCORECARD:
+CITY & ZONE PERFORMANCE SCORECARD:
 ============================================================
-${hubText || 'No hub activity recorded today.'}
+${cityText || 'No city activity recorded today.'}
+
+============================================================
+AREA MANAGER (AM) SUPERVISORY GOVERNANCE:
+============================================================
+${amText || 'No manager activity recorded today.'}
 
 ============================================================
 TOP SOP NON-COMPLIANCE PARETO:
 ============================================================
 ${failureText || 'Zero fatal failures recorded.'}
-
-============================================================
-FIELD EXECUTIVES (FES) WITH FATAL STRIKES TODAY:
-============================================================
-${feText || 'Zero FEs with fatal strikes today.'}
 
 Quality Rules Studio: ${portalBaseUrl}/rules
 Central Audits Console: ${portalBaseUrl}/audits
