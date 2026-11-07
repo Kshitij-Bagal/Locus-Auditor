@@ -342,6 +342,11 @@ export default function UserManagement({
         }).filter(u => u.email || u.employee_code);
 
         // Pass 2: Relational Foreign Key Resolution (match AM & RM names to profile UUID and email)
+        const isValidUUID = (val) => {
+          if (!val || typeof val !== 'string') return false;
+          return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val.trim());
+        };
+
         const allKnown = [...users, ...rawParsedUsers];
         const newUsers = rawParsedUsers.map(u => {
           let amMatch = null;
@@ -370,10 +375,10 @@ export default function UserManagement({
 
           return {
             ...u,
-            reporting_manager_id: amMatch ? amMatch.id : null,
+            reporting_manager_id: amMatch && isValidUUID(amMatch.id) ? amMatch.id.trim() : null,
             reporting_manager_name: amMatch ? amMatch.full_name : u.am_name,
             reporting_manager_email: finalAmEmail,
-            regional_manager_id: rmMatch ? rmMatch.id : null,
+            regional_manager_id: rmMatch && isValidUUID(rmMatch.id) ? rmMatch.id.trim() : null,
             regional_manager_name: rmMatch ? rmMatch.full_name : u.rm_name,
             regional_manager_email: finalRmEmail
           };

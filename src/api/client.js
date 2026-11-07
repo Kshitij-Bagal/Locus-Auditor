@@ -1391,6 +1391,12 @@ Lenskart DLC Operations`;
 // 6. USER PROFILE & SEEDER REST API (Direct Supabase Database Writes)
 // ====================================================================
 
+// Helper to validate RFC-compliant UUIDs (Postgres uuid columns reject any other format)
+export const isValidUUID = (val) => {
+  if (!val || typeof val !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val.trim());
+};
+
 export const usersApi = {
   // Fetch all user profiles from Supabase, enriched with custom permissions & multi-roles
   async getUsers() {
@@ -1529,13 +1535,23 @@ export const usersApi = {
       if (code) existingByCode.set(code, p);
     });
 
-    // Step C: Build a comprehensive directory of all known users (existing + sheet) for AM/RM relational resolution
-    const allKnownUsers = [...existingProfiles, ...parsedUsers];
+    // Step C: Build a directory for AM/RM relational resolution (prioritizing Supabase existing profiles to resolve true UUIDs)
     const findManager = (targetQuery) => {
       if (!targetQuery) return null;
       const target = String(targetQuery).trim().toLowerCase();
       if (!target) return null;
-      return allKnownUsers.find(u => {
+
+      // 1. Search existing profiles in Supabase first (to get their verified database UUID)
+      const foundInDb = existingProfiles.find(u => {
+        const uEmail = String(u.email || '').trim().toLowerCase();
+        const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+        const uCode = String(u.employee_code || u.person_id || '').trim().toLowerCase();
+        return uEmail === target || uName === target || uCode === target;
+      });
+      if (foundInDb) return foundInDb;
+
+      // 2. Fallback to parsed users in sheet (names/emails only; temporary client IDs will be discarded)
+      return parsedUsers.find(u => {
         const uEmail = String(u.email || '').trim().toLowerCase();
         const uName = String(u.full_name || u.name || '').trim().toLowerCase();
         const uCode = String(u.employee_code || u.person_id || '').trim().toLowerCase();
@@ -1570,7 +1586,9 @@ export const usersApi = {
       const resolvedAm = findManager(rawAmEmail || rawAmName);
       const finalAmName = rawAmName || (resolvedAm?.full_name || '');
       const finalAmEmail = rawAmEmail || (resolvedAm?.email || (rawAmName.includes('@') ? rawAmName : ''));
-      const finalAmId = resolvedAm?.id || null;
+      const rawAmId = resolvedAm?.id || row.reporting_manager_id || null;
+      // Postgres uuid columns reject any non-uuid strings (like "usr_..."); strictly validate:
+      const finalAmId = isValidUUID(rawAmId) ? rawAmId.trim() : null;
 
       // Resolve Regional Manager (RM)
       const rawRmName = String(row.rm_name || row.regional_manager_name || row.rmName || '').trim();
@@ -1578,7 +1596,9 @@ export const usersApi = {
       const resolvedRm = findManager(rawRmEmail || rawRmName);
       const finalRmName = rawRmName || (resolvedRm?.full_name || '');
       const finalRmEmail = rawRmEmail || (resolvedRm?.email || (rawRmName.includes('@') ? rawRmName : ''));
-      const finalRmId = resolvedRm?.id || null;
+      const rawRmId = resolvedRm?.id || row.regional_manager_id || null;
+      // Postgres uuid columns reject any non-uuid strings (like "usr_..."); strictly validate:
+      const finalRmId = isValidUUID(rawRmId) ? rawRmId.trim() : null;
 
       if (!existing) {
         // CASE 1: Brand New User -> Prepare for Insertion
@@ -1596,10 +1616,10 @@ export const usersApi = {
           phone: row.phone || row.mobile || '',
           reporting_manager_name: finalAmName,
           reporting_manager_email: finalAmEmail,
-          reporting_manager_id: finalAmId,
+          reporting_manager_id: finalAmId, // Guaranteed valid UUID or null
           regional_manager_name: finalRmName,
           regional_manager_email: finalRmEmail,
-          regional_manager_id: finalRmId,
+          regional_manager_id: finalRmId, // Guaranteed valid UUID or null
           is_active: row.is_active !== undefined ? row.is_active : true,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -1619,7 +1639,7 @@ export const usersApi = {
           diff.reporting_manager_email = finalAmEmail;
           changeLogs.push(`AM Email: "${existing.reporting_manager_email || 'None'}" → "${finalAmEmail}"`);
         }
-        if (finalAmId && finalAmId !== existing.reporting_manager_id) {
+        if (finalAmId && isValidUUID(finalAmId) && finalAmId !== existing.reporting_manager_id) {
           diff.reporting_manager_id = finalAmId;
         }
 
@@ -1632,7 +1652,7 @@ export const usersApi = {
           diff.regional_manager_email = finalRmEmail;
           changeLogs.push(`RM Email: "${existing.regional_manager_email || 'None'}" → "${finalRmEmail}"`);
         }
-        if (finalRmId && finalRmId !== existing.regional_manager_id) {
+        if (finalRmId && isValidUUID(finalRmId) && finalRmId !== existing.regional_manager_id) {
           diff.regional_manager_id = finalRmId;
         }
 
@@ -1704,7 +1724,7 @@ export const usersApi = {
       await Promise.all(chunk.map(async (u) => {
         try {
           let query = supabase.from('profiles').update(u.updates);
-          if (u.id && !String(u.id).startsWith('usr_')) {
+          if (u.id && isValidUUID(u.id)) {
             query = query.eq('id', u.id);
           } else if (u.email) {
             query = query.eq('email', u.email);
@@ -1753,6 +1773,61 @@ export const usersApi = {
       } catch (insEx) {
         errors.push(`Batch insert error: ${insEx.message}`);
       }
+    }
+
+    // Step G: Post-sync Relational UUID Linking
+    // If any profiles now have matching AM/RM accounts in Supabase with verified UUIDs, link their foreign keys safely
+    try {
+      const allKnownDbProfiles = [...existingProfiles, ...successfullyInserted];
+      const linkBatch = [];
+
+      allKnownDbProfiles.forEach(p => {
+        if (!p.id || !isValidUUID(p.id)) return;
+        const diff = {};
+
+        // Check if AM UUID can now be linked
+        if (!isValidUUID(p.reporting_manager_id) && (p.reporting_manager_email || p.reporting_manager_name)) {
+          const amTargetEmail = (p.reporting_manager_email || '').toLowerCase().trim();
+          const amTargetName = (p.reporting_manager_name || '').toLowerCase().trim();
+          const amObj = allKnownDbProfiles.find(k => 
+            isValidUUID(k.id) && k.id !== p.id &&
+            ((amTargetEmail && k.email?.toLowerCase().trim() === amTargetEmail) ||
+             (amTargetName && k.full_name?.toLowerCase().trim() === amTargetName))
+          );
+          if (amObj && isValidUUID(amObj.id)) {
+            diff.reporting_manager_id = amObj.id;
+          }
+        }
+
+        // Check if RM UUID can now be linked
+        if (!isValidUUID(p.regional_manager_id) && (p.regional_manager_email || p.regional_manager_name)) {
+          const rmTargetEmail = (p.regional_manager_email || '').toLowerCase().trim();
+          const rmTargetName = (p.regional_manager_name || '').toLowerCase().trim();
+          const rmObj = allKnownDbProfiles.find(k => 
+            isValidUUID(k.id) && k.id !== p.id &&
+            ((rmTargetEmail && k.email?.toLowerCase().trim() === rmTargetEmail) ||
+             (rmTargetName && k.full_name?.toLowerCase().trim() === rmTargetName))
+          );
+          if (rmObj && isValidUUID(rmObj.id)) {
+            diff.regional_manager_id = rmObj.id;
+          }
+        }
+
+        if (Object.keys(diff).length > 0) {
+          linkBatch.push({ id: p.id, diff });
+        }
+      });
+
+      if (linkBatch.length > 0) {
+        for (let i = 0; i < linkBatch.length; i += 25) {
+          const sub = linkBatch.slice(i, i + 25);
+          await Promise.all(sub.map(({ id, diff }) => 
+            supabase.from('profiles').update(diff).eq('id', id)
+          ));
+        }
+      }
+    } catch (linkEx) {
+      console.warn('Post-sync UUID linking non-critical notice:', linkEx.message);
     }
 
     return {
@@ -1846,6 +1921,13 @@ export const usersApi = {
       is_active: userData.is_active !== undefined ? userData.is_active : true,
       updated_at: new Date().toISOString()
     };
+
+    if (isValidUUID(userData.reporting_manager_id)) {
+      payload.reporting_manager_id = userData.reporting_manager_id.trim();
+    }
+    if (isValidUUID(userData.regional_manager_id)) {
+      payload.regional_manager_id = userData.regional_manager_id.trim();
+    }
 
     const { data, error } = await supabase
       .from('profiles')
