@@ -1327,14 +1327,23 @@ export default function App() {
             users={users}
             currentUser={currentUser}
             onNavigate={setActivePage}
-            onTaskAudited={(taskId, verdict) => {
+            onTaskAudited={(taskId, verdict, extraMetadata = {}) => {
+              const normalizedVerdict = verdict === 'PASS' ? 'PASSED' : (verdict === 'FAIL' ? 'FATAL' : verdict);
               setTasks(prev => prev.map(t => {
                 if (String(t.id || t.taskId) === String(taskId)) {
                   return {
                     ...t,
-                    auditStatus: verdict,
+                    auditStatus: normalizedVerdict,
                     auditedAt: new Date().toISOString(),
-                    auditedBy: 'Gemini 1.5 Flash (AI)'
+                    auditedBy: extraMetadata.auditedBy || t.auditedBy || 'Gemini AI',
+                    remarks: extraMetadata.remarks || t.remarks,
+                    auditor_remarks: extraMetadata.auditor_remarks || extraMetadata.remarks || t.auditor_remarks || t.remarks,
+                    human_verified: extraMetadata.human_verified !== undefined ? extraMetadata.human_verified : t.human_verified,
+                    human_overturned: extraMetadata.human_overturned !== undefined ? extraMetadata.human_overturned : t.human_overturned,
+                    humanStatus: extraMetadata.humanStatus || t.humanStatus,
+                    needsReAudit: extraMetadata.needsReAudit !== undefined ? extraMetadata.needsReAudit : t.needsReAudit,
+                    reAuditReason: extraMetadata.reAuditReason || t.reAuditReason,
+                    ...extraMetadata
                   };
                 }
                 return t;

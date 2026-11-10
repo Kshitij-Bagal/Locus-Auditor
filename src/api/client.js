@@ -543,14 +543,23 @@ export const tasksApi = {
         updatePayload.total_tokens = Number(totalTokens);
       }
 
-      let { error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+      let { data, error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
 
       // Resilient fallback if 'total_tokens' column hasn't been added to tasks table via SQL yet
       if (error && error.message && error.message.includes('total_tokens')) {
         console.warn('Supabase tasks table is missing total_tokens column. Please run the SQL snippet.');
         delete updatePayload.total_tokens;
-        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
+        data = retry.data;
         error = retry.error;
+      }
+
+      // If 0 rows updated by id, attempt update matching by task_id column
+      if (!error && (!data || data.length === 0)) {
+        const retryByTaskId = await supabase.from('tasks').update(updatePayload).eq('task_id', String(taskId)).select('id');
+        if (retryByTaskId.error) {
+          error = retryByTaskId.error;
+        }
       }
 
       if (error) {
@@ -640,14 +649,23 @@ export const tasksApi = {
         updatePayload.total_tokens = Number(totalTokens);
       }
 
-      let { error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+      let { data, error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
 
       // Resilient fallback if 'total_tokens' column hasn't been added to tasks table via SQL yet
       if (error && error.message && error.message.includes('total_tokens')) {
         console.warn('Supabase tasks table is missing total_tokens column. Please run the SQL snippet.');
         delete updatePayload.total_tokens;
-        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
+        data = retry.data;
         error = retry.error;
+      }
+
+      // If 0 rows updated by id, attempt update matching by task_id column
+      if (!error && (!data || data.length === 0)) {
+        const retryByTaskId = await supabase.from('tasks').update(updatePayload).eq('task_id', String(taskId)).select('id');
+        if (retryByTaskId.error) {
+          error = retryByTaskId.error;
+        }
       }
 
       if (error) {
@@ -700,14 +718,23 @@ export const tasksApi = {
         updated_at: new Date().toISOString()
       };
 
-      let { error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+      let { data, error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
 
       // If 'NEEDS_REAUDIT' violates an audit_status check constraint in Supabase, fallback to 'PENDING'
       if (error && (error.message.includes('check constraint') || error.message.includes('invalid input value for enum'))) {
         console.warn('audit_status check constraint detected; falling back to PENDING with remarks stamp');
         updatePayload.audit_status = 'PENDING';
-        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId));
+        const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
+        data = retry.data;
         error = retry.error;
+      }
+
+      // If 0 rows updated by id, attempt update matching by task_id column
+      if (!error && (!data || data.length === 0)) {
+        const retryByTaskId = await supabase.from('tasks').update(updatePayload).eq('task_id', String(taskId)).select('id');
+        if (retryByTaskId.error) {
+          error = retryByTaskId.error;
+        }
       }
 
       if (error) {

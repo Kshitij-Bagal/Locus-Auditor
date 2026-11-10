@@ -230,6 +230,15 @@ export default function AIAuditsConsole({
   const [overrideReasonInput, setOverrideReasonInput] = useState('');
   const [humanNotesInput, setHumanNotesInput] = useState('');
   const [isVerifyingAction, setIsVerifyingAction] = useState(false);
+  const [sessionVerificationMap, setSessionVerificationMap] = useState({}); // taskId -> { humanStatus, remarks, auditor_remarks, auditStatus, human_verified, human_overturned }
+  const [verificationToast, setVerificationToast] = useState(null); // { message, type }
+
+  const showVerificationToast = (message, type = 'success') => {
+    setVerificationToast({ message, type });
+    setTimeout(() => {
+      setVerificationToast(prev => (prev?.message === message ? null : prev));
+    }, 4500);
+  };
 
   // 7. Fail AI Audit & Clinical Re-Audit States
   const [failAiModalOpen, setFailAiModalOpen] = useState(false);
@@ -480,7 +489,7 @@ export default function AIAuditsConsole({
   }, [queueTasks, teamWorkerCount, teamWorkerIndex]);
 
   // Selected Task (searches all tasks so selecting an audited task in the ledger works)
-  const selectedTask = useMemo(() => {
+  const rawSelectedTask = useMemo(() => {
     if (selectedTaskId) {
       const found = tasks.find(t => String(t.id || t.taskId) === String(selectedTaskId));
       if (found) return found;
@@ -489,6 +498,16 @@ export default function AIAuditsConsole({
     if (queueTasks.length) return queueTasks[0];
     return tasks[0] || null;
   }, [tasks, queueTasks, allocatedQueueTasks, selectedTaskId]);
+
+  const selectedTask = useMemo(() => {
+    if (!rawSelectedTask) return null;
+    const local = sessionVerificationMap[String(rawSelectedTask.id || rawSelectedTask.taskId)];
+    if (!local) return rawSelectedTask;
+    return {
+      ...rawSelectedTask,
+      ...local
+    };
+  }, [rawSelectedTask, sessionVerificationMap]);
 
   // Execute AI Audit on a single task (Universal Multi-Provider with Quota Failover)
   const runAiAuditOnTask = async (taskToAudit, shouldCommit = autoCommitToDb) => {
@@ -572,8 +591,20 @@ export default function AIAuditsConsole({
           });
         }
 
+        const finalVerdict = result.verdict === 'PASS' ? 'PASSED' : 'FATAL';
+        const formattedRemarks = result.verdict === 'PASS'
+          ? `AI PASSED (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`
+          : `AI FATAL STRIKE (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`;
+
         if (onTaskAudited) {
-          onTaskAudited(taskToAudit.id || taskToAudit.taskId, result.verdict);
+          onTaskAudited(taskToAudit.id || taskToAudit.taskId, finalVerdict, {
+            auditedBy: auditorName,
+            remarks: formattedRemarks,
+            auditor_remarks: formattedRemarks,
+            overallScore: result.overallScore,
+            confidenceScore: result.confidenceScore,
+            totalTokens: totToks
+          });
         }
       }
 
@@ -924,18 +955,25 @@ export default function AIAuditsConsole({
   // All AI-audited tasks (from Supabase tasks + current session)
   const allAiAuditedTasks = useMemo(() => {
     const list = tasks.filter(t => {
-      const isAudited = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
+      const local = sessionVerificationMap[String(t.id || t.taskId)];
+      const isAudited = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL' || t.auditStatus === 'PASS' || (local && (local.auditStatus === 'PASSED' || local.auditStatus === 'FATAL'));
       if (!isAudited) return false;
       const by = (t.auditedBy || t.audited_by_name || '').toLowerCase();
       const rem = (t.remarks || t.auditor_remarks || '').toLowerCase();
-      return by.includes('gemini') || by.includes('ai') || by.includes('gpt') || by.includes('claude') || by.includes('llama') || by.includes('groq') || by.includes('openrouter') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
+      return by.includes('gemini') || by.includes('ai') || by.includes('gpt') || by.includes('claude') || by.includes('llama') || by.includes('groq') || by.includes('openrouter') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:') || !!local;
     }).map(t => {
-      const rem = (t.remarks || t.auditor_remarks || '');
-      const isVerified = rem.includes('[Human Verified') || t.human_verified;
-      const isOverturned = rem.includes('[Human Overturned') || t.human_overturned;
-      const humanStatus = isOverturned ? 'OVERTURNED' : (isVerified ? 'VERIFIED' : 'PENDING');
+      const local = sessionVerificationMap[String(t.id || t.taskId)] || {};
+      const rem = local.remarks || t.remarks || t.auditor_remarks || '';
+      const isVerified = rem.includes('[Human Verified') || t.human_verified || local.humanStatus === 'VERIFIED';
+      const isOverturned = rem.includes('[Human Overturned') || t.human_overturned || local.humanStatus === 'OVERTURNED';
+      const isReAudit = t.auditStatus === 'NEEDS_REAUDIT' || local.humanStatus === 'REAUDIT' || rem.includes('[AI Audit Failed');
+      const humanStatus = local.humanStatus || (isReAudit ? 'REAUDIT' : (isOverturned ? 'OVERTURNED' : (isVerified ? 'VERIFIED' : 'PENDING')));
       return {
         ...t,
+        ...local,
+        remarks: rem,
+        auditor_remarks: rem,
+        auditStatus: local.auditStatus || (t.auditStatus === 'PASS' ? 'PASSED' : t.auditStatus),
         auditedBy: t.audited_by_name || t.auditedBy || 'gemini-3.8-flash',
         totalTokens: t.total_tokens || t.totalTokens || 0,
         total_tokens: t.total_tokens || t.totalTokens || 0,
@@ -946,6 +984,9 @@ export default function AIAuditsConsole({
     // Also include any tasks audited in current session not yet refreshed in tasks prop
     sessionHistory.forEach(s => {
       if (!list.some(t => String(t.id || t.taskId) === String(s.taskId))) {
+        const local = sessionVerificationMap[String(s.taskId)] || {};
+        const normVerdict = s.verdict === 'PASS' ? 'PASSED' : (s.verdict === 'FAIL' ? 'FATAL' : s.verdict);
+        const rem = local.remarks || `AI ${normVerdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`;
         list.push({
           id: s.taskId,
           taskId: s.taskId,
@@ -954,11 +995,11 @@ export default function AIAuditsConsole({
           facilityCode: s.city,
           city: s.city,
           date: s.date,
-          auditStatus: s.verdict,
+          auditStatus: local.auditStatus || normVerdict,
           auditedBy: s.modelUsed || 'gemini-3.8-flash',
           audited_by_name: s.modelUsed || 'gemini-3.8-flash',
-          remarks: `AI ${s.verdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`,
-          auditor_remarks: `AI ${s.verdict} (Score: ${s.overallScore}/100, Conf: ${s.confidenceScore}% ±${s.errorMargin}%). ${s.summary}`,
+          remarks: rem,
+          auditor_remarks: rem,
           images: s.task?.images || {},
           criteriaStatus: s.criteriaStatus || {},
           criteria_status: s.criteriaStatus || {},
@@ -967,13 +1008,13 @@ export default function AIAuditsConsole({
           criteriaEvaluation: s.criteriaEvaluation || [],
           totalTokens: s.totalTokens || 0,
           total_tokens: s.totalTokens || 0,
-          humanStatus: 'PENDING'
+          humanStatus: local.humanStatus || 'PENDING'
         });
       }
     });
 
     return list;
-  }, [tasks, sessionHistory]);
+  }, [tasks, sessionHistory, sessionVerificationMap]);
 
   // Distinct cities in AI audited tasks
   const verifyAvailableCities = useMemo(() => {
@@ -1139,57 +1180,86 @@ export default function AIAuditsConsole({
 
   // Human confirms and approves AI verdict
   const handleConfirmAiVerdict = async () => {
-    if (!selectedVerifyTask) return;
+    const targetTask = selectedTask || selectedVerifyTask;
+    if (!targetTask) {
+      showVerificationToast('No task selected for verification.', 'error');
+      return;
+    }
+    const taskId = String(targetTask.id || targetTask.taskId);
+    const isPassVerdict = (targetTask.auditStatus === 'PASSED' || targetTask.auditStatus === 'PASS' || activeAuditResult?.result?.verdict === 'PASS');
+
     setIsVerifyingAction(true);
     try {
       const reviewerName = currentUser?.name || currentUser?.email || 'Central QA Reviewer';
-      const originalRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
+      const originalRemarks = (targetTask.remarks || targetTask.auditor_remarks || '')
+        .replace(/\[Human Verified[^\]]*\]\s*/g, '')
+        .replace(/\[Human Overturned[^\]]*\]\s*/g, '');
       const notesClean = humanNotesInput.trim();
-      const updatedRemarks = `[Human Verified by ${reviewerName}${notesClean ? `: ${notesClean}` : ''}] ${originalRemarks}`;
+      const updatedRemarks = `[Human Verified by ${reviewerName}${notesClean ? `: ${notesClean}` : ''}] ${originalRemarks}`.trim();
 
-      const modelAuditorName = selectedVerifyTask.auditedBy || selectedVerifyTask.audited_by_name || 'gemini-3.8-flash';
-      const taskTokens = selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens || 0;
+      const modelAuditorName = targetTask.auditedBy || targetTask.audited_by_name || activeAuditResult?.result?.modelUsed || 'gemini-3.8-flash';
+      const taskTokens = targetTask.totalTokens || targetTask.total_tokens || activeAuditResult?.result?.totalTokens || 0;
 
-      if (selectedVerifyTask.auditStatus === 'PASSED') {
+      if (isPassVerdict) {
         await tasksApi.passAudit({
-          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
+          taskId,
           auditorName: modelAuditorName,
-          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          auditorLocation: targetTask.facilityCode || 'Central QA',
           remarks: updatedRemarks,
-          criteriaStatus: selectedVerifyTask.criteriaStatus || {},
+          criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
           replacements: [],
-          taskData: selectedVerifyTask,
+          taskData: targetTask,
           totalTokens: taskTokens
         });
       } else {
         await tasksApi.failAudit({
-          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
-          taskData: selectedVerifyTask,
-          failedReasons: selectedVerifyTask.failedReasons || ['AI Fatal Strike Confirmed by Human Reviewer'],
+          taskId,
+          taskData: targetTask,
+          failedReasons: targetTask.failedReasons || targetTask.failed_reasons || ['AI Fatal Strike Confirmed by Human Reviewer'],
           remarks: updatedRemarks,
-          criteriaStatus: selectedVerifyTask.criteriaStatus || {},
+          criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
           replacements: [],
           auditorName: modelAuditorName,
-          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          auditorLocation: targetTask.facilityCode || 'Central QA',
           immediateEmail: false,
           totalTokens: taskTokens
         });
       }
 
-      if (onTaskAudited) {
-        onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, selectedVerifyTask.auditStatus);
-      }
-      setHumanNotesInput('');
-      
-      if (verifyDeckViewMode === 'RAPID_DECK') {
-        if (deckTaskIndex < filteredVerifyTasks.length - 1) {
-          setDeckTaskIndex(prev => prev + 1);
+      // 1. Instantly update local session verification state
+      setSessionVerificationMap(prev => ({
+        ...prev,
+        [taskId]: {
+          humanStatus: 'VERIFIED',
+          remarks: updatedRemarks,
+          auditor_remarks: updatedRemarks,
+          auditStatus: isPassVerdict ? 'PASSED' : 'FATAL',
+          human_verified: true
         }
-      } else {
-        alert(`Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} confirmed and verified by ${reviewerName}!`);
+      }));
+
+      // 2. Reflect to parent App.jsx tasks state
+      if (onTaskAudited) {
+        onTaskAudited(taskId, isPassVerdict ? 'PASSED' : 'FATAL', {
+          remarks: updatedRemarks,
+          auditor_remarks: updatedRemarks,
+          human_verified: true,
+          humanStatus: 'VERIFIED',
+          auditedBy: modelAuditorName
+        });
+      }
+
+      setHumanNotesInput('');
+      showVerificationToast(`Task #${targetTask.taskId || targetTask.id} verdict [${isPassVerdict ? 'PASSED' : 'FATAL'}] confirmed and human-verified in database!`, 'success');
+
+      // Auto-advance to next lead in queue
+      const currentIdx = queueTasks.findIndex(t => String(t.id || t.taskId) === taskId);
+      if (currentIdx >= 0 && currentIdx < queueTasks.length - 1) {
+        setSelectedTaskId(queueTasks[currentIdx + 1].id || queueTasks[currentIdx + 1].taskId);
+        setActiveAuditResult(null);
       }
     } catch (err) {
-      alert(`Failed to verify audit: ${err.message}`);
+      showVerificationToast(`Failed to verify audit: ${err.message}`, 'error');
     } finally {
       setIsVerifyingAction(false);
     }
@@ -1197,7 +1267,8 @@ export default function AIAuditsConsole({
 
   // Human overturns AI verdict
   const handleExecuteOverturn = async () => {
-    if (!selectedVerifyTask) return;
+    const targetTask = selectedTask || selectedVerifyTask;
+    if (!targetTask) return;
     if (!overrideReasonInput.trim()) {
       alert('Please enter a reason for overturning the AI verdict.');
       return;
@@ -1205,50 +1276,96 @@ export default function AIAuditsConsole({
 
     setIsVerifyingAction(true);
     try {
+      const taskId = String(targetTask.id || targetTask.taskId);
       const reviewerName = currentUser?.name || currentUser?.email || 'Central QA Reviewer';
-      const originalRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
-
-      const taskTokens = selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens || 0;
+      const originalRemarks = (targetTask.remarks || targetTask.auditor_remarks || '')
+        .replace(/\[Human Verified[^\]]*\]\s*/g, '')
+        .replace(/\[Human Overturned[^\]]*\]\s*/g, '');
+      const cleanReason = overrideReasonInput.trim();
+      const taskTokens = targetTask.totalTokens || targetTask.total_tokens || 0;
 
       if (overrideActionType === 'PASS') {
-        const remarks = `[Human Overturned FATAL to PASS by ${reviewerName}: ${overrideReasonInput.trim()}] Original AI: ${originalRemarks}`;
+        const updatedRemarks = `[Human Overturned FATAL to PASS by ${reviewerName}: ${cleanReason}] Original AI: ${originalRemarks}`.trim();
         await tasksApi.passAudit({
-          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
+          taskId,
           auditorName: reviewerName,
-          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
-          remarks,
+          auditorLocation: targetTask.facilityCode || 'Central QA',
+          remarks: updatedRemarks,
           criteriaStatus: { selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS' },
           replacements: [],
-          taskData: selectedVerifyTask,
+          taskData: targetTask,
           totalTokens: taskTokens
         });
+
+        setSessionVerificationMap(prev => ({
+          ...prev,
+          [taskId]: {
+            humanStatus: 'OVERTURNED',
+            remarks: updatedRemarks,
+            auditor_remarks: updatedRemarks,
+            auditStatus: 'PASSED',
+            human_overturned: true
+          }
+        }));
+
         if (onTaskAudited) {
-          onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, 'PASSED');
+          onTaskAudited(taskId, 'PASSED', {
+            remarks: updatedRemarks,
+            auditor_remarks: updatedRemarks,
+            human_overturned: true,
+            humanStatus: 'OVERTURNED',
+            auditedBy: reviewerName
+          });
         }
       } else {
-        const remarks = `[Human Overturned PASS to FATAL by ${reviewerName}: ${overrideReasonInput.trim()}] Original AI: ${originalRemarks}`;
+        const updatedRemarks = `[Human Overturned PASS to FATAL by ${reviewerName}: ${cleanReason}] Original AI: ${originalRemarks}`.trim();
         await tasksApi.failAudit({
-          taskId: selectedVerifyTask.id || selectedVerifyTask.taskId,
-          taskData: selectedVerifyTask,
-          failedReasons: [overrideReasonInput.trim()],
-          remarks,
-          criteriaStatus: selectedVerifyTask.criteriaStatus || {},
+          taskId,
+          taskData: targetTask,
+          failedReasons: [cleanReason],
+          remarks: updatedRemarks,
+          criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
           replacements: [],
           auditorName: reviewerName,
-          auditorLocation: selectedVerifyTask.facilityCode || 'Central QA',
+          auditorLocation: targetTask.facilityCode || 'Central QA',
           immediateEmail: false,
           totalTokens: taskTokens
         });
+
+        setSessionVerificationMap(prev => ({
+          ...prev,
+          [taskId]: {
+            humanStatus: 'OVERTURNED',
+            remarks: updatedRemarks,
+            auditor_remarks: updatedRemarks,
+            auditStatus: 'FATAL',
+            human_overturned: true
+          }
+        }));
+
         if (onTaskAudited) {
-          onTaskAudited(selectedVerifyTask.id || selectedVerifyTask.taskId, 'FATAL');
+          onTaskAudited(taskId, 'FATAL', {
+            remarks: updatedRemarks,
+            auditor_remarks: updatedRemarks,
+            human_overturned: true,
+            humanStatus: 'OVERTURNED',
+            auditedBy: reviewerName
+          });
         }
       }
 
       setOverrideModalOpen(false);
       setOverrideReasonInput('');
-      alert(`Verdict overturned to ${overrideActionType} for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id}!`);
+      showVerificationToast(`Task #${targetTask.taskId || targetTask.id} overturned to ${overrideActionType} in database!`, 'success');
+
+      // Auto-advance to next lead in queue
+      const currentIdx = queueTasks.findIndex(t => String(t.id || t.taskId) === taskId);
+      if (currentIdx >= 0 && currentIdx < queueTasks.length - 1) {
+        setSelectedTaskId(queueTasks[currentIdx + 1].id || queueTasks[currentIdx + 1].taskId);
+        setActiveAuditResult(null);
+      }
     } catch (err) {
-      alert(`Failed to overturn verdict: ${err.message}`);
+      showVerificationToast(`Failed to overturn verdict: ${err.message}`, 'error');
     } finally {
       setIsVerifyingAction(false);
     }
@@ -1281,14 +1398,16 @@ export default function AIAuditsConsole({
 
   // Open Fail AI Audit / Request Re-Audit Modal
   const handleOpenFailAiAuditModal = () => {
-    if (!selectedVerifyTask) return;
+    const targetTask = selectedTask || selectedVerifyTask;
+    if (!targetTask) return;
     setFailAiReasonInput('');
     setFailAiModalOpen(true);
   };
 
   // Execute Fail AI Audit (Mark as failed and route to Re-Audit queue)
   const handleExecuteFailAiAudit = async () => {
-    if (!selectedVerifyTask) return;
+    const targetTask = selectedTask || selectedVerifyTask;
+    if (!targetTask) return;
     if (!failAiReasonInput.trim()) {
       alert('Please enter a clinical reason why this AI audit failed and needs human re-check.');
       return;
@@ -1297,46 +1416,65 @@ export default function AIAuditsConsole({
     setIsVerifyingAction(true);
     try {
       const reviewerName = currentUser?.name || currentUser?.email || 'QA Reviewer';
-      const taskId = selectedVerifyTask.id || selectedVerifyTask.taskId;
+      const taskId = String(targetTask.id || targetTask.taskId);
       const cleanReason = failAiReasonInput.trim();
-      const origRemarks = selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || '';
+      const origRemarks = targetTask.remarks || targetTask.auditor_remarks || '';
+      const updatedRemarks = `[AI Audit Failed / Re-Audit Requested by ${reviewerName}: ${cleanReason}] ${origRemarks}`.trim();
 
       await tasksApi.failAiAudit({
         taskId,
-        taskData: selectedVerifyTask,
+        taskData: targetTask,
         reviewerName,
         reason: cleanReason,
         originalRemarks: origRemarks,
-        criteriaStatus: selectedVerifyTask.criteriaStatus || selectedVerifyTask.criteria_status || {},
-        failedReasons: selectedVerifyTask.failedReasons || selectedVerifyTask.failed_reasons || []
+        criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
+        failedReasons: targetTask.failedReasons || targetTask.failed_reasons || []
       });
 
       // Update session re-audit map
       setSessionReAuditMap(prev => ({
         ...prev,
-        [String(taskId)]: {
+        [taskId]: {
           reason: cleanReason,
           requestedAt: new Date().toLocaleTimeString()
         }
       }));
 
+      // Update local session verification map
+      setSessionVerificationMap(prev => ({
+        ...prev,
+        [taskId]: {
+          humanStatus: 'REAUDIT',
+          remarks: updatedRemarks,
+          auditor_remarks: updatedRemarks,
+          auditStatus: 'NEEDS_REAUDIT',
+          needsReAudit: true,
+          reAuditReason: cleanReason
+        }
+      }));
+
       if (onTaskAudited) {
-        onTaskAudited(taskId, 'NEEDS_REAUDIT');
+        onTaskAudited(taskId, 'NEEDS_REAUDIT', {
+          remarks: updatedRemarks,
+          auditor_remarks: updatedRemarks,
+          needsReAudit: true,
+          reAuditReason: cleanReason,
+          humanStatus: 'REAUDIT'
+        });
       }
 
       setFailAiModalOpen(false);
       setFailAiReasonInput('');
+      showVerificationToast(`Task #${targetTask.taskId || targetTask.id} marked as FAILED AI audit & queued for clinical re-audit in database!`, 'success');
 
-      if (verifyDeckViewMode === 'RAPID_DECK') {
-        if (deckTaskIndex < filteredVerifyTasks.length - 1) {
-          setDeckTaskIndex(prev => prev + 1);
-        }
-      } else {
-        alert(`AI Audit for Task #${selectedVerifyTask.taskId || selectedVerifyTask.id} marked as FAILED and sent to the Re-Audit Queue!`);
-        setActiveConsoleTab('REAUDIT');
+      // Auto-advance to next lead in queue
+      const currentIdx = queueTasks.findIndex(t => String(t.id || t.taskId) === taskId);
+      if (currentIdx >= 0 && currentIdx < queueTasks.length - 1) {
+        setSelectedTaskId(queueTasks[currentIdx + 1].id || queueTasks[currentIdx + 1].taskId);
+        setActiveAuditResult(null);
       }
     } catch (err) {
-      alert(`Failed to queue task for re-audit: ${err.message}`);
+      showVerificationToast(`Failed to queue task for re-audit: ${err.message}`, 'error');
     } finally {
       setIsVerifyingAction(false);
     }
@@ -2162,6 +2300,30 @@ export default function AIAuditsConsole({
 
       {/* UNIFIED MAIN WORKSPACE: Current Task Hero Card + AI Verdict Review Station + Live Audits Ledger */}
       <div className="space-y-6">
+
+        {/* Verification Toast Banner */}
+        {verificationToast && (
+          <div className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-between shadow-xl animate-fade-in ${
+            verificationToast.type === 'error'
+              ? 'bg-rose-950/80 border-rose-500/50 text-rose-200 shadow-rose-950/40'
+              : 'bg-emerald-950/80 border-emerald-500/50 text-emerald-200 shadow-emerald-950/40'
+          }`}>
+            <div className="flex items-center gap-2">
+              {verificationToast.type === 'error' ? (
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : (
+                <CheckCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span>{verificationToast.message}</span>
+            </div>
+            <button
+              onClick={() => setVerificationToast(null)}
+              className="text-slate-400 hover:text-white ml-2 text-xs font-mono font-normal"
+            >
+              &times;
+            </button>
+          </div>
+        )}
         
         {/* 1. CURRENT TASK HERO CARD (HUMAN-VERIFICATION SPEED DECK STYLE) */}
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-2xl space-y-5">
@@ -2191,22 +2353,42 @@ export default function AIAuditsConsole({
               </p>
             </div>
 
-            {/* Status badge & Prev/Next navigation */}
-            <div className="flex items-center gap-3">
+            {/* Status badges & Prev/Next navigation */}
+            <div className="flex items-center gap-2 flex-wrap">
               <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider border shadow-md ${
-                selectedTask?.auditStatus === 'PASSED'
+                (selectedTask?.auditStatus === 'PASSED' || selectedTask?.auditStatus === 'PASS')
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-emerald-950/40'
                   : selectedTask?.auditStatus === 'FATAL'
                   ? 'bg-red-500/20 text-red-300 border-red-500/50 shadow-red-950/40'
                   : 'bg-slate-800 text-slate-400 border-slate-700'
               }`}>
-                {selectedTask?.auditStatus === 'PASSED' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                {(selectedTask?.auditStatus === 'PASSED' || selectedTask?.auditStatus === 'PASS') && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
                 {selectedTask?.auditStatus === 'FATAL' && <ShieldAlert className="w-3.5 h-3.5 text-red-400" />}
-                <span>{selectedTask?.auditStatus ? `AI ${selectedTask.auditStatus}` : 'PENDING AUDIT'}</span>
+                <span>{selectedTask?.auditStatus ? `AI ${selectedTask.auditStatus === 'PASS' ? 'PASSED' : selectedTask.auditStatus}` : 'PENDING AUDIT'}</span>
                 {selectedTask?.overallScore !== undefined && (
                   <span className="font-mono">({selectedTask.overallScore}/100)</span>
                 )}
               </span>
+
+              {/* Real-time Human Verification Badge */}
+              {selectedTask?.humanStatus === 'VERIFIED' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm animate-fade-in">
+                  <CheckCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Human Verified</span>
+                </span>
+              )}
+              {selectedTask?.humanStatus === 'OVERTURNED' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm animate-fade-in">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Human Overturned</span>
+                </span>
+              )}
+              {selectedTask?.humanStatus === 'REAUDIT' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold bg-rose-500/20 text-rose-300 border border-rose-500/50 shadow-sm animate-fade-in">
+                  <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Re-Audit Queued</span>
+                </span>
+              )}
 
               <div className="flex items-center gap-1">
                 <button
@@ -2420,6 +2602,26 @@ export default function AIAuditsConsole({
                   Reviewer: <strong className="text-slate-200">{currentUser?.name || currentUser?.email || 'Central QA'}</strong>
                 </span>
               </div>
+
+              {/* If already verified or overturned, show banner */}
+              {selectedTask?.humanStatus === 'VERIFIED' && (
+                <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-xs flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Verdict is <strong>Human Verified</strong> and committed to Supabase database.</span>
+                  </div>
+                  <span className="text-[10px] text-emerald-400 font-mono font-bold px-2 py-0.5 rounded bg-emerald-900/50">LOCKED &bull; COMPLIANT</span>
+                </div>
+              )}
+              {selectedTask?.humanStatus === 'OVERTURNED' && (
+                <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-300 text-xs flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>AI verdict was <strong>Overturned by Human Reviewer</strong> and saved in database.</span>
+                  </div>
+                  <span className="text-[10px] text-amber-400 font-mono font-bold px-2 py-0.5 rounded bg-amber-900/50">OVERRULED</span>
+                </div>
+              )}
 
               <div>
                 <input
