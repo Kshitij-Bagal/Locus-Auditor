@@ -171,13 +171,48 @@ export default function AIAuditsConsole({
   const [isAuditing, setIsAuditing] = useState(false);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const isBatchCancelledRef = useRef(false);
+  const recentRequestTimesRef = useRef([]); // Tracks timestamps for sliding-window 13 RPM limiter
+  const [batchPaceStatus, setBatchPaceStatus] = useState({
+    rpm: 0,
+    jitterSeconds: '0.0',
+    statusText: '',
+    currentIdx: 0,
+    totalCount: 0
+  });
   const [currentProgress, setCurrentProgress] = useState({ step: '', message: '' });
   const [activeAuditResult, setActiveAuditResult] = useState(null);
   const [autoCommitToDb, setAutoCommitToDb] = useState(true);
 
-  // 4. Session History Ledger
+  // Parallel Worker Seat State (persisted in localStorage for multi-key collaboration without collisions)
+  const [teamWorkerCount, setTeamWorkerCount] = useState(() => {
+    try {
+      const val = parseInt(localStorage.getItem('locus_ai_worker_count') || '1', 10);
+      return (val >= 1 && val <= 4) ? val : 1;
+    } catch (_) { return 1; }
+  });
+  const [teamWorkerIndex, setTeamWorkerIndex] = useState(() => {
+    try {
+      const val = parseInt(localStorage.getItem('locus_ai_worker_seat') || '0', 10);
+      return (val >= 0) ? val : 0;
+    } catch (_) { return 0; }
+  });
+
+  const handleSetWorkerConfig = (count, seat) => {
+    const validCount = Math.max(1, Math.min(4, count));
+    const validSeat = Math.max(0, Math.min(validCount - 1, seat));
+    setTeamWorkerCount(validCount);
+    setTeamWorkerIndex(validSeat);
+    try {
+      localStorage.setItem('locus_ai_worker_count', String(validCount));
+      localStorage.setItem('locus_ai_worker_seat', String(validSeat));
+    } catch (_) {}
+  };
+
+  // 4. Session History & Live Audits Ledger States
   const [sessionHistory, setSessionHistory] = useState([]);
   const [previewImage, setPreviewImage] = useState(null);
+  const [ledgerFilter, setLedgerFilter] = useState('ALL'); // 'ALL' | 'PASSED' | 'FATAL' | 'VERIFIED' | 'OVERTURNED'
+  const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
 
   // 5. Active Console Mode: 'EXECUTE' | 'VERIFY' | 'REAUDIT'
   const [activeConsoleTab, setActiveConsoleTab] = useState('EXECUTE');
@@ -438,15 +473,22 @@ export default function AIAuditsConsole({
     });
   }, [tasks, selectedStatusFilter, selectedCity, selectedDate, searchQuery]);
 
-  // Selected Task
+  // Modulo Sharding for Parallel Worker Seats (Zero Collision Guarantee)
+  const allocatedQueueTasks = useMemo(() => {
+    if (teamWorkerCount <= 1) return queueTasks;
+    return queueTasks.filter((_, idx) => (idx % teamWorkerCount) === teamWorkerIndex);
+  }, [queueTasks, teamWorkerCount, teamWorkerIndex]);
+
+  // Selected Task (searches all tasks so selecting an audited task in the ledger works)
   const selectedTask = useMemo(() => {
-    if (!queueTasks.length) return null;
     if (selectedTaskId) {
-      const found = queueTasks.find(t => String(t.id || t.taskId) === String(selectedTaskId));
+      const found = tasks.find(t => String(t.id || t.taskId) === String(selectedTaskId));
       if (found) return found;
     }
-    return queueTasks[0];
-  }, [queueTasks, selectedTaskId]);
+    if (allocatedQueueTasks.length) return allocatedQueueTasks[0];
+    if (queueTasks.length) return queueTasks[0];
+    return tasks[0] || null;
+  }, [tasks, queueTasks, allocatedQueueTasks, selectedTaskId]);
 
   // Execute AI Audit on a single task (Universal Multi-Provider with Quota Failover)
   const runAiAuditOnTask = async (taskToAudit, shouldCommit = autoCommitToDb) => {
@@ -755,44 +797,98 @@ export default function AIAuditsConsole({
     alert(`Successfully marked ${count} tasks as FATAL in database with 0 AI tokens consumed!`);
   };
 
-  // Run Batch AI Auditing Loop (automatically skips any tasks excluded by the forensic pre-screener)
-  const runBatchAuditing = async (batchCount = 5) => {
+  // Run Continuous Auto-Auditor with strict 13 RPM Rate Limiter & 1.0-1.5s Jitter
+  const runContinuousAutoAudit = async (batchCount = null) => {
     const prov = SUPPORTED_PROVIDERS.find(p => p.id === activeProvider) || SUPPORTED_PROVIDERS[0];
     if (!apiKey.trim()) {
       alert(`Please enter and connect your ${prov.name} API Key first.`);
       return;
     }
-    if (queueTasks.length === 0) {
-      alert('No pending tasks in queue.');
+    if (allocatedQueueTasks.length === 0) {
+      alert('No pending tasks allocated to this worker seat in current queue.');
       return;
     }
 
     // Filter out tasks excluded by forensic screener
-    const eligibleTasks = queueTasks.filter(t => !excludedTaskIds.has(String(t.id || t.taskId)));
+    const eligibleTasks = allocatedQueueTasks.filter(t => !excludedTaskIds.has(String(t.id || t.taskId)));
     if (eligibleTasks.length === 0) {
-      alert(`All ${queueTasks.length} pending tasks in queue are currently excluded from AI audits by the Forensic Screener. Uncheck any false-positive tasks in the Forensic Screener tab to evaluate them.`);
+      alert(`All ${allocatedQueueTasks.length} tasks allocated to your seat are currently excluded by the Forensic Screener. Uncheck any in the Forensic tab to evaluate them.`);
       return;
     }
 
-    const tasksToProcess = eligibleTasks.slice(0, batchCount);
+    const tasksToProcess = (typeof batchCount === 'number' && batchCount > 0)
+      ? eligibleTasks.slice(0, batchCount)
+      : eligibleTasks;
+
     setIsBatchRunning(true);
     isBatchCancelledRef.current = false;
 
     let processed = 0;
-    for (const t of tasksToProcess) {
+    const total = tasksToProcess.length;
+
+    for (let i = 0; i < total; i++) {
       if (isBatchCancelledRef.current) break;
+      const t = tasksToProcess[i];
+
+      // Instant Skip Safeguard: If task is already audited (e.g. audited by another worker in Supabase)
+      if (t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL') {
+        continue;
+      }
+
+      // Update UI selection immediately so hero card displays current task being audited
       setSelectedTaskId(t.id || t.taskId);
+
+      // 1. Strict 13 RPM Rate Limiting Guard (Sliding 60-Second Window)
+      const now = Date.now();
+      recentRequestTimesRef.current = recentRequestTimesRef.current.filter(ts => now - ts < 60000);
+      if (recentRequestTimesRef.current.length >= 13) {
+        const oldest = recentRequestTimesRef.current[0];
+        const waitMs = Math.max(1000, 60000 - (now - oldest) + 500); // Wait until window clears + 500ms safety buffer
+        setBatchPaceStatus(prev => ({
+          ...prev,
+          currentIdx: i + 1,
+          totalCount: total,
+          statusText: `13 RPM Safety Guard: 13 requests sent in last 60s. Pausing ${Math.ceil(waitMs / 1000)}s to protect API quota...`
+        }));
+        await new Promise(r => setTimeout(r, waitMs));
+        if (isBatchCancelledRef.current) break;
+      }
+
+      // Record request timestamp
+      recentRequestTimesRef.current.push(Date.now());
+      const currentRpm = recentRequestTimesRef.current.length;
+
+      setBatchPaceStatus(prev => ({
+        ...prev,
+        currentIdx: i + 1,
+        totalCount: total,
+        rpm: currentRpm,
+        statusText: `Auditing Task #${t.taskId || t.id} (${i + 1}/${total})...`
+      }));
+
+      // Execute AI Audit on task
       await runAiAuditOnTask(t, autoCommitToDb);
       processed++;
-      
-      // 2000ms throttle interval between tasks to stay safely under Google's 15 RPM rate limit
-      if (processed < tasksToProcess.length && !isBatchCancelledRef.current) {
-        await new Promise(r => setTimeout(r, 2000));
+
+      if (i < total - 1 && !isBatchCancelledRef.current) {
+        // 2. Base throttle + 1.0s to 1.5s random jitter
+        // Base delay 4620ms ensures ~13 RPM (60000 / 13 = 4615ms)
+        const jitterMs = 1000 + Math.floor(Math.random() * 500); // 1000ms - 1500ms
+        const totalDelay = 4620 + jitterMs;
+        setBatchPaceStatus(prev => ({
+          ...prev,
+          jitterSeconds: (jitterMs / 1000).toFixed(1),
+          statusText: `Pacing: ${(jitterMs / 1000).toFixed(1)}s jitter (maintaining ${currentRpm} RPM)...`
+        }));
+        await new Promise(r => setTimeout(r, totalDelay));
       }
     }
 
     setIsBatchRunning(false);
+    setBatchPaceStatus({ rpm: 0, jitterSeconds: '0.0', statusText: '', currentIdx: 0, totalCount: 0 });
   };
+
+  const runBatchAuditing = runContinuousAutoAudit;
 
   const handleStopBatch = () => {
     isBatchCancelledRef.current = true;
@@ -909,19 +1005,33 @@ export default function AIAuditsConsole({
     });
   }, [allAiAuditedTasks, verifyVerdictFilter, verifyHumanStatusFilter, verifyCityFilter, verifySearchQuery]);
 
-  // Selected Task for Human Verification
+  // Filtered tasks for the Live AI Audits & Verdicts Ledger
+  const filteredLedgerTasks = useMemo(() => {
+    return allAiAuditedTasks.filter(t => {
+      if (ledgerFilter === 'PASSED' && t.auditStatus !== 'PASSED') return false;
+      if (ledgerFilter === 'FATAL' && t.auditStatus !== 'FATAL') return false;
+      if (ledgerFilter === 'VERIFIED' && t.humanStatus !== 'VERIFIED') return false;
+      if (ledgerFilter === 'OVERTURNED' && t.humanStatus !== 'OVERTURNED') return false;
+      if (ledgerSearchQuery.trim()) {
+        const q = ledgerSearchQuery.toLowerCase().trim();
+        const mId = String(t.taskId || t.id || '').toLowerCase().includes(q);
+        const mFe = String(t.feName || '').toLowerCase().includes(q);
+        const mCode = String(t.feCode || '').toLowerCase().includes(q);
+        const mCity = String(t.facilityCode || t.city || '').toLowerCase().includes(q);
+        if (!mId && !mFe && !mCode && !mCity) return false;
+      }
+      return true;
+    });
+  }, [allAiAuditedTasks, ledgerFilter, ledgerSearchQuery]);
+
+  // Selected Task for Verification & Review (points to selectedTask or selectedVerifyTaskId)
   const selectedVerifyTask = useMemo(() => {
-    if (!filteredVerifyTasks.length) return null;
-    if (verifyDeckViewMode === 'RAPID_DECK') {
-      const idx = Math.min(Math.max(0, deckTaskIndex), filteredVerifyTasks.length - 1);
-      return filteredVerifyTasks[idx] || filteredVerifyTasks[0] || null;
-    }
     if (selectedVerifyTaskId) {
-      const found = filteredVerifyTasks.find(t => String(t.id || t.taskId) === String(selectedVerifyTaskId));
+      const found = allAiAuditedTasks.find(t => String(t.id || t.taskId) === String(selectedVerifyTaskId));
       if (found) return found;
     }
-    return filteredVerifyTasks[0];
-  }, [filteredVerifyTasks, selectedVerifyTaskId, verifyDeckViewMode, deckTaskIndex]);
+    return selectedTask;
+  }, [allAiAuditedTasks, selectedVerifyTaskId, selectedTask]);
 
   // Images for selected verification task
   const verifyTaskImages = useMemo(() => {
@@ -1428,37 +1538,24 @@ export default function AIAuditsConsole({
         </div>
       </div>
 
-      {/* Mode Switcher: Run AI Audits vs Human Verification Hub */}
-      <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+      {/* Mode Switcher: Unified AI Audits & Verification Hub vs Re-Audit Queue vs Forensic Screener */}
+      <div className="flex items-center gap-3 border-b border-slate-800 pb-3 flex-wrap">
         <button
           type="button"
           onClick={() => setActiveConsoleTab('EXECUTE')}
           className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
             activeConsoleTab === 'EXECUTE'
-              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-lg shadow-sky-950/50'
+              ? 'bg-gradient-to-r from-sky-500/20 via-indigo-500/20 to-purple-500/20 text-sky-300 border border-sky-500/40 shadow-lg shadow-sky-950/50'
               : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
           }`}
         >
           <Sparkles className="w-4 h-4 text-sky-400" />
-          <span>Run AI Audits</span>
-          <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-slate-300 border border-slate-800 font-mono">
+          <span>⚡ AI Audits & Verification Hub</span>
+          <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-sky-300 border border-slate-800 font-mono">
             {queueTasks.length} Pending
           </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveConsoleTab('VERIFY')}
-          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
-            activeConsoleTab === 'VERIFY'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-lg shadow-emerald-950/50'
-              : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
-          }`}
-        >
-          <UserCheck className="w-4 h-4 text-emerald-400" />
-          <span>Human Review & Verification</span>
-          <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-emerald-300 border border-slate-800 font-mono">
-            {allAiAuditedTasks.length} AI Audits
+          <span className="px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-emerald-400 border border-slate-800 font-mono">
+            {allAiAuditedTasks.length} Audited
           </span>
         </button>
 
@@ -1828,8 +1925,8 @@ export default function AIAuditsConsole({
           </label>
         </div>
 
-        {/* Filter Dropdowns */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+        {/* Filter Dropdowns & Team Worker Seat Partitioning */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
           
           <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
             <span className="text-[10px] font-bold text-slate-400 block mb-1">Queue Status</span>
@@ -1872,6 +1969,36 @@ export default function AIAuditsConsole({
             </select>
           </div>
 
+          {/* Parallel Worker Seat Selector (Deterministic Modulo Sharding) */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+            <span className="text-[10px] font-bold text-slate-400 block mb-1 flex items-center justify-between">
+              <span>👥 Team Worker Seat</span>
+              <span className="text-[9px] text-sky-400 font-mono font-bold">
+                {allocatedQueueTasks.length} Assigned
+              </span>
+            </span>
+            <select
+              value={`${teamWorkerCount}-${teamWorkerIndex}`}
+              onChange={(e) => {
+                const [c, s] = e.target.value.split('-').map(Number);
+                handleSetWorkerConfig(c, s);
+              }}
+              className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
+              title="Select which worker partition this browser will audit. Worker 1 and Worker 2 run in parallel without ever touching the same task!"
+            >
+              <option value="1-0" className="bg-slate-900">Solo Worker (100% Queue)</option>
+              <option value="2-0" className="bg-slate-900">Worker 1 of 2 (50% - Evens)</option>
+              <option value="2-1" className="bg-slate-900">Worker 2 of 2 (50% - Odds)</option>
+              <option value="3-0" className="bg-slate-900">Worker 1 of 3 (33% - Slot 1)</option>
+              <option value="3-1" className="bg-slate-900">Worker 2 of 3 (33% - Slot 2)</option>
+              <option value="3-2" className="bg-slate-900">Worker 3 of 3 (33% - Slot 3)</option>
+              <option value="4-0" className="bg-slate-900">Worker 1 of 4 (25%)</option>
+              <option value="4-1" className="bg-slate-900">Worker 2 of 4 (25%)</option>
+              <option value="4-2" className="bg-slate-900">Worker 3 of 4 (25%)</option>
+              <option value="4-3" className="bg-slate-900">Worker 4 of 4 (25%)</option>
+            </select>
+          </div>
+
           <div className="bg-slate-950 border border-slate-800 rounded-xl p-2 flex items-center">
             <Search className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
             <input
@@ -1889,62 +2016,64 @@ export default function AIAuditsConsole({
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
           
           <div className="flex items-center gap-2 flex-wrap">
+            {/* 1-Click Continuous Auto-Audit Button */}
+            {!isBatchRunning ? (
+              <button
+                onClick={() => runContinuousAutoAudit()}
+                disabled={isAuditing || allocatedQueueTasks.length === 0}
+                className="px-4 py-2.5 rounded-xl text-xs font-black bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 disabled:opacity-50 text-white shadow-xl shadow-indigo-950/50 flex items-center gap-2 transition-all cursor-pointer"
+                title="Continuously audit all tasks allocated to your seat under strict 13 RPM rate limit with 1.0-1.5s jitter"
+              >
+                <Zap className="w-4 h-4 text-amber-300" />
+                <span>Start Auto-Audit (All {allocatedQueueTasks.length} Assigned)</span>
+              </button>
+            ) : (
+              <button
+                onClick={handleStopBatch}
+                className="px-4 py-2.5 rounded-xl text-xs font-black bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-950/50 flex items-center gap-2 transition-all cursor-pointer animate-pulse"
+              >
+                <Pause className="w-4 h-4" />
+                <span>Pause / Stop Auto-Audit</span>
+              </button>
+            )}
+
+            <button
+              onClick={() => runContinuousAutoAudit(5)}
+              disabled={isAuditing || isBatchRunning || allocatedQueueTasks.length === 0}
+              className="px-3.5 py-2.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5 text-sky-400" />
+              <span>Batch of 5</span>
+            </button>
+
             <button
               onClick={() => runAiAuditOnTask(selectedTask)}
               disabled={isAuditing || isBatchRunning || !selectedTask}
-              className="px-4 py-2 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white shadow-lg shadow-sky-600/25 flex items-center gap-2 transition-all cursor-pointer"
+              className="px-3.5 py-2.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-all cursor-pointer"
             >
-              {isAuditing && !isBatchRunning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-              <span>Audit Current Task</span>
-            </button>
-
-            <button
-              onClick={() => runBatchAuditing(5)}
-              disabled={isAuditing || isBatchRunning || queueTasks.length === 0}
-              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white shadow-lg shadow-indigo-600/25 flex items-center gap-2 transition-all cursor-pointer"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>Audit Batch of 5</span>
-            </button>
-
-            <button
-              onClick={() => runBatchAuditing(10)}
-              disabled={isAuditing || isBatchRunning || queueTasks.length === 0}
-              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-white shadow-lg shadow-blue-700/25 flex items-center gap-2 transition-all cursor-pointer"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>Audit Batch of 10</span>
+              <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+              <span>Audit Single Lead</span>
             </button>
 
             {/* Run Forensic Pre-Screen Button */}
             <button
               onClick={handleRunForensicPreScreen}
               disabled={isForensicScanning || queueTasks.length === 0}
-              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white shadow-lg shadow-purple-600/25 flex items-center gap-2 transition-all cursor-pointer"
+              className="px-3.5 py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white shadow-lg shadow-purple-600/25 flex items-center gap-2 transition-all cursor-pointer"
               title="Pre-screen queue for blank/black/blurry images to exclude from AI audit and save API quota"
             >
               {isForensicScanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-purple-200" /> : <ShieldAlert className="w-3.5 h-3.5 text-purple-200" />}
-              <span>Run Forensic Pre-Screen</span>
+              <span>Forensic Pre-Screen</span>
               {forensicFlags.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-purple-950 text-purple-200 text-[10px] font-mono border border-purple-400/40">
+                <span className="px-1.5 py-0.2 rounded-full bg-purple-950 text-purple-200 text-[10px] font-mono border border-purple-400/40 font-bold">
                   {forensicFlags.length} Excluded
                 </span>
               )}
             </button>
-
-            {isBatchRunning && (
-              <button
-                onClick={handleStopBatch}
-                className="px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/25 flex items-center gap-2 transition-all cursor-pointer"
-              >
-                <Pause className="w-3.5 h-3.5" />
-                <span>Pause / Stop Batch</span>
-              </button>
-            )}
           </div>
 
           {/* Progress / Status banner */}
-          {isAuditing && (
+          {isAuditing && !isBatchRunning && (
             <div className="flex items-center gap-2 text-xs text-sky-400 font-semibold animate-pulse">
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
               <span>{currentProgress.message || 'Processing multimodal audit...'}</span>
@@ -1952,6 +2081,45 @@ export default function AIAuditsConsole({
           )}
 
         </div>
+
+        {/* Live Batch HUD & Rate Limiter Telemetry Banner */}
+        {isBatchRunning && (
+          <div className="p-3.5 rounded-xl bg-gradient-to-r from-indigo-950/60 via-slate-950 to-sky-950/60 border border-indigo-500/40 shadow-xl space-y-2 animate-fade-in text-xs">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2 font-bold text-white">
+                <RefreshCw className="w-4 h-4 animate-spin text-sky-400" />
+                <span>Continuous Auto-Audit Running:</span>
+                <span className="font-mono text-sky-300">
+                  Task {batchPaceStatus.currentIdx} of {batchPaceStatus.totalCount}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 font-mono text-[11px] flex-wrap">
+                <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-emerald-400 font-bold">
+                  ⚡ Pace: {batchPaceStatus.rpm} / 13 max RPM
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-amber-300">
+                  🎲 Jitter: {batchPaceStatus.jitterSeconds}s
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-slate-300">
+                  Worker {teamWorkerIndex + 1} of {teamWorkerCount}
+                </span>
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden border border-slate-800">
+              <div 
+                className="bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 h-full transition-all duration-300"
+                style={{ width: `${batchPaceStatus.totalCount > 0 ? (batchPaceStatus.currentIdx / batchPaceStatus.totalCount) * 100 : 0}%` }}
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <span className="truncate max-w-lg">{batchPaceStatus.statusText || currentProgress.message || 'Pacing requests to prevent rate limits...'}</span>
+              <span>Remaining in seat: {Math.max(0, batchPaceStatus.totalCount - batchPaceStatus.currentIdx)} leads</span>
+            </div>
+          </div>
+        )}
 
         {/* Forensic Pre-Screening Progress Bar */}
         {isForensicScanning && (
@@ -1992,104 +2160,150 @@ export default function AIAuditsConsole({
         )}
       </div>
 
-      {/* Main Split-Screen Workspace: Task & 5 Photos (Left) + AI Audit Report (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {/* UNIFIED MAIN WORKSPACE: Current Task Hero Card + AI Verdict Review Station + Live Audits Ledger */}
+      <div className="space-y-6">
         
-        {/* LEFT COLUMN: TASK METADATA & 5 PHOTO STATIONS (5 Columns) */}
-        <div className="lg:col-span-5 space-y-4">
+        {/* 1. CURRENT TASK HERO CARD (HUMAN-VERIFICATION SPEED DECK STYLE) */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-2xl space-y-5">
           
-          {/* Active Task Selector Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-3">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Current Lead Details</span>
-              <span className="text-xs font-mono font-bold text-sky-400">
-                Task #{selectedTask?.taskId || selectedTask?.id || '—'}
-              </span>
+          {/* Card Header Banner */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-mono text-base font-black text-white">
+                  TASK #{selectedTask?.taskId || selectedTask?.id || '—'}
+                </span>
+                <span className="px-2.5 py-0.5 rounded-md text-[11px] font-bold bg-slate-800 text-slate-200 border border-slate-700">
+                  {selectedTask?.facilityCode || selectedTask?.city || 'Hub'}
+                </span>
+                <span className="text-xs text-slate-400 font-mono">
+                  {selectedTask?.date || selectedTask?.dispatch_date || 'No Date'}
+                </span>
+                {selectedTask?.pin && (
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    PIN: {selectedTask.pin}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-300 font-medium">
+                Field Executive: <strong className="text-white">{selectedTask?.feName || 'Unknown'}</strong>{' '}
+                <span className="text-slate-500 font-mono">[{selectedTask?.feCode || 'FE'}]</span> &bull; Customer: <span className="text-slate-200">{selectedTask?.customerName || 'N/A'}</span>
+              </p>
             </div>
 
-            {selectedTask ? (
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Field Executive:</span>
-                  <span className="font-bold text-white">{selectedTask.feName} <span className="text-slate-500 font-mono">[{selectedTask.feCode}]</span></span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Hub / City:</span>
-                  <span className="font-semibold text-slate-200">{selectedTask.facilityCode || selectedTask.city}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Dispatch Date:</span>
-                  <span className="font-mono text-slate-200">{selectedTask.date || selectedTask.dispatch_date}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Customer:</span>
-                  <span className="font-medium text-slate-200">{selectedTask.customerName}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Current Audit Status:</span>
-                  <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${
-                    selectedTask.auditStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-400' :
-                    selectedTask.auditStatus === 'FATAL' ? 'bg-red-500/20 text-red-400' : 'bg-slate-800 text-slate-400'
-                  }`}>
-                    {selectedTask.auditStatus || 'PENDING'}
-                  </span>
-                </div>
+            {/* Status badge & Prev/Next navigation */}
+            <div className="flex items-center gap-3">
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider border shadow-md ${
+                selectedTask?.auditStatus === 'PASSED'
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-emerald-950/40'
+                  : selectedTask?.auditStatus === 'FATAL'
+                  ? 'bg-red-500/20 text-red-300 border-red-500/50 shadow-red-950/40'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}>
+                {selectedTask?.auditStatus === 'PASSED' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                {selectedTask?.auditStatus === 'FATAL' && <ShieldAlert className="w-3.5 h-3.5 text-red-400" />}
+                <span>{selectedTask?.auditStatus ? `AI ${selectedTask.auditStatus}` : 'PENDING AUDIT'}</span>
+                {selectedTask?.overallScore !== undefined && (
+                  <span className="font-mono">({selectedTask.overallScore}/100)</span>
+                )}
+              </span>
+
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => {
+                    const currentIdx = queueTasks.findIndex(t => String(t.id || t.taskId) === String(selectedTask?.id || selectedTask?.taskId));
+                    if (currentIdx > 0) {
+                      setSelectedTaskId(queueTasks[currentIdx - 1].id || queueTasks[currentIdx - 1].taskId);
+                      setActiveAuditResult(null);
+                    }
+                  }}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
+                  title="Previous lead in queue"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => {
+                    const currentIdx = queueTasks.findIndex(t => String(t.id || t.taskId) === String(selectedTask?.id || selectedTask?.taskId));
+                    if (currentIdx >= 0 && currentIdx < queueTasks.length - 1) {
+                      setSelectedTaskId(queueTasks[currentIdx + 1].id || queueTasks[currentIdx + 1].taskId);
+                      setActiveAuditResult(null);
+                    }
+                  }}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
+                  title="Next lead in queue"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
               </div>
-            ) : (
-              <div className="py-6 text-center text-slate-500 text-xs">No tasks in current queue filter.</div>
-            )}
+            </div>
           </div>
 
-          {/* 5 Clinical SOP Photos Thumbnails */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-3">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                <Camera className="w-3.5 h-3.5 text-sky-400" />
-                <span>5 Mandatory Inspection Photos</span>
+          {/* 5-Station Photo Gallery (Horizontal Responsive 5-Column Grid) */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-slate-400 font-bold uppercase tracking-wider">
+              <span className="flex items-center gap-1.5 text-sky-400">
+                <Camera className="w-3.5 h-3.5" />
+                <span>5 Mandatory Clinical Photo Stations</span>
               </span>
-              <span className="text-[10px] text-slate-500">Click to enlarge</span>
+              <span className="text-[10px] text-slate-500 font-normal">Click any photo to zoom & enlarge</span>
             </div>
 
-            <div className="space-y-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
               {[
-                { key: 'selfie', label: '1. Selfie: T-Shirt & ID Card' },
-                { key: 'torches', label: '2. Working Blue & Yellow Torches' },
-                { key: 'visionChart', label: '3. Vision Chart & Standee' },
-                { key: 'toolkit', label: '4. Refraction Toolkit' },
-                { key: 'frameDisplay', label: '5. Frame Display at House' }
-              ].map((station, idx) => {
-                const url = taskImages[station.key];
+                { key: 'selfie', label: '1. Selfie & ID', icon: '🤳' },
+                { key: 'torches', label: '2. Dual Torches', icon: '🔦' },
+                { key: 'visionChart', label: '3. Vision Chart', icon: '📊' },
+                { key: 'toolkit', label: '4. Toolkit', icon: '🧰' },
+                { key: 'frameDisplay', label: '5. Frame Display', icon: '👓' }
+              ].map(st => {
+                const url = taskImages[st.key];
                 return (
-                  <div key={station.key} className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/80 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-12 h-12 rounded-lg bg-slate-900 border border-slate-800 overflow-hidden shrink-0 relative group">
+                  <div
+                    key={st.key}
+                    className="rounded-2xl border border-slate-800 bg-slate-950/80 p-2.5 flex flex-col justify-between hover:border-slate-700 transition-all group"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between text-xs font-bold text-white mb-2">
+                        <span className="truncate">{st.icon} {st.label}</span>
+                        <span className={`text-[9px] font-mono px-1.5 py-0.2 rounded font-bold ${
+                          url ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
+                        }`}>
+                          {url ? 'Attached' : 'Zero Upload'}
+                        </span>
+                      </div>
+
+                      <div className="aspect-[4/3] rounded-xl bg-slate-900 border border-slate-800/80 overflow-hidden relative group/img">
                         {url ? (
-                          <img
-                            src={url}
-                            alt={station.label}
-                            className="w-full h-full object-cover cursor-pointer hover:scale-110 transition-transform"
-                            onClick={() => setPreviewImage({ url, title: station.label })}
-                          />
+                          <>
+                            <img
+                              src={url}
+                              alt={st.label}
+                              className="w-full h-full object-cover cursor-pointer group-hover/img:scale-105 transition-transform duration-200"
+                              onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}` })}
+                            />
+                            <div
+                              onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}` })}
+                              className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center cursor-pointer text-white font-bold text-xs gap-1"
+                            >
+                              <Eye className="w-3.5 h-3.5" /> Zoom
+                            </div>
+                          </>
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-600 font-bold">
-                            MISSING
+                          <div className="w-full h-full flex flex-col items-center justify-center text-slate-600 font-bold text-[10px] gap-1 p-2 text-center">
+                            <AlertTriangle className="w-4 h-4 text-rose-500/60" />
+                            <span>NO PHOTO UPLOADED</span>
                           </div>
                         )}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold text-white truncate">{station.label}</div>
-                        <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                          {url ? 'Photo Attached' : <span className="text-red-400 font-bold">Zero Upload</span>}
-                        </div>
                       </div>
                     </div>
 
                     {url && (
                       <button
-                        onClick={() => setPreviewImage({ url, title: station.label })}
-                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold transition-colors cursor-pointer shrink-0"
+                        onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}` })}
+                        className="mt-2 w-full py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold transition-colors cursor-pointer text-center"
                       >
-                        Enlarge
+                        Enlarge Photo
                       </button>
                     )}
                   </div>
@@ -2100,1256 +2314,351 @@ export default function AIAuditsConsole({
 
         </div>
 
-        {/* RIGHT COLUMN: AI AUDIT REPORT & MULTIMODAL VERDICT (7 Columns) */}
-        <div className="lg:col-span-7 space-y-4">
-          
-          {activeAuditResult ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl space-y-5 animate-fade-in">
-              
-              {/* Verdict Header Ribbon */}
-              <div className={`p-4 rounded-xl border flex items-center justify-between gap-4 ${
-                activeAuditResult.result.verdict === 'PASS'
-                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                  : 'bg-red-950/40 border-red-500/40 text-red-300'
-              }`}>
-                <div className="flex items-center gap-3">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-white shadow-lg ${
-                    activeAuditResult.result.verdict === 'PASS' ? 'bg-emerald-600 shadow-emerald-600/30' : 'bg-red-600 shadow-red-600/30'
-                  }`}>
-                    {activeAuditResult.result.verdict === 'PASS' ? <CheckCircle2 className="w-6 h-6" /> : <ShieldAlert className="w-6 h-6" />}
-                  </div>
-                  <div>
-                    <div className="text-[10px] uppercase font-bold tracking-wider">Multimodal AI Inspection Verdict</div>
-                    <div className="text-xl font-black text-white">
-                      {activeAuditResult.result.verdict === 'PASS' ? 'AUDIT PASSED' : 'FATAL NON-COMPLIANCE STRIKE'}
-                    </div>
-                  </div>
+        {/* 2. AI VERDICT & HUMAN DECISION STATION (When Active Audit Result OR Audited Task Selected) */}
+        {(activeAuditResult || selectedTask?.auditStatus === 'PASSED' || selectedTask?.auditStatus === 'FATAL') && (
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 animate-fade-in">
+            
+            {/* Verdict Header Ribbon */}
+            <div className={`p-4 rounded-2xl border flex items-center justify-between flex-wrap gap-4 ${
+              (activeAuditResult?.result?.verdict === 'PASS' || selectedTask?.auditStatus === 'PASSED')
+                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                : 'bg-red-950/40 border-red-500/40 text-red-300'
+            }`}>
+              <div className="flex items-center gap-3">
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-white shadow-lg ${
+                  (activeAuditResult?.result?.verdict === 'PASS' || selectedTask?.auditStatus === 'PASSED')
+                    ? 'bg-emerald-600 shadow-emerald-600/30'
+                    : 'bg-red-600 shadow-red-600/30'
+                }`}>
+                  {(activeAuditResult?.result?.verdict === 'PASS' || selectedTask?.auditStatus === 'PASSED')
+                    ? <CheckCircle2 className="w-6 h-6" />
+                    : <ShieldAlert className="w-6 h-6" />}
                 </div>
-
-                {/* Score & Error Margin Gauge */}
-                <div className="text-right">
-                  <div className="text-2xl font-black text-white font-mono">
-                    {activeAuditResult.result.overallScore}<span className="text-xs text-slate-400 font-normal">/100</span>
+                <div>
+                  <div className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                    Multimodal AI Inspection Verdict
                   </div>
-                  <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                    Error Margin: <strong className="text-amber-300">&plusmn;{activeAuditResult.result.errorMargin}%</strong> ({activeAuditResult.result.confidenceScore}% conf.)
+                  <div className="text-xl font-black text-white">
+                    {(activeAuditResult?.result?.verdict === 'PASS' || selectedTask?.auditStatus === 'PASSED')
+                      ? 'AUDIT PASSED'
+                      : 'FATAL NON-COMPLIANCE STRIKE'}
                   </div>
                 </div>
               </div>
 
-              {/* AI Executive Summary */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
-                  Gemini Clinical Evaluation Summary
-                </span>
-                <p className="text-slate-200 leading-relaxed font-sans">
-                  {activeAuditResult.result.summary}
-                </p>
-                {activeAuditResult.result.isFraudulentOrBlankDetected && (
-                  <div className="mt-2.5 p-2 rounded-lg bg-rose-950/50 border border-rose-800 text-rose-300 text-[11px] font-bold flex items-center gap-2">
-                    <ShieldAlert className="w-4 h-4 shrink-0" />
-                    <span>Fraud Alert: AI identified blank, covered lens, or camera-obscured photo submission.</span>
-                  </div>
-                )}
+              {/* Score & Confidence */}
+              <div className="text-right">
+                <div className="text-2xl font-black text-white font-mono">
+                  {activeAuditResult?.result?.overallScore ?? selectedTask?.overallScore ?? (selectedTask?.auditStatus === 'PASSED' ? 100 : 0)}
+                  <span className="text-xs text-slate-400 font-normal">/100</span>
+                </div>
+                <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                  Model: <strong className="text-sky-300">{activeAuditResult?.result?.modelUsed || selectedTask?.auditedBy || 'gemini-3.8-flash'}</strong>
+                  {activeAuditResult?.result?.confidenceScore && (
+                    <span> &bull; Conf: {activeAuditResult.result.confidenceScore}%</span>
+                  )}
+                </div>
               </div>
+            </div>
 
-              {/* 5-Station Checklist Accordion */}
-              <div>
-                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+            {/* AI Executive Summary / Observations */}
+            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-xs space-y-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block">
+                Clinical Evaluation Summary
+              </span>
+              <p className="text-slate-200 leading-relaxed font-sans">
+                {activeAuditResult?.result?.summary || selectedTask?.remarks || selectedTask?.auditor_remarks || 'Compliant with clinical standards.'}
+              </p>
+              {activeAuditResult?.result?.isFraudulentOrBlankDetected && (
+                <div className="mt-2 p-2 rounded-lg bg-rose-950/50 border border-rose-800 text-rose-300 text-[11px] font-bold flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 shrink-0" />
+                  <span>Fraud Alert: AI identified blank, covered lens, or camera-obscured photo submission.</span>
+                </div>
+              )}
+            </div>
+
+            {/* 5-Station Itemized Checklist (if available) */}
+            {activeAuditResult?.result?.criteriaEvaluation && activeAuditResult.result.criteriaEvaluation.length > 0 && (
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                   <Layers className="w-3.5 h-3.5 text-sky-400" />
                   <span>Item-by-Item SOP Evaluation</span>
                 </h4>
-
-                <div className="space-y-2">
-                  {(activeAuditResult.result.criteriaEvaluation || []).map((crit) => (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {activeAuditResult.result.criteriaEvaluation.map((crit) => (
                     <div
                       key={crit.id}
-                      className={`p-3 rounded-xl border text-xs transition-all ${
-                        crit.status === 'PASS'
-                          ? 'bg-slate-950/60 border-slate-800'
-                          : 'bg-red-950/20 border-red-900/50'
+                      className={`p-3 rounded-xl border text-xs ${
+                        crit.status === 'PASS' ? 'bg-slate-950/60 border-slate-800' : 'bg-red-950/20 border-red-900/50'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 font-bold text-white">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white flex items-center gap-1.5">
                           <span className={`w-2 h-2 rounded-full ${crit.status === 'PASS' ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                          <span>{crit.label}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-slate-400 font-mono text-[11px]">{crit.score}/100</span>
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            crit.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
-                          }`}>
-                            {crit.status}
-                          </span>
-                        </div>
+                          {crit.label}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          crit.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
+                        }`}>
+                          {crit.status}
+                        </span>
                       </div>
-
-                      <div className="text-[11px] text-slate-300 mt-2 leading-relaxed">
-                        {crit.observations}
-                      </div>
-
-                      {crit.failureReasons && crit.failureReasons.length > 0 && (
-                        <div className="mt-2 space-y-1">
-                          {crit.failureReasons.map((r, i) => (
-                            <div key={i} className="text-[10px] font-semibold text-red-400 flex items-center gap-1.5">
-                              <AlertTriangle className="w-3 h-3 shrink-0" />
-                              <span>{r}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                      <p className="text-[11px] text-slate-300 mt-1.5 leading-relaxed">{crit.observations}</p>
                     </div>
                   ))}
                 </div>
               </div>
+            )}
 
-              {/* Commit & Override Action Footer */}
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between flex-wrap gap-2 pt-3">
-                <span className="text-[11px] text-slate-400">
-                  Audit Verdict is saved in Supabase as <strong className="text-sky-300">Gemini 1.5 Flash (AI)</strong>.
+            {/* INTEGRATED HUMAN REVIEW DECISION STATION */}
+            <div className="p-4 rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/30 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="font-bold text-white text-xs flex items-center gap-1.5">
+                  <UserCheck className="w-4 h-4 text-emerald-400" /> Human Reviewer Decision
                 </span>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      // Move to next task in queue
-                      const currentIndex = queueTasks.findIndex(t => String(t.id || t.taskId) === String(selectedTask?.id || selectedTask?.taskId));
-                      if (currentIndex >= 0 && currentIndex < queueTasks.length - 1) {
-                        setSelectedTaskId(queueTasks[currentIndex + 1].id || queueTasks[currentIndex + 1].taskId);
-                        setActiveAuditResult(null);
-                      }
-                    }}
-                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
-                  >
-                    Next Lead in Queue &rarr;
-                  </button>
-                </div>
-              </div>
-
-            </div>
-          ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center text-slate-400 space-y-3 shadow-xl">
-              <div className="w-14 h-14 rounded-2xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mx-auto text-sky-400">
-                <Sparkles className="w-7 h-7" />
-              </div>
-              <h3 className="text-base font-bold text-white">AI Auditor Idle</h3>
-              <p className="text-xs text-slate-400 max-w-md mx-auto">
-                Select a task from the queue or click <strong className="text-sky-400">&ldquo;Audit Current Task&rdquo;</strong> to send all 5 photos to Gemini 1.5 Flash for autonomous clinical grading.
-              </p>
-            </div>
-          )}
-
-        </div>
-
-      </div>
-
-      {/* Session Audit History Ledger */}
-      {sessionHistory.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl space-y-0">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
-            <div>
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Clock className="w-4 h-4 text-sky-400" />
-                <span>Current Session AI Audit Log ({sessionHistory.length} Visited Leads)</span>
-              </h3>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                Real-time log of audits conducted during this working session.
-              </p>
-            </div>
-
-            <button
-              onClick={handleExportSessionExcel}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5 text-sky-400" />
-              <span>Export Session Log</span>
-            </button>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead>
-                <tr className="bg-slate-850 text-slate-400 font-semibold uppercase text-[10px] border-b border-slate-800">
-                  <th className="py-2.5 px-4">Task ID</th>
-                  <th className="py-2.5 px-3">Field Executive</th>
-                  <th className="py-2.5 px-3">Hub</th>
-                  <th className="py-2.5 px-3 text-center">AI Verdict</th>
-                  <th className="py-2.5 px-3 text-center">Score</th>
-                  <th className="py-2.5 px-3 text-center">Confidence / Error</th>
-                  <th className="py-2.5 px-4">AI Observations</th>
-                  <th className="py-2.5 px-3 text-right">Time</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800 text-slate-200">
-                {sessionHistory.map((s, idx) => (
-                  <tr key={idx} className="hover:bg-slate-850/40">
-                    <td className="py-2.5 px-4 font-mono font-bold text-sky-400">#{s.taskId}</td>
-                    <td className="py-2.5 px-3 font-semibold text-white">{s.feName} <span className="text-[10px] text-slate-500 font-mono">[{s.feCode}]</span></td>
-                    <td className="py-2.5 px-3 text-slate-300">{s.city}</td>
-                    <td className="py-2.5 px-3 text-center">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        s.verdict === 'PASS' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-                      }`}>
-                        {s.verdict}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3 text-center font-mono font-bold text-white">{s.overallScore}/100</td>
-                    <td className="py-2.5 px-3 text-center font-mono text-[11px] text-amber-300">&plusmn;{s.errorMargin}% ({s.confidenceScore}%)</td>
-                    <td className="py-2.5 px-4 max-w-sm truncate text-[11px] text-slate-300" title={s.summary}>{s.summary}</td>
-                    <td className="py-2.5 px-3 text-right text-slate-400 font-mono text-[10px]">{s.auditedAt}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-        </>
-      )}
-
-      {/* TAB 2: HUMAN REVIEW & VERIFICATION HUB */}
-      {activeConsoleTab === 'VERIFY' && (
-        <div className="space-y-6">
-          {/* Verification Summary KPIs Strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                Total AI Audited
-              </span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xl font-black text-white">{verificationStats.total}</span>
-                <span className="text-[10px] text-slate-500">Visits</span>
-              </div>
-            </div>
-
-            <div 
-              onClick={() => setVerifyVerdictFilter(verifyVerdictFilter === 'PASSED' ? 'ALL' : 'PASSED')}
-              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
-                verifyVerdictFilter === 'PASSED'
-                  ? 'bg-emerald-950/40 border-emerald-500 shadow-emerald-950/50 ring-1 ring-emerald-500'
-                  : 'bg-slate-900 border-emerald-950 hover:border-emerald-600/50'
-              }`}
-              title="Filter to inspect all AI-passed visits for False Positives"
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                  AI Passed (Audit False Positives)
-                </span>
-                <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                  Quality Check
-                </span>
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xl font-black text-emerald-400">{verificationStats.passed}</span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {verificationStats.total > 0 ? ((verificationStats.passed / verificationStats.total) * 100).toFixed(0) : 0}% of AI Visits
-                </span>
-              </div>
-            </div>
-
-            <div 
-              onClick={() => setVerifyVerdictFilter(verifyVerdictFilter === 'FATAL' ? 'ALL' : 'FATAL')}
-              className={`p-3.5 rounded-2xl shadow-lg cursor-pointer transition-all border ${
-                verifyVerdictFilter === 'FATAL'
-                  ? 'bg-red-950/40 border-red-500 shadow-red-950/50 ring-1 ring-red-500'
-                  : 'bg-slate-900 border-red-950 hover:border-red-600/50'
-              }`}
-              title="Filter to review AI fatal strikes"
-            >
-              <span className="text-[10px] font-bold uppercase tracking-wider text-red-400 block mb-1">
-                AI Fatal Strikes
-              </span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xl font-black text-red-400">{verificationStats.fatal}</span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {verificationStats.total > 0 ? ((verificationStats.fatal / verificationStats.total) * 100).toFixed(0) : 0}% of AI Visits
-                </span>
-              </div>
-            </div>
-
-            <div className="bg-slate-900 border border-sky-950 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400 block mb-1">
-                Human Verified
-              </span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xl font-black text-sky-400">{verificationStats.verified}</span>
-                <span className="text-[10px] text-slate-500">Confirmed</span>
-              </div>
-            </div>
-
-            <div className="bg-slate-900 border border-amber-950 p-3.5 rounded-2xl shadow-lg">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 block mb-1">
-                Human Overturned
-              </span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xl font-black text-amber-400">{verificationStats.overturned}</span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {verificationStats.agreementRate}% Match
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Verification Filters Bar */}
-          <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-2">
-                <Filter className="w-4 h-4 text-emerald-400" />
-                <span className="font-bold text-white uppercase tracking-wider">
-                  Review Queue ({filteredVerifyTasks.length} Visits)
+                <span className="text-[10px] text-slate-400 font-mono">
+                  Reviewer: <strong className="text-slate-200">{currentUser?.name || currentUser?.email || 'Central QA'}</strong>
                 </span>
               </div>
 
-              <button
-                onClick={handleExportVerificationExcel}
-                className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Export Verification Ledger</span>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 text-xs">
-              {/* Search */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 flex items-center gap-2">
-                <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <div>
                 <input
                   type="text"
-                  value={verifySearchQuery}
-                  onChange={(e) => setVerifySearchQuery(e.target.value)}
-                  placeholder="Search Task ID, FE Name..."
-                  className="w-full bg-transparent text-white text-xs placeholder-slate-500 focus:outline-none"
+                  value={humanNotesInput}
+                  onChange={(e) => setHumanNotesInput(e.target.value)}
+                  placeholder="Add optional verification notes or rationale for database audit record..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-medium"
                 />
               </div>
 
-              {/* City */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[10px] font-bold text-slate-400 block mb-0.5">City / Hub</span>
-                <select
-                  value={verifyCityFilter}
-                  onChange={(e) => setVerifyCityFilter(e.target.value)}
-                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
+              {/* Action Buttons */}
+              <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                <button
+                  onClick={handleConfirmAiVerdict}
+                  disabled={isVerifyingAction}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-emerald-950/40"
+                  title="Approve and record human verification for this AI audit verdict in Supabase"
                 >
-                  <option value="ALL" className="bg-slate-900 text-white">All Cities</option>
-                  {verifyAvailableCities.map(c => (
-                    <option key={c} value={c} className="bg-slate-900 text-white">{c}</option>
-                  ))}
-                </select>
-              </div>
+                  <CheckCheck className="w-4 h-4" />
+                  <span>Confirm AI Verdict</span>
+                </button>
 
-              {/* AI Verdict Filter */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[10px] font-bold text-slate-400 block mb-0.5">AI Verdict</span>
-                <select
-                  value={verifyVerdictFilter}
-                  onChange={(e) => setVerifyVerdictFilter(e.target.value)}
-                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
-                >
-                  <option value="ALL" className="bg-slate-900 text-white">All AI Verdicts</option>
-                  <option value="PASSED" className="bg-slate-900 text-emerald-300">AI Passed</option>
-                  <option value="FATAL" className="bg-slate-900 text-red-300">AI Fatal Strike</option>
-                </select>
-              </div>
-
-              {/* Human Verification Status */}
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[10px] font-bold text-slate-400 block mb-0.5">Human Review Status</span>
-                <select
-                  value={verifyHumanStatusFilter}
-                  onChange={(e) => setVerifyHumanStatusFilter(e.target.value)}
-                  className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
-                >
-                  <option value="ALL" className="bg-slate-900 text-white">All Human States</option>
-                  <option value="PENDING" className="bg-slate-900 text-amber-300">Pending Human Check</option>
-                  <option value="VERIFIED" className="bg-slate-900 text-emerald-300">Verified by Human</option>
-                  <option value="OVERTURNED" className="bg-slate-900 text-purple-300">Overturned / Overridden</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* Deck View Mode Switcher & Progress Header */}
-          <div className="flex items-center justify-between flex-wrap gap-3 pb-1">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setVerifyDeckViewMode('RAPID_DECK')}
-                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
-                  verifyDeckViewMode === 'RAPID_DECK'
-                    ? 'bg-gradient-to-r from-emerald-600 to-sky-600 text-white shadow-lg shadow-sky-950/40 ring-1 ring-sky-400'
-                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                }`}
-              >
-                <Zap className="w-3.5 h-3.5 text-amber-300" />
-                <span>⚡ Rapid Speed-Deck (1 Task at a Time)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setVerifyDeckViewMode('SPLIT')}
-                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
-                  verifyDeckViewMode === 'SPLIT'
-                    ? 'bg-slate-800 text-white border border-slate-600 shadow-md'
-                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                }`}
-              >
-                <Layers className="w-3.5 h-3.5 text-slate-400" />
-                <span>📋 Classic Queue & Split View</span>
-              </button>
-            </div>
-
-            {verifyDeckViewMode === 'RAPID_DECK' && filteredVerifyTasks.length > 0 && (
-              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
-                <span className="px-2.5 py-1 rounded-full bg-slate-950 border border-slate-800 text-slate-300 font-bold">
-                  Card {deckTaskIndex + 1} of {filteredVerifyTasks.length}
-                </span>
-                <span className="hidden sm:inline text-slate-500">
-                  Hotkeys: <kbd className="px-1 py-0.2 bg-slate-800 rounded text-emerald-300 font-bold">← AI Pass</kbd> <kbd className="px-1 py-0.2 bg-slate-800 rounded text-rose-300 font-bold">AI Reject →</kbd>
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* RAPID INSPECTION DECK VIEW */}
-          {verifyDeckViewMode === 'RAPID_DECK' ? (
-            filteredVerifyTasks.length === 0 ? (
-              <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
-                <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center mx-auto">
-                  <CheckCheck className="w-6 h-6" />
-                </div>
-                <h3 className="text-base font-bold text-white">All Caught Up!</h3>
-                <p className="text-xs text-slate-400 max-w-md mx-auto">
-                  Every AI-audited task in this view has been verified by human review. Switch filters or head to the Clinical Re-Audit Queue to check flagged tasks.
-                </p>
-                {reAuditTasks.length > 0 && (
+                {/* Overturn Button */}
+                {selectedTask?.auditStatus === 'FATAL' ? (
                   <button
-                    onClick={() => setActiveConsoleTab('REAUDIT')}
-                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer shadow-lg shadow-amber-950/40 inline-flex items-center gap-1.5"
+                    onClick={() => {
+                      setOverrideActionType('PASS');
+                      setOverrideModalOpen(true);
+                    }}
+                    disabled={isVerifyingAction}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-amber-950/40"
                   >
-                    <RotateCcw className="w-4 h-4" />
-                    <span>Open Clinical Re-Audit Queue ({reAuditTasks.length})</span>
+                    <ThumbsUp className="w-4 h-4" />
+                    <span>Overturn to PASS</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setOverrideActionType('FATAL');
+                      setOverrideModalOpen(true);
+                    }}
+                    disabled={isVerifyingAction}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-red-950/40"
+                  >
+                    <ThumbsDown className="w-4 h-4" />
+                    <span>Overturn to FATAL</span>
+                  </button>
+                )}
+
+                {/* Fail AI Audit / Send to Re-Audit Button */}
+                <button
+                  type="button"
+                  onClick={handleOpenFailAiAuditModal}
+                  disabled={isVerifyingAction}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-rose-600 via-orange-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-rose-950/40"
+                  title="Reject this AI audit as inaccurate or inconclusive and route to human auditors for clinical re-check"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>Fail AI Audit (Send to Re-Audit)</span>
+                </button>
+
+                {activeAuditResult && (
+                  <button
+                    onClick={() => setActiveAuditResult(null)}
+                    className="ml-auto px-3 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
+                  >
+                    Dismiss Report
                   </button>
                 )}
               </div>
-            ) : selectedVerifyTask ? (
-              <div className="space-y-4 max-w-5xl mx-auto">
-                {/* Progress bar */}
-                <div className="w-full bg-slate-950 rounded-full h-1.5 border border-slate-800 overflow-hidden">
-                  <div 
-                    className="bg-gradient-to-r from-emerald-500 via-sky-500 to-amber-500 h-full transition-all duration-300"
-                    style={{ width: `${Math.min(100, Math.round(((deckTaskIndex + 1) / filteredVerifyTasks.length) * 100))}%` }}
-                  />
-                </div>
+            </div>
 
-                {/* The Rapid Inspection Card */}
-                <div className="bg-slate-900 border border-slate-700/80 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 animate-in zoom-in-95 duration-200 relative overflow-hidden">
-                  {/* Card Header */}
-                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 pb-4">
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-base font-black text-white">
-                          TASK #{selectedVerifyTask.taskId || selectedVerifyTask.id}
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
-                          {selectedVerifyTask.facilityCode || selectedVerifyTask.city || 'Hub'}
-                        </span>
-                        <span className="text-xs text-slate-400 font-mono">
-                          {selectedVerifyTask.date || selectedVerifyTask.dispatch_date}
-                        </span>
-                        {selectedVerifyTask.pin && (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                            PIN: {selectedVerifyTask.pin}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-300 font-semibold pt-1">
-                        Field Executive: <span className="text-white font-bold">{selectedVerifyTask.feName || 'Unknown'}</span>{' '}
-                        <span className="text-slate-500 font-mono">({selectedVerifyTask.feCode || 'FE'})</span> • Customer: <span className="text-slate-300">{selectedVerifyTask.customerName || 'Customer'}</span>
-                      </p>
-                    </div>
+          </div>
+        )}
 
-                    {/* Large AI Verdict Badge */}
-                    <div className="text-right flex flex-col items-end">
-                      <div className="flex items-center gap-2">
-                        <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider border shadow-md ${
-                          selectedVerifyTask.auditStatus === 'PASSED'
-                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-emerald-950/40'
-                            : 'bg-red-500/20 text-red-300 border-red-500/50 shadow-red-950/40 animate-pulse'
-                        }`}>
-                          <Sparkles className="w-3.5 h-3.5" />
-                          <span>AI {selectedVerifyTask.auditStatus}</span>
-                          <span className="font-mono">({selectedVerifyTask.overallScore ?? 100}/100)</span>
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-slate-400 font-mono mt-1">
-                        Model: <strong className="text-sky-300">{selectedVerifyTask.auditedBy || 'gemini-3.8-flash'}</strong> &bull; Conf: {selectedVerifyTask.confidenceScore ?? 95}% &plusmn;{selectedVerifyTask.errorMargin ?? 5}%
-                      </span>
-                    </div>
-                  </div>
+        {/* 3. LIVE AI AUDITS & VERDICTS LEDGER (REPLACES OLD IDLE PANEL) */}
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl space-y-0">
+          
+          {/* Ledger Header with Search & Export */}
+          <div className="p-4 sm:p-5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-sky-400" />
+                <span>All AI Audits & Live Verdicts Ledger ({allAiAuditedTasks.length} Completed)</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Real-time ledger of all AI-audited tasks. Click any task to inspect its 5 photos and review AI verdicts.
+              </p>
+            </div>
 
-                  {/* False Positive Warning (if AI Passed) OR Fatal Strike Breakdown (if AI Fatal) */}
-                  {selectedVerifyTask.auditStatus === 'PASSED' ? (
-                    <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-950 to-amber-950/30 border border-amber-500/40 flex items-center justify-between flex-wrap gap-2 text-xs">
-                      <div className="flex items-center gap-2 text-amber-300">
-                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                        <div>
-                          <span className="font-bold uppercase tracking-wide text-amber-200">False Positive Quality Inspection:</span>
-                          <p className="text-[11px] text-slate-300 leading-tight">
-                            AI awarded 100% PASS. Carefully inspect the 5 photos below to ensure ID card is present, torches work, and photos are valid.
-                          </p>
-                        </div>
-                      </div>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold uppercase">
-                        Audit for False Pass
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="p-3.5 rounded-2xl bg-red-950/40 border border-red-500/40 space-y-1.5 text-xs">
-                      <div className="flex items-center justify-between font-bold text-red-200">
-                        <span className="flex items-center gap-1.5 uppercase tracking-wide">
-                          <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
-                          AI Fatal Strike Triggers:
-                        </span>
-                        <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-red-500/30 text-white uppercase font-black">
-                          Review Non-Compliance
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-red-200 leading-tight font-medium">
-                        {(selectedVerifyTask.failedReasons && selectedVerifyTask.failedReasons.length > 0)
-                          ? selectedVerifyTask.failedReasons.join('; ')
-                          : selectedVerifyTask.remarks || 'Mandatory equipment station non-compliance'}
-                      </p>
-                    </div>
-                  )}
-
-                  {/* 5-Station Photo Gallery (Horizontal Responsive Grid) */}
-                  <div className="space-y-2">
-                    <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
-                      5 Mandatory Clinical Photo Stations (Click any photo to zoom):
-                    </span>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-                      {[
-                        { key: 'selfie', label: '1. Selfie & ID', icon: '🤳' },
-                        { key: 'torches', label: '2. Dual Torches', icon: '🔦' },
-                        { key: 'visionChart', label: '3. Vision Chart', icon: '📊' },
-                        { key: 'toolkit', label: '4. Toolkit', icon: '🧰' },
-                        { key: 'frameDisplay', label: '5. Frame Display', icon: '👓' }
-                      ].map(st => {
-                        const imgUrl = verifyTaskImages[st.key];
-                        const crit = verifyCriteriaBreakdown.find(c => c.id === st.key);
-                        const isFail = crit?.status === 'FAIL';
-                        const isPass = crit?.status === 'PASS';
-
-                        return (
-                          <div
-                            key={st.key}
-                            className={`rounded-2xl border p-2 flex flex-col justify-between bg-slate-950/80 transition-all hover:border-slate-500 ${
-                              isFail ? 'border-red-500/50 bg-red-950/10' : isPass ? 'border-emerald-500/40' : 'border-slate-800'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between mb-1.5">
-                              <span className="text-[11px] font-bold text-slate-200 truncate flex items-center gap-1">
-                                <span>{st.icon}</span>
-                                <span>{st.label}</span>
-                              </span>
-                              <span className={`text-[9px] font-black uppercase px-1.5 py-0.2 rounded ${
-                                isFail
-                                  ? 'bg-red-500/30 text-red-200 border border-red-500/40'
-                                  : isPass
-                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                  : 'bg-slate-800 text-slate-400'
-                              }`}>
-                                {isFail ? 'FAIL' : isPass ? 'PASS' : '-'}
-                              </span>
-                            </div>
-
-                            {/* Photo Thumbnail */}
-                            <div
-                              onClick={() => imgUrl && setPreviewImage({ url: imgUrl, title: `${st.label} - Task #${selectedVerifyTask.taskId || selectedVerifyTask.id}` })}
-                              className="relative aspect-square rounded-xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center cursor-pointer group/thumb"
-                            >
-                              {imgUrl ? (
-                                <>
-                                  <img
-                                    src={imgUrl}
-                                    alt={st.label}
-                                    className="w-full h-full object-cover transition-transform group-hover/thumb:scale-105"
-                                    onError={(e) => { e.target.style.display = 'none'; }}
-                                  />
-                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
-                                    <Maximize2 className="w-5 h-5 text-white" />
-                                  </div>
-                                </>
-                              ) : (
-                                <div className="text-center p-2 text-slate-600">
-                                  <Camera className="w-6 h-6 mx-auto mb-1 opacity-50" />
-                                  <span className="text-[9px] italic">No Photo</span>
-                                </div>
-                              )}
-                            </div>
-
-                            {/* Observation snippet */}
-                            <p className={`text-[10px] mt-1.5 line-clamp-2 leading-snug ${
-                              isFail ? 'text-red-300 font-semibold' : 'text-slate-400'
-                            }`} title={crit?.observations}>
-                              {crit?.observations || 'Compliant with clinical SOP standards.'}
-                            </p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* AI Summary Text */}
-                  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                      AI Executive Summary:
-                    </span>
-                    <p className="text-slate-300 leading-relaxed italic">
-                      &ldquo;{selectedVerifyTask.summary || selectedVerifyTask.remarks || 'Audit completed autonomously by Gemini Multimodal Vision engine.'}&rdquo;
-                    </p>
-                  </div>
-
-                  {/* Human Notes Input */}
-                  <div>
-                    <input
-                      type="text"
-                      value={humanNotesInput}
-                      onChange={(e) => setHumanNotesInput(e.target.value)}
-                      placeholder="Add optional reviewer notes (recorded in compliance audit trail)..."
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-medium"
-                    />
-                  </div>
-
-                  {/* RAPID VERIFICATION ACTION BUTTONS */}
-                  <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap">
-                    {/* LEFT BUTTON: AI PASS (CONFIRM & NEXT) */}
-                    <button
-                      type="button"
-                      onClick={handleConfirmAiVerdict}
-                      disabled={isVerifyingAction}
-                      className="flex-1 min-w-[200px] py-4 px-6 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.98] text-white font-black text-sm flex items-center justify-center gap-2.5 shadow-xl shadow-emerald-950/60 transition-all cursor-pointer disabled:opacity-50"
-                      title="Confirm and verify this AI audit as accurate, then load next task (Hotkey: Left Arrow or A)"
-                    >
-                      <CheckCheck className="w-5 h-5" />
-                      <span>AI PASS (Confirm & Next)</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 font-mono border border-emerald-500/40">
-                        &larr; Arrow
-                      </span>
-                    </button>
-
-                    {/* CENTER NAVIGATION & OVERTURN */}
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDeckTaskIndex(prev => Math.max(0, prev - 1))}
-                        disabled={deckTaskIndex === 0}
-                        className="p-3 rounded-2xl bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-slate-300 border border-slate-800 transition-colors cursor-pointer"
-                        title="Previous Card (Hotkey: Up Arrow)"
-                      >
-                        <ChevronLeft className="w-5 h-5" />
-                      </button>
-
-                      <div className="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs font-bold text-slate-300">
-                        {deckTaskIndex + 1} / {filteredVerifyTasks.length}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setDeckTaskIndex(prev => Math.min(filteredVerifyTasks.length - 1, prev + 1))}
-                        disabled={deckTaskIndex >= filteredVerifyTasks.length - 1}
-                        className="p-3 rounded-2xl bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-slate-300 border border-slate-800 transition-colors cursor-pointer"
-                        title="Next Card (Hotkey: Down Arrow)"
-                      >
-                        <ChevronRight className="w-5 h-5" />
-                      </button>
-                    </div>
-
-                    {/* RIGHT BUTTON: AI REJECT (FAIL AI & SEND TO RE-AUDIT) */}
-                    <button
-                      type="button"
-                      onClick={handleOpenFailAiAuditModal}
-                      disabled={isVerifyingAction}
-                      className="flex-1 min-w-[200px] py-4 px-6 rounded-2xl bg-gradient-to-r from-rose-600 via-orange-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 active:scale-[0.98] text-white font-black text-sm flex items-center justify-center gap-2.5 shadow-xl shadow-rose-950/60 transition-all cursor-pointer disabled:opacity-50"
-                      title="Reject AI audit as inaccurate/false positive and send for human clinical re-audit (Hotkey: Right Arrow or D)"
-                    >
-                      <RotateCcw className="w-5 h-5" />
-                      <span>AI REJECT (Fail & Re-Audit)</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-rose-950/80 text-rose-300 font-mono border border-rose-500/40">
-                        Arrow &rarr;
-                      </span>
-                    </button>
-                  </div>
-                </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 flex items-center">
+                <Search className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
+                <input
+                  type="text"
+                  value={ledgerSearchQuery}
+                  onChange={(e) => setLedgerSearchQuery(e.target.value)}
+                  placeholder="Filter audits..."
+                  className="bg-transparent text-xs text-white placeholder-slate-500 focus:outline-none w-32 sm:w-44"
+                />
               </div>
-            ) : null
-          ) : (
-            /* CLASSIC SPLIT VIEW (When user chooses SPLIT mode) */
-            filteredVerifyTasks.length === 0 ? (
-              <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-2">
-                <UserCheck className="w-10 h-10 text-slate-600 mx-auto" />
-                <h3 className="text-base font-bold text-white">No AI-Audited Tasks Found</h3>
-                <p className="text-xs text-slate-400 max-w-md mx-auto">
-                  Run audits in the &ldquo;Run AI Audits&rdquo; tab first. All audited visits will appear here for human oversight and verification.
-                </p>
+
+              <button
+                onClick={handleExportSessionExcel}
+                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-sky-400" />
+                <span>Export Ledger</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Filter Pills Strip */}
+          <div className="px-5 py-2.5 bg-slate-950/60 border-b border-slate-800/80 flex items-center gap-2 flex-wrap text-xs">
+            {[
+              { key: 'ALL', label: 'All Audits', count: allAiAuditedTasks.length },
+              { key: 'PASSED', label: 'AI Passed', count: allAiAuditedTasks.filter(t => t.auditStatus === 'PASSED').length, color: 'text-emerald-400' },
+              { key: 'FATAL', label: 'AI Fatal', count: allAiAuditedTasks.filter(t => t.auditStatus === 'FATAL').length, color: 'text-red-400' },
+              { key: 'VERIFIED', label: 'Human Verified', count: allAiAuditedTasks.filter(t => t.humanStatus === 'VERIFIED').length, color: 'text-sky-400' },
+              { key: 'OVERTURNED', label: 'Overturned', count: allAiAuditedTasks.filter(t => t.humanStatus === 'OVERTURNED').length, color: 'text-purple-400' }
+            ].map(f => (
+              <button
+                key={f.key}
+                onClick={() => setLedgerFilter(f.key)}
+                className={`px-3 py-1 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                  ledgerFilter === f.key
+                    ? 'bg-slate-800 text-white border border-slate-600 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+                }`}
+              >
+                <span className={f.color}>{f.label}</span>
+                <span className="px-1.5 py-0.2 rounded-full bg-slate-900 text-[10px] font-mono border border-slate-800 text-slate-300">
+                  {f.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Table / List */}
+          <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+            {filteredLedgerTasks.length === 0 ? (
+              <div className="py-12 text-center text-slate-500 text-xs">
+                No AI-audited tasks matching this filter.
               </div>
             ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-              {/* Left Queue List (5 cols) */}
-              <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-3.5 space-y-2 shadow-xl max-h-[750px] overflow-y-auto">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                  <span>Audited Visits ({filteredVerifyTasks.length})</span>
-                  <span>AI Verdict / State</span>
-                </div>
-
-                {filteredVerifyTasks.map(t => {
-                  const isSelected = String(selectedVerifyTask?.id || selectedVerifyTask?.taskId) === String(t.id || t.taskId);
-                  const isFatal = t.auditStatus === 'FATAL';
-
-                  return (
-                    <div
-                      key={t.id || t.taskId}
-                      onClick={() => setSelectedVerifyTaskId(t.id || t.taskId)}
-                      className={`p-3 rounded-xl border text-xs cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-sky-950/40 border-sky-500/60 shadow-md shadow-sky-950/50'
-                          : 'bg-slate-950/60 hover:bg-slate-950 border-slate-800/80'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono font-bold text-white text-[13px]">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="sticky top-0 bg-slate-950 z-10">
+                  <tr className="text-slate-400 font-semibold uppercase text-[10px] border-b border-slate-800">
+                    <th className="py-3 px-4">Task ID</th>
+                    <th className="py-3 px-3">Field Executive</th>
+                    <th className="py-3 px-3">Hub / City</th>
+                    <th className="py-3 px-3 text-center">AI Verdict</th>
+                    <th className="py-3 px-3 text-center">Score</th>
+                    <th className="py-3 px-3 text-center">Human Status</th>
+                    <th className="py-3 px-4">Remarks / Fatal Reasons</th>
+                    <th className="py-3 px-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/80 text-slate-200">
+                  {filteredLedgerTasks.map((t) => {
+                    const isFatal = t.auditStatus === 'FATAL';
+                    const isSelected = String(t.id || t.taskId) === String(selectedTask?.id || selectedTask?.taskId);
+                    return (
+                      <tr
+                        key={t.id || t.taskId}
+                        onClick={() => {
+                          setSelectedTaskId(t.id || t.taskId);
+                        }}
+                        className={`cursor-pointer transition-colors ${
+                          isSelected ? 'bg-sky-950/40 hover:bg-sky-950/50' : 'hover:bg-slate-850/50'
+                        }`}
+                      >
+                        <td className="py-3 px-4 font-mono font-bold text-sky-400">
                           #{t.taskId || t.id}
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded ${
-                            isFatal ? 'bg-red-500/20 text-red-300 border border-red-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        </td>
+                        <td className="py-3 px-3 font-semibold text-white">
+                          {t.feName || 'Unknown FE'}{' '}
+                          <span className="text-[10px] text-slate-500 font-mono">[{t.feCode || 'FE'}]</span>
+                        </td>
+                        <td className="py-3 px-3 text-slate-300">
+                          {t.facilityCode || t.city || 'Hub'}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+                            isFatal ? 'bg-red-500/20 text-red-300 border border-red-500/40' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                           }`}>
-                            AI {t.auditStatus}
+                            {t.auditStatus}
                           </span>
-
+                        </td>
+                        <td className="py-3 px-3 text-center font-mono font-bold text-white">
+                          {t.overallScore ?? (isFatal ? 0 : 100)}/100
+                        </td>
+                        <td className="py-3 px-3 text-center">
                           {t.humanStatus === 'VERIFIED' && (
-                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-0.5">
-                              <Check className="w-2.5 h-2.5" /> Verified
+                            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                              ✓ Verified
                             </span>
                           )}
                           {t.humanStatus === 'OVERTURNED' && (
-                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-0.5">
-                              <RotateCcw className="w-2.5 h-2.5" /> Overturned
+                            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                              ↺ Overturned
                             </span>
                           )}
                           {t.humanStatus === 'PENDING' && (
-                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
                               Pending
                             </span>
                           )}
-                        </div>
-                      </div>
-
-                      <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
-                        <span>{t.feName || 'Unknown FE'} ({t.feCode || 'FE'})</span>
-                        <span>{t.facilityCode || t.city || 'Hub'}</span>
-                      </div>
-
-                      <div className="mt-1.5 text-[10px] text-slate-400 line-clamp-1 italic">
-                        {t.remarks || t.auditor_remarks || 'No remarks'}
-                      </div>
-
-                      <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500 pt-1.5 border-t border-slate-800/60 font-mono">
-                        <span className="text-sky-400 font-semibold truncate max-w-[140px]">
-                          🤖 {t.auditedBy || t.audited_by_name || 'gemini-3.8-flash'}
-                        </span>
-                        {(t.totalTokens || t.total_tokens) > 0 ? (
-                          <span className="text-emerald-400">
-                            ⚡ {((t.totalTokens || t.total_tokens) / 1000).toFixed(1)}k tokens
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Right Inspection & Human Action Panel (7 cols) */}
-              <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl space-y-4">
-                {selectedVerifyTask ? (
-                  <>
-                    {/* Task Header */}
-                    <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-base font-black text-white font-mono">
-                            Task #{selectedVerifyTask.taskId || selectedVerifyTask.id}
-                          </span>
-                          <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-full ${
-                            selectedVerifyTask.auditStatus === 'FATAL'
-                              ? 'bg-red-500/20 text-red-300 border border-red-500/40'
-                              : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                          }`}>
-                            Current: {selectedVerifyTask.auditStatus}
-                          </span>
-                        </div>
-                        <span className="text-xs text-slate-400 block mt-0.5">
-                          {selectedVerifyTask.feName} ({selectedVerifyTask.feCode}) • {selectedVerifyTask.facilityCode || selectedVerifyTask.city} • {selectedVerifyTask.date || 'Today'}
-                        </span>
-                      </div>
-
-                      <div className="text-right text-[11px] text-slate-400 space-y-0.5">
-                        <div>
-                          <span className="text-[10px] uppercase font-bold text-slate-400 mr-1.5">Auditor:</span>
-                          <span className="font-mono text-sky-300 font-bold">
-                            {selectedVerifyTask.auditedBy || selectedVerifyTask.audited_by_name || 'gemini-3.8-flash'}
-                          </span>
-                        </div>
-                        {(selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens) > 0 && (
-                          <div>
-                            <span className="text-[10px] uppercase font-bold text-slate-400 mr-1.5">Tokens Used:</span>
-                            <span className="font-mono text-emerald-400 font-bold">
-                              {(selectedVerifyTask.totalTokens || selectedVerifyTask.total_tokens).toLocaleString()} tokens
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* 5 Clinical Photos Gallery */}
-                    <div>
-                      <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block mb-2">
-                        Clinical Photo Evidence (Click any photo to zoom)
-                      </span>
-
-                      <div className="grid grid-cols-5 gap-2">
-                        {[
-                          { key: 'selfie', label: '1. Selfie' },
-                          { key: 'torches', label: '2. Torches' },
-                          { key: 'visionChart', label: '3. Chart' },
-                          { key: 'toolkit', label: '4. Toolkit' },
-                          { key: 'frameDisplay', label: '5. Frame' }
-                        ].map(st => {
-                          const url = verifyTaskImages[st.key];
-                          return (
-                            <div
-                              key={st.key}
-                              onClick={() => url && setPreviewImage({ url, title: `${st.label} - Task #${selectedVerifyTask.taskId || selectedVerifyTask.id}` })}
-                              className={`rounded-xl border p-1 text-center cursor-pointer transition-all ${
-                                url
-                                ? 'bg-slate-950 border-slate-800 hover:border-sky-500'
-                                : 'bg-slate-950/40 border-slate-800/40 opacity-40 cursor-not-allowed'
-                              }`}
-                            >
-                              <div className="aspect-square bg-slate-900 rounded-lg overflow-hidden flex items-center justify-center relative mb-1">
-                                {url ? (
-                                  <img src={url} alt={st.label} className="w-full h-full object-cover" />
-                                ) : (
-                                  <Camera className="w-4 h-4 text-slate-600" />
-                                )}
-                              </div>
-                              <span className="text-[9px] font-bold text-slate-400 block truncate">{st.label}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* AI Diagnostic Remarks */}
-                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5 text-xs">
-                      <span className="font-bold text-sky-400 flex items-center gap-1.5 text-xs">
-                        <Sparkles className="w-3.5 h-3.5" /> AI Diagnostic Summary
-                      </span>
-                      <p className="text-slate-300 text-[11px] leading-relaxed">
-                        {selectedVerifyTask.remarks || selectedVerifyTask.auditor_remarks || 'No detailed remarks.'}
-                      </p>
-                    </div>
-
-                    {/* AI Criteria Evaluation & Failure Triggers Breakdown */}
-                    <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-white flex items-center gap-2 text-xs">
-                          <Sliders className="w-3.5 h-3.5 text-sky-400" />
-                          <span>AI Criteria Evaluation & Failure Triggers</span>
-                        </span>
-                        {selectedVerifyTask.auditStatus === 'FATAL' ? (
-                          <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3 text-red-400" />
-                            {failedCriteriaInReview.length > 0 ? `${failedCriteriaInReview.length} Failed Criteria Triggers` : 'AI Fatal Strike'}
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                            All 5 Criteria Compliant
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Prominent Highlighting for AI Fatal Triggers */}
-                      {selectedVerifyTask.auditStatus === 'FATAL' && (
-                        <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/40 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-red-200 flex items-center gap-1.5 uppercase tracking-wide">
-                              <ShieldAlert className="w-4 h-4 text-red-400" />
-                              AI Fatal Strike Triggers (Why this task failed):
-                            </span>
-                            <span className="text-[9px] font-mono font-bold bg-red-500/30 text-red-200 px-2 py-0.5 rounded uppercase">
-                              Mandatory Non-Compliance
-                            </span>
-                          </div>
-
-                          <p className="text-[11px] text-red-300/90 leading-tight">
-                            The AI auditor identified non-compliance on the following mandatory equipment station photos:
-                          </p>
-
-                          <div className="space-y-1.5 pt-1">
-                            {(failedCriteriaInReview.length > 0
-                              ? failedCriteriaInReview
-                              : (selectedVerifyTask.failedReasons || ['Clinical equipment non-compliance detected by AI']).map((r, i) => ({
-                                  id: `fail-${i}`,
-                                  label: 'Non-Compliance Trigger',
-                                  icon: '🚨',
-                                  failureReasons: [r],
-                                  observations: r
-                                }))
-                            ).map((c, idx) => (
-                              <div key={c.id || idx} className="p-2.5 rounded-lg bg-red-900/40 border border-red-500/30 text-xs">
-                                <div className="flex items-center justify-between font-bold text-red-200 mb-0.5">
-                                  <span className="flex items-center gap-1.5">
-                                    <span>{c.icon || '❌'}</span>
-                                    <span>{c.label}</span>
-                                  </span>
-                                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-red-500/40 text-white">
-                                    STRIKE (FAIL)
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-red-200 pl-5 leading-snug">
-                                  {c.failureReasons && c.failureReasons.length > 0
-                                    ? c.failureReasons.join(', ')
-                                    : c.observations || 'Photo missing or criteria requirements not satisfied.'}
-                                </p>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Prominent Quality Alert for AI Passed Tasks (False Positive Inspection) */}
-                      {selectedVerifyTask.auditStatus === 'PASSED' && (
-                        <div className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-amber-950/30 border border-amber-500/40 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5 uppercase tracking-wide">
-                              <AlertTriangle className="w-4 h-4 text-amber-400" />
-                              False Positive Quality Check (AI Passed 5/5):
-                            </span>
-                            <span className="text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded uppercase">
-                              Verification Critical
-                            </span>
-                          </div>
-
-                          <p className="text-[11px] text-slate-300 leading-relaxed">
-                            AI evaluated this dispatch as <strong className="text-emerald-400 font-bold">PASSED</strong>. However, AI vision can occasionally produce <strong>false positives</strong> (e.g. failing to notice an obscured/missing ID badge, unlit torches, incorrect vision chart distance, or duplicate/blank photos). Please scrutinize each station photo below.
-                          </p>
-
-                          <div className="p-2 rounded-lg bg-slate-950/70 border border-slate-800 text-[11px] text-slate-300 flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-slate-400">
-                              Did AI overlook a violation or approve bad photos?
-                            </span>
-                            <div className="flex items-center gap-2 font-bold text-xs">
-                              <span className="text-rose-400">Click &ldquo;Fail AI Audit&rdquo;</span>
-                              <span className="text-slate-500">or</span>
-                              <span className="text-amber-400">&ldquo;Overturn to FATAL&rdquo;</span>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Full 5-Station SOP Evaluation Checklist */}
-                      <div className="space-y-2 pt-1">
-                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
-                          5-Station Clinical SOP Checklist ({verifyCriteriaBreakdown.filter(c => c.status === 'PASS').length}/5 Passed)
-                        </span>
-
-                        <div className="grid grid-cols-1 gap-2">
-                          {verifyCriteriaBreakdown.map((crit) => {
-                            const isFail = crit.status === 'FAIL';
-                            return (
-                              <div
-                                key={crit.id}
-                                className={`p-2.5 rounded-xl border text-xs transition-all ${
-                                  isFail
-                                    ? 'bg-red-950/20 border-red-500/40 text-red-200'
-                                    : 'bg-slate-900/60 border-slate-800 text-slate-300'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-base">{crit.icon}</span>
-                                    <span className="font-bold text-white text-xs">{crit.label}</span>
-                                  </div>
-                                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded ${
-                                    isFail
-                                      ? 'bg-red-500/20 text-red-300 border border-red-500/40'
-                                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                                  }`}>
-                                    {crit.status}
-                                  </span>
-                                </div>
-
-                                <p className={`text-[11px] mt-1.5 pl-6 leading-relaxed ${
-                                  isFail ? 'text-red-300 font-medium' : 'text-slate-400'
-                                }`}>
-                                  {crit.failureReasons && crit.failureReasons.length > 0
-                                    ? `⚠️ ${crit.failureReasons.join('. ')}`
-                                    : crit.observations || 'Compliant with clinical standards.'}
-                                </p>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Human Verification Action Box */}
-                    <div className="p-4 rounded-xl bg-gradient-to-br from-slate-950 to-slate-900 border border-emerald-900/40 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-white text-xs flex items-center gap-1.5">
-                          <UserCheck className="w-4 h-4 text-emerald-400" /> Human Reviewer Decision
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-mono">
-                          Logged in as: <strong className="text-slate-200">{currentUser?.name || 'Reviewer'}</strong>
-                        </span>
-                      </div>
-
-                      {/* Reviewer Note Input */}
-                      <div>
-                        <input
-                          type="text"
-                          value={humanNotesInput}
-                          onChange={(e) => setHumanNotesInput(e.target.value)}
-                          placeholder="Add optional verification notes or rationale..."
-                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-medium"
-                        />
-                      </div>
-
-                      {/* Action Buttons */}
-                      <div className="flex flex-wrap items-center gap-2.5 pt-1">
-                        {/* Confirm Button */}
-                        <button
-                          onClick={handleConfirmAiVerdict}
-                          disabled={isVerifyingAction}
-                          className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-emerald-950/40"
-                        >
-                          <CheckCheck className="w-4 h-4" />
-                          <span>Confirm AI Verdict</span>
-                        </button>
-
-                        {/* Overturn Button */}
-                        {selectedVerifyTask.auditStatus === 'FATAL' ? (
+                        </td>
+                        <td className="py-3 px-4 max-w-xs truncate text-[11px] text-slate-400 italic" title={t.remarks || t.auditor_remarks}>
+                          {t.remarks || t.auditor_remarks || 'Compliant with clinical standards.'}
+                        </td>
+                        <td className="py-3 px-3 text-right">
                           <button
-                            onClick={() => {
-                              setOverrideActionType('PASS');
-                              setOverrideModalOpen(true);
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedTaskId(t.id || t.taskId);
                             }}
-                            disabled={isVerifyingAction}
-                            className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-amber-950/40"
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-sky-600 text-slate-200 hover:text-white text-[10px] font-bold transition-colors cursor-pointer"
                           >
-                            <ThumbsUp className="w-4 h-4" />
-                            <span>Overturn to PASS</span>
+                            Inspect
                           </button>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              setOverrideActionType('FATAL');
-                              setOverrideModalOpen(true);
-                            }}
-                            disabled={isVerifyingAction}
-                            className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-lg shadow-red-950/40"
-                          >
-                            <ThumbsDown className="w-4 h-4" />
-                            <span>Overturn to FATAL</span>
-                          </button>
-                        )}
-
-                        {/* Fail AI Audit / Send to Re-Audit Button */}
-                        <button
-                          type="button"
-                          onClick={handleOpenFailAiAuditModal}
-                          disabled={isVerifyingAction}
-                          className="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-rose-600 via-orange-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-rose-950/40"
-                          title="Reject this AI audit as inaccurate or inconclusive and route to human auditors for clinical re-check"
-                        >
-                          <RotateCcw className="w-4 h-4" />
-                          <span>Fail AI Audit (Send for Re-Audit)</span>
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="py-20 text-center text-slate-500 text-xs">
-                    Select a visit from the left to inspect and verify.
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-
-          {/* Overturn Reason Modal */}
-          {overrideModalOpen && (
-            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                  <span className="font-bold text-white text-sm flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 text-amber-400" />
-                    Overturn AI Verdict to {overrideActionType}
-                  </span>
-                  <button
-                    onClick={() => setOverrideModalOpen(false)}
-                    className="text-slate-400 hover:text-white text-xs font-bold"
-                  >
-                    Cancel
-                  </button>
-                </div>
-
-                <div className="space-y-2 text-xs text-slate-300">
-                  <p>
-                    You are overriding Task #{selectedVerifyTask?.taskId || selectedVerifyTask?.id} from{' '}
-                    <strong className="text-white">{selectedVerifyTask?.auditStatus}</strong> to{' '}
-                    <strong className={overrideActionType === 'PASS' ? 'text-emerald-400' : 'text-red-400'}>
-                      {overrideActionType}
-                    </strong>.
-                  </p>
-                  <label className="block font-bold text-slate-300 text-[11px] pt-1">
-                    Reason for Overturning (Required for audit compliance):
-                  </label>
-                  <textarea
-                    value={overrideReasonInput}
-                    onChange={(e) => setOverrideReasonInput(e.target.value)}
-                    placeholder="e.g. Torches visible upon closer inspection in dark room; clinical standard satisfied."
-                    rows={3}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-medium"
-                  />
-                </div>
-
-                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-                  <button
-                    onClick={() => setOverrideModalOpen(false)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-white"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleExecuteOverturn}
-                    disabled={!overrideReasonInput.trim() || isVerifyingAction}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold text-white transition-colors cursor-pointer disabled:opacity-50 ${
-                      overrideActionType === 'PASS' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
-                    }`}
-                  >
-                    Confirm Overturn to {overrideActionType}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Fail AI Audit & Request Human Re-Audit Modal */}
-          {failAiModalOpen && selectedVerifyTask && (
-            <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="bg-slate-900 border border-rose-500/40 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center">
-                      <RotateCcw className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-bold text-white">Fail AI Audit & Queue for Re-Audit</h4>
-                      <p className="text-[11px] text-slate-400">Task #{selectedVerifyTask.taskId || selectedVerifyTask.id} • {selectedVerifyTask.feName}</p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setFailAiModalOpen(false)}
-                    className="text-slate-400 hover:text-white text-xs p-1 cursor-pointer"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="space-y-2">
-                  <p className="text-xs text-slate-300">
-                    Flag this AI evaluation as inaccurate, hallucinatory, or disputed. This task will be sent to the <strong className="text-amber-400">Clinical Re-Audit Queue</strong> where human auditors can re-audit the visit with all AI-selected criteria highlighted.
-                  </p>
-                  <div className="flex items-center justify-between pt-1">
-                    <label className="block font-bold text-slate-300 text-[11px]">
-                      Reason AI Audit Failed (Required for audit history):
-                    </label>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      {selectedVerifyTask.auditStatus === 'PASSED' ? 'Flagging False Positive' : 'Disputing False Strike'}
-                    </span>
-                  </div>
-
-                  {/* One-Click Quick Reason Pills */}
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                      {selectedVerifyTask.auditStatus === 'PASSED' ? '⚡ Common False Positive Reasons:' : '⚡ Common False Strike Reasons:'}
-                    </span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {(selectedVerifyTask.auditStatus === 'PASSED' ? [
-                        'False Positive: Selfie missing visible ID badge / not official polo',
-                        'False Positive: Both torches not illuminated / missing yellow torch',
-                        'False Positive: Vision chart distance under 6m / poor lighting',
-                        'False Positive: Toolkit missing mandatory occluder or trial frame',
-                        'False Positive: Photo blurry / blank / duplicate image uploaded'
-                      ] : [
-                        'False Strike: Torches visible upon closer inspection in dark background',
-                        'False Strike: ID card badge visible on lanyard / pocket',
-                        'False Strike: Vision chart clearly legible and proper distance',
-                        'False Strike: Toolkit complete despite lighting reflection',
-                        'False Strike: SOP fully satisfied upon human review'
-                      ]).map((quickReason, i) => (
-                        <button
-                          key={i}
-                          type="button"
-                          onClick={() => setFailAiReasonInput(quickReason)}
-                          className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-[10px] font-semibold text-slate-300 border border-slate-700 hover:border-amber-400 transition-colors text-left cursor-pointer"
-                        >
-                          {quickReason}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <textarea
-                    value={failAiReasonInput}
-                    onChange={(e) => setFailAiReasonInput(e.target.value)}
-                    placeholder={
-                      selectedVerifyTask.auditStatus === 'PASSED'
-                        ? 'e.g. False Positive: FE is wearing generic t-shirt with no visible ID badge. AI incorrectly passed selfie.'
-                        : 'e.g. False Strike: Torches are visible in mirror reflection. AI incorrectly marked as fail.'
-                    }
-                    rows={3}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500 font-medium"
-                  />
-                </div>
-
-                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-                  <button
-                    onClick={() => setFailAiModalOpen(false)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-white cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleExecuteFailAiAudit}
-                    disabled={!failAiReasonInput.trim() || isVerifyingAction}
-                    className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 transition-all cursor-pointer disabled:opacity-50 shadow-lg shadow-rose-950/40"
-                  >
-                    Confirm & Send to Re-Audit
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
+
+      </div>
+        </>
       )}
 
-      {/* TAB 3: CLINICAL RE-AUDIT QUEUE */}
+      {/* TAB 2: CLINICAL RE-AUDIT QUEUE */}
+
       {activeConsoleTab === 'REAUDIT' && (
         <div className="space-y-6">
           {/* Re-Audit KPIs Strip */}
@@ -3977,6 +3286,164 @@ export default function AIAuditsConsole({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Overturn Reason Modal (Global) */}
+      {overrideModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <span className="font-bold text-white text-sm flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                Overturn AI Verdict to {overrideActionType}
+              </span>
+              <button
+                onClick={() => setOverrideModalOpen(false)}
+                className="text-slate-400 hover:text-white text-xs font-bold"
+              >
+                Cancel
+              </button>
+            </div>
+
+            <div className="space-y-2 text-xs text-slate-300">
+              <p>
+                You are overriding Task #{(selectedTask || selectedVerifyTask)?.taskId || (selectedTask || selectedVerifyTask)?.id} from{' '}
+                <strong className="text-white">{(selectedTask || selectedVerifyTask)?.auditStatus}</strong> to{' '}
+                <strong className={overrideActionType === 'PASS' ? 'text-emerald-400' : 'text-red-400'}>
+                  {overrideActionType}
+                </strong>.
+              </p>
+              <label className="block font-bold text-slate-300 text-[11px] pt-1">
+                Reason for Overturning (Required for audit compliance):
+              </label>
+              <textarea
+                value={overrideReasonInput}
+                onChange={(e) => setOverrideReasonInput(e.target.value)}
+                placeholder="e.g. Torches visible upon closer inspection in dark room; clinical standard satisfied."
+                rows={3}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-medium"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setOverrideModalOpen(false)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExecuteOverturn}
+                disabled={!overrideReasonInput.trim() || isVerifyingAction}
+                className={`px-4 py-2 rounded-xl text-xs font-bold text-white transition-colors cursor-pointer disabled:opacity-50 ${
+                  overrideActionType === 'PASS' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'
+                }`}
+              >
+                Confirm Overturn to {overrideActionType}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fail AI Audit & Request Human Re-Audit Modal (Global) */}
+      {failAiModalOpen && (selectedTask || selectedVerifyTask) && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-rose-500/40 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center">
+                  <RotateCcw className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-white">Fail AI Audit & Queue for Re-Audit</h4>
+                  <p className="text-[11px] text-slate-400">
+                    Task #{(selectedTask || selectedVerifyTask).taskId || (selectedTask || selectedVerifyTask).id} • {(selectedTask || selectedVerifyTask).feName}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setFailAiModalOpen(false)}
+                className="text-slate-400 hover:text-white text-xs p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs text-slate-300">
+                Flag this AI evaluation as inaccurate, hallucinatory, or disputed. This task will be sent to the <strong className="text-amber-400">Clinical Re-Audit Queue</strong> where human auditors can re-audit the visit with all AI-selected criteria highlighted.
+              </p>
+              <div className="flex items-center justify-between pt-1">
+                <label className="block font-bold text-slate-300 text-[11px]">
+                  Reason AI Audit Failed (Required for audit history):
+                </label>
+                <span className="text-[10px] text-slate-400 font-mono">
+                  {(selectedTask || selectedVerifyTask).auditStatus === 'PASSED' ? 'Flagging False Positive' : 'Disputing False Strike'}
+                </span>
+              </div>
+
+              {/* One-Click Quick Reason Pills */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                  {(selectedTask || selectedVerifyTask).auditStatus === 'PASSED' ? '⚡ Common False Positive Reasons:' : '⚡ Common False Strike Reasons:'}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {((selectedTask || selectedVerifyTask).auditStatus === 'PASSED' ? [
+                    'False Positive: Selfie missing visible ID badge / not official polo',
+                    'False Positive: Both torches not illuminated / missing yellow torch',
+                    'False Positive: Vision chart distance under 6m / poor lighting',
+                    'False Positive: Toolkit missing mandatory occluder or trial frame',
+                    'False Positive: Photo blurry / blank / duplicate image uploaded'
+                  ] : [
+                    'False Strike: Torches visible upon closer inspection in dark background',
+                    'False Strike: ID card badge visible on lanyard / pocket',
+                    'False Strike: Vision chart clearly legible and proper distance',
+                    'False Strike: Toolkit complete despite lighting reflection',
+                    'False Strike: SOP fully satisfied upon human review'
+                  ]).map((quickReason, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setFailAiReasonInput(quickReason)}
+                      className="px-2 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-[10px] font-semibold text-slate-300 border border-slate-700 hover:border-amber-400 transition-colors text-left cursor-pointer"
+                    >
+                      {quickReason}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <textarea
+                value={failAiReasonInput}
+                onChange={(e) => setFailAiReasonInput(e.target.value)}
+                placeholder={
+                  (selectedTask || selectedVerifyTask).auditStatus === 'PASSED'
+                    ? 'e.g. False Positive: FE is wearing generic t-shirt with no visible ID badge. AI incorrectly passed selfie.'
+                    : 'e.g. False Strike: Torches are visible in mirror reflection. AI incorrectly marked as fail.'
+                }
+                rows={3}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500 font-medium"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setFailAiModalOpen(false)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-white cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExecuteFailAiAudit}
+                disabled={!failAiReasonInput.trim() || isVerifyingAction}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 transition-all cursor-pointer disabled:opacity-50 shadow-lg shadow-rose-950/40"
+              >
+                Confirm & Send to Re-Audit
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
