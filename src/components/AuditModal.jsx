@@ -24,10 +24,17 @@ import {
   Plus,
   Scale,
   Zap,
-  CornerDownLeft
+  CornerDownLeft,
+  CheckCheck,
+  RotateCcw
 } from 'lucide-react';
 import { EQUIPMENT_CATALOGUE, FAULT_CONDITIONS, REPLACEMENT_URGENCY } from '../data/equipmentItems.js';
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
+import { 
+  isAiAuditedTask, 
+  getHumanVerificationStatus, 
+  isAwaitingHumanVerification 
+} from '../lib/supabase.js';
 
 export const BLANKET_FATAL_REASONS = [
   'All images missing / blank / black',
@@ -51,7 +58,9 @@ export default function AuditModal({
   rules = INITIAL_CENTRAL_RULES,
   isReAudit = false,
   onOverturnAudit,
-  onUpholdAudit
+  onUpholdAudit,
+  onConfirmAiVerdict,
+  onOverturnAiVerdict
 }) {
   const [activeCriterionIndex, setActiveCriterionIndex] = useState(0);
   const [rightPanelTab, setRightPanelTab] = useState('sop'); // 'sop' | 'replacements'
@@ -72,6 +81,11 @@ export default function AuditModal({
   const [verdictLeaderActive, setVerdictLeaderActive] = useState(false);
   const verdictTimeoutRef = useRef(null);
   const remarksSelectRef = useRef(null);
+
+  // AI Audit & Human Verification State
+  const isAiAudited = isAiAuditedTask(task);
+  const humanVerificationStatus = getHumanVerificationStatus(task);
+  const isAwaitingVerification = isAwaitingHumanVerification(task);
 
   // AI Re-Audit Detection & Criteria Resolution
   const isAiReAudit = Boolean(
@@ -693,6 +707,91 @@ export default function AuditModal({
             <span className="text-red-400 font-bold">[f] Blanket Fatal</span>
           </div>
         </div>
+
+        {/* AI Audit Human Verification Banner */}
+        {isAiAudited && (
+          <div className="px-5 py-3 bg-gradient-to-r from-sky-950/90 via-slate-900 to-indigo-950/90 border-b border-sky-500/40 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-purple-500/20 border border-purple-500/40 flex items-center justify-center shrink-0">
+                <Sparkles className="w-4 h-4 text-purple-400" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-extrabold text-white text-xs">
+                    AI Audit Human Verification
+                  </span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+                    task.auditStatus === 'FATAL' 
+                      ? 'bg-red-500/20 text-red-300 border border-red-500/40' 
+                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                  }`}>
+                    AI Verdict: {task.auditStatus}
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-950 text-slate-300 border border-slate-800">
+                    Model: {task.auditedBy || 'AI Auditor'}
+                  </span>
+                  {humanVerificationStatus === 'VERIFIED' ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500 text-white flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" />
+                      Human Confirmed
+                    </span>
+                  ) : humanVerificationStatus === 'OVERTURNED' ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500 text-white flex items-center gap-1">
+                      <RotateCcw className="w-3 h-3" />
+                      Human Overruled
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+                      ⏳ Awaiting Reviewer Verification
+                    </span>
+                  )}
+                </div>
+                {task.remarks && (
+                  <p className="text-[11px] text-slate-300 mt-0.5 max-w-2xl truncate">
+                    <strong className="text-white">AI Remarks:</strong> {task.remarks}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onConfirmAiVerdict?.(task.id);
+                  if (hasNext) onNextTask?.();
+                  else onClose?.();
+                }}
+                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
+                title="Confirm AI Verdict & save human sign-off"
+              >
+                <CheckCheck className="w-3.5 h-3.5" />
+                <span>Confirm AI</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const targetV = task.auditStatus === 'FATAL' ? 'PASS' : 'FATAL';
+                  const reason = prompt(
+                    `Enter reason to overturn AI verdict to ${targetV}:`, 
+                    task.auditStatus === 'FATAL' ? 'SOP compliant upon clinical visual review' : 'Checklist non-compliance detected by reviewer'
+                  );
+                  if (reason) {
+                    onOverturnAiVerdict?.(task.id, targetV, reason);
+                    if (hasNext) onNextTask?.();
+                    else onClose?.();
+                  }
+                }}
+                className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
+                title={task.auditStatus === 'FATAL' ? "Overturn FATAL strike to PASS" : "Overturn PASS to FATAL"}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Overturn</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* AI Re-Audit Guidance Banner */}
         {isAiReAudit && (
@@ -1427,67 +1526,108 @@ export default function AuditModal({
             </div>
 
             {/* Pinned Bottom Decision Actions */}
-            <div className="shrink-0 p-4 border-t border-slate-700/80 bg-slate-850 flex items-center gap-3">
-              <button
-                type="button"
-                onClick={handlePassClick}
-                disabled={!allItemsPassed}
-                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                  allItemsPassed
-                    ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-lg shadow-emerald-500/20 cursor-pointer'
-                    : 'bg-slate-800 text-slate-500 border border-slate-700/60 cursor-not-allowed opacity-60 shadow-none'
-                }`}
-                title={
-                  allItemsPassed
-                    ? 'All checklist items verified and passed! Click or press [p] to submit Pass Audit.'
-                    : `Disabled: Review & pass all ${rules.length} items to enable Pass Audit (${passedCheckpointsCount}/${rules.length} passed)`
-                }
-              >
-                <CheckCircle2 className={`w-4 h-4 ${allItemsPassed ? 'text-white' : 'text-slate-500'}`} />
-                <span>PASS AUDIT (P)</span>
-                {allItemsPassed ? (
-                  <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-white/20 text-white font-mono">
-                    All Passed
-                  </span>
-                ) : (
-                  <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-900 border border-slate-700 text-slate-400">
-                    {passedCheckpointsCount}/{rules.length} Passed
-                  </span>
-                )}
-              </button>
+            <div className="shrink-0 p-4 border-t border-slate-700/80 bg-slate-850 flex flex-col gap-2.5">
+              {/* Quick AI Verification Buttons if task is AI-audited */}
+              {isAiAudited && (
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onConfirmAiVerdict?.(task.id);
+                      if (hasNext) onNextTask?.();
+                      else onClose?.();
+                    }}
+                    className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer transition-all"
+                  >
+                    <CheckCheck className="w-4 h-4 text-white" />
+                    <span>CONFIRM AI VERDICT ({task.auditStatus})</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={handleConfirmFatal}
-                className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                  canSubmitFatal
-                    ? 'bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white shadow-lg shadow-red-500/20 fatal-pulse'
-                    : 'bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 hover:border-slate-600'
-                }`}
-                title={
-                  failedCheckpoints.length === 0
-                    ? 'Requires at least 1 checkpoint marked as FAIL'
-                    : !hasFatalCriteria
-                    ? 'Requires at least 1 fatal failure criteria reason selected'
-                    : 'Click to record FATAL penalty for failed items'
-                }
-              >
-                <AlertTriangle className={`w-4 h-4 ${canSubmitFatal ? 'text-white' : 'text-amber-400'}`} />
-                <span>FATAL AUDIT</span>
-                {failedCheckpoints.length === 0 ? (
-                  <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-slate-900 text-slate-400 border border-slate-700">
-                    Needs Fail
-                  </span>
-                ) : !hasFatalCriteria ? (
-                  <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                    Pick Reason
-                  </span>
-                ) : (
-                  <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-white/20 text-white font-mono">
-                    {failedCheckpoints.length} Failed
-                  </span>
-                )}
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetV = task.auditStatus === 'FATAL' ? 'PASS' : 'FATAL';
+                      const reason = prompt(
+                        `Enter reason to overturn AI verdict to ${targetV}:`, 
+                        task.auditStatus === 'FATAL' ? 'SOP compliant upon clinical visual review' : 'Checklist non-compliance detected by reviewer'
+                      );
+                      if (reason) {
+                        onOverturnAiVerdict?.(task.id, targetV, reason);
+                        if (hasNext) onNextTask?.();
+                        else onClose?.();
+                      }
+                    }}
+                    className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 hover:from-amber-500 hover:to-orange-500 text-white shadow-lg shadow-amber-600/20 flex items-center justify-center gap-2 cursor-pointer transition-all"
+                  >
+                    <RotateCcw className="w-4 h-4 text-white" />
+                    <span>OVERTURN TO {task.auditStatus === 'FATAL' ? 'PASS' : 'FATAL'}</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Standard / Manual Fallback Buttons */}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handlePassClick}
+                  disabled={!allItemsPassed}
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                    allItemsPassed
+                      ? 'bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-200 border border-emerald-500/40 cursor-pointer'
+                      : 'bg-slate-800 text-slate-500 border border-slate-700/60 cursor-not-allowed opacity-60 shadow-none'
+                  }`}
+                  title={
+                    allItemsPassed
+                      ? 'All checklist items verified and passed! Click or press [p] to submit Pass Audit.'
+                      : `Disabled: Review & pass all ${rules.length} items to enable Pass Audit (${passedCheckpointsCount}/${rules.length} passed)`
+                  }
+                >
+                  <CheckCircle2 className={`w-3.5 h-3.5 ${allItemsPassed ? 'text-emerald-400' : 'text-slate-500'}`} />
+                  <span>Manual Pass (P)</span>
+                  {allItemsPassed ? (
+                    <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-white/20 text-white font-mono">
+                      All Passed
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-900 border border-slate-700 text-slate-400">
+                      {passedCheckpointsCount}/{rules.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleConfirmFatal}
+                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    canSubmitFatal
+                      ? 'bg-red-600/30 hover:bg-red-600/50 text-red-200 border border-red-500/40'
+                      : 'bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 hover:border-slate-600'
+                  }`}
+                  title={
+                    failedCheckpoints.length === 0
+                      ? 'Requires at least 1 checkpoint marked as FAIL'
+                      : !hasFatalCriteria
+                      ? 'Requires at least 1 fatal failure criteria reason selected'
+                      : 'Click to record FATAL penalty for failed items'
+                  }
+                >
+                  <AlertTriangle className={`w-3.5 h-3.5 ${canSubmitFatal ? 'text-white' : 'text-amber-400'}`} />
+                  <span>Manual Fatal</span>
+                  {failedCheckpoints.length === 0 ? (
+                    <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-slate-900 text-slate-400 border border-slate-700">
+                      Needs Fail
+                    </span>
+                  ) : !hasFatalCriteria ? (
+                    <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      Pick Reason
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-white/20 text-white font-mono">
+                      {failedCheckpoints.length} Failed
+                    </span>
+                  )}
+                </button>
+              </div>
             </div>
 
           </div>

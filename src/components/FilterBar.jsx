@@ -43,13 +43,15 @@ export default function FilterBar({
   pendingCount = 0,
   fatalCount = 0,
   passedCount = 0,
+  verifiedCount = 0,
+  awaitingCount = 0,
   onClearFilters,
   hasActiveFilters
 }) {
   return (
     <div className="bg-slate-800/80 border border-slate-700/80 rounded-xl p-3 mb-5 shadow-lg backdrop-blur-sm space-y-3">
       
-      {/* Top Row: Quick Queue Switcher (Auditor Focus: Pending vs Completed History) */}
+      {/* Top Row: Quick Queue Switcher (Auditor Focus: Pending Review vs Completed History) */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-700/60">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Queue:</span>
@@ -57,18 +59,37 @@ export default function FilterBar({
           <button
             onClick={() => setSelectedAuditStatus('PENDING')}
             className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              selectedAuditStatus === 'PENDING'
+              selectedAuditStatus === 'PENDING' || selectedAuditStatus === 'AWAITING_VERIFICATION'
                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm ring-1 ring-amber-500/30'
                 : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-amber-300 hover:border-slate-600'
             }`}
-            title="Focus strictly on actionable tasks waiting for audit"
+            title="Focus strictly on AI-audited tasks awaiting Human Verification"
           >
-            <span>⚡ Pending Audits</span>
+            <span>⚡ Awaiting Review</span>
             {pendingCount > 0 && (
               <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
-                selectedAuditStatus === 'PENDING' ? 'bg-amber-400/20 text-amber-200' : 'bg-slate-800 text-slate-300'
+                selectedAuditStatus === 'PENDING' || selectedAuditStatus === 'AWAITING_VERIFICATION' ? 'bg-amber-400/20 text-amber-200' : 'bg-slate-800 text-slate-300'
               }`}>
                 {pendingCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setSelectedAuditStatus('VERIFIED')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+              selectedAuditStatus === 'VERIFIED' || selectedAuditStatus === 'HUMAN_VERIFIED'
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm ring-1 ring-emerald-500/30'
+                : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-emerald-300 hover:border-slate-600'
+            }`}
+            title="View tasks confirmed by human verification"
+          >
+            <span>✓ Human Verified</span>
+            {verifiedCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                selectedAuditStatus === 'VERIFIED' ? 'bg-emerald-400/20 text-emerald-200' : 'bg-slate-800 text-slate-300'
+              }`}>
+                {verifiedCount}
               </span>
             )}
           </button>

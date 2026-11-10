@@ -1,6 +1,11 @@
 import React from 'react';
 import { getTaskSLAStatus } from '../utils/slaHelper.js';
 import { 
+  isAiAuditedTask, 
+  getHumanVerificationStatus, 
+  isAwaitingHumanVerification 
+} from '../lib/supabase.js';
+import { 
   CheckCircle2, 
   AlertTriangle, 
   Eye, 
@@ -12,7 +17,9 @@ import {
   ExternalLink,
   UserCheck,
   ShieldAlert,
-  Sparkles
+  Sparkles,
+  CheckCheck,
+  RotateCcw
 } from 'lucide-react';
 
 // Fast normalize Locus URLs to CDN to eliminate 302 redirects
@@ -40,7 +47,9 @@ export default function TaskCardGrid({
   onInspect,
   onQuickPass, 
   onQuickFatal, 
-  onOpenEmail 
+  onOpenEmail,
+  onConfirmAiVerdict,
+  onOverturnAiVerdict
 }) {
   const handleAudit = onAuditTask || onInspect || (() => {});
   const handleEmail = onOpenEmail || onInspect || onAuditTask || (() => {});
@@ -64,6 +73,10 @@ export default function TaskCardGrid({
       {tasks.map((task, idx) => {
         const isFatal = task.auditStatus === 'FATAL';
         const isPassed = task.auditStatus === 'PASSED';
+        const isPending = task.auditStatus === 'PENDING' || !task.auditStatus;
+        const isAi = isAiAuditedTask(task);
+        const humanStatus = getHumanVerificationStatus(task);
+        const needsVerification = isAwaitingHumanVerification(task);
         const hasImages = task.hasImages;
         const sla = getTaskSLAStatus(task);
         const isOverdue = sla.isOverdue;
@@ -94,40 +107,78 @@ export default function TaskCardGrid({
                   </div>
                 </div>
 
-                {/* Audit Status Badge */}
-                {isPassed && (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    PASSED
-                  </span>
-                )}
-                {isFatal && (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">
-                    <AlertTriangle className="w-3.5 h-3.5" />
-                    FATAL
-                  </span>
-                )}
-                {!isPassed && !isFatal && (
-                  isOverdue ? (
-                    <div className="text-right">
-                      <span 
-                        title={`SLA Breached (+${sla.hoursOverdue}h): Escalated to Business Head (BH) & General Manager (GM)`}
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-black bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse"
-                      >
-                        <AlertTriangle className="w-3 h-3 text-red-400" />
-                        <span>{sla.slaLabel}</span>
-                      </span>
-                      <div className="text-[9px] text-red-400 font-bold mt-0.5">
-                        Escalated: BH & GM
-                      </div>
-                    </div>
+                {/* Audit & Verification Status Badges */}
+                <div className="flex flex-col items-end gap-1">
+                  {isAi ? (
+                    <>
+                      {isPassed && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                          <Sparkles className="w-3.5 h-3.5" />
+                          🤖 AI PASS
+                        </span>
+                      )}
+                      {isFatal && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">
+                          <Sparkles className="w-3.5 h-3.5" />
+                          🤖 AI FATAL
+                        </span>
+                      )}
+
+                      {humanStatus === 'VERIFIED' ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-500/30">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                          ✓ Verified
+                        </span>
+                      ) : humanStatus === 'OVERTURNED' ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-500/30">
+                          <RotateCcw className="w-3 h-3 text-amber-400" />
+                          ↺ Overruled
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+                          <Clock className="w-3 h-3 text-amber-400" />
+                          Awaiting Review
+                        </span>
+                      )}
+                    </>
                   ) : (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                      <Clock className="w-3.5 h-3.5" />
-                      Pending Audit
-                    </span>
-                  )
-                )}
+                    <>
+                      {isPassed && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          PASSED
+                        </span>
+                      )}
+                      {isFatal && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          FATAL
+                        </span>
+                      )}
+                      {isPending && (
+                        isOverdue ? (
+                          <div className="text-right">
+                            <span 
+                              title={`SLA Breached (+${sla.hoursOverdue}h): Escalated to Business Head (BH) & General Manager (GM)`}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-black bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse"
+                            >
+                              <AlertTriangle className="w-3 h-3 text-red-400" />
+                              <span>{sla.slaLabel}</span>
+                            </span>
+                            <div className="text-[9px] text-red-400 font-bold mt-0.5">
+                              Escalated: BH & GM
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                            <Clock className="w-3.5 h-3.5" />
+                            Pending Audit
+                          </span>
+                        )
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
 
               {/* Field Executive Info */}
@@ -348,10 +399,31 @@ export default function TaskCardGrid({
                 className="flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
               >
                 <Eye className="w-3.5 h-3.5" />
-                Audit Images
+                <span>{isAi ? 'Verify AI Verdict' : 'Audit Images'}</span>
               </button>
 
-              {isFatal ? (
+              {isAi && needsVerification ? (
+                <div className="flex items-center space-x-1.5">
+                  <button
+                    onClick={() => onConfirmAiVerdict?.(task.id)}
+                    className="p-1.5 rounded-lg text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 border border-slate-700 bg-slate-900 transition-colors cursor-pointer"
+                    title="Confirm AI Verdict (1-Click Verification)"
+                  >
+                    <CheckCheck className="w-4 h-4 text-emerald-400" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      const targetV = isFatal ? 'PASS' : 'FATAL';
+                      const reason = prompt(`Enter reason to overturn AI ${isFatal ? 'FATAL to PASS' : 'PASS to FATAL'}:`, 'Overturned upon visual inspection by reviewer');
+                      if (reason) onOverturnAiVerdict?.(task.id, targetV, reason);
+                    }}
+                    className="p-1.5 rounded-lg text-slate-300 hover:text-amber-400 hover:bg-amber-500/10 border border-slate-700 bg-slate-900 transition-colors cursor-pointer"
+                    title={isFatal ? "Overturn AI Fatal to PASS" : "Overturn AI Pass to FATAL"}
+                  >
+                    <RotateCcw className="w-4 h-4 text-amber-400" />
+                  </button>
+                </div>
+              ) : isFatal ? (
                 <span
                   className="py-1.5 px-3 rounded-lg text-xs font-semibold bg-red-500/10 text-red-400 border border-red-500/20 flex items-center gap-1 select-none"
                   title="Fatal strike recorded. Email notices dispatched strictly via Mail Dispatch."

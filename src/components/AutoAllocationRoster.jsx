@@ -25,7 +25,12 @@ import {
   Trash2,
   Plus
 } from 'lucide-react';
-import { runAutoAllocationAlgorithm } from '../lib/supabase.js';
+import { 
+  runAutoAllocationAlgorithm,
+  isAiAuditedTask,
+  isAwaitingHumanVerification,
+  getHumanVerificationStatus
+} from '../lib/supabase.js';
 import { rosterApi, tasksApi } from '../api/client.js';
 import { parseRoles, hasAccess, displayRoleName, isEligibleForAuditRoster } from '../utils/accessHelper.js';
 import { getTaskBatchDateYMD } from '../utils/dailyDigestHelper.js';
@@ -196,15 +201,33 @@ export default function AutoAllocationRoster({
     };
   }, [actualAuditorsFromUsers]);
 
-  // Helper: Strictly check whether a task has already been audited by an auditor
-  // Never touch, reassign, or auto-fatal any task that has already been audited!
-  const isTaskAlreadyAudited = (t) => {
+  // Helper: Strictly check whether a task has been completed and verified
+  // If AI audited: completed only when a human has verified, overturned, or processed it.
+  // If manual/legacy: completed when auditStatus is PASSED or FATAL.
+  const isTaskFullyCompleted = (t) => {
     if (!t) return false;
+    if (isAiAuditedTask(t)) {
+      return !isAwaitingHumanVerification(t);
+    }
     const status = String(t.auditStatus || t.audit_status || '').toUpperCase();
     if (status === 'PASSED' || status === 'FATAL') return true;
-    if (t.auditedAt || t.audited_at || t.auditedBy || t.audited_by_name) return true;
     return false;
   };
+
+  // Helper: Strictly check whether a task needs human review/allocation
+  // Priority 1: AI-audited task awaiting human verification
+  // Priority 2: Raw task with photos awaiting initial audit
+  const isTaskNeedingAction = (t) => {
+    if (!t) return false;
+    if (isAiAuditedTask(t)) {
+      return isAwaitingHumanVerification(t);
+    }
+    const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
+    const status = String(t.auditStatus || t.audit_status || 'PENDING').toUpperCase();
+    return hasPhotos && status === 'PENDING';
+  };
+
+  const isTaskAlreadyAudited = (t) => isTaskFullyCompleted(t);
 
   // Available upload batch dates in tasks
   const availableBatchDates = useMemo(() => {
@@ -227,7 +250,7 @@ export default function AutoAllocationRoster({
 
   // Default to latest batch date
   const [selectedBatchDate, setSelectedBatchDate] = useState(() => '');
-  // Carryover toggle: Always keep un-audited tasks from previous days in active slots and pool
+  // Carryover toggle: Always keep tasks needing action from previous days in active slots and pool
   const [includeCarryover, setIncludeCarryover] = useState(true);
 
   useEffect(() => {
@@ -236,45 +259,59 @@ export default function AutoAllocationRoster({
     }
   }, [availableBatchDates, selectedBatchDate]);
 
-  // Carryover pending tasks with photos from previous days that remain un-audited
+  // Carryover tasks from previous days that remain awaiting human verification or audit
   const carryoverPendingTasks = useMemo(() => {
     return (tasks || []).filter(t => {
-      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-      if (!hasPhotos || isTaskAlreadyAudited(t)) return false;
+      if (!isTaskNeedingAction(t)) return false;
       const d = getTaskBatchDateYMD(t);
       return selectedBatchDate && selectedBatchDate !== 'ALL' && d !== selectedBatchDate;
     });
   }, [tasks, selectedBatchDate]);
 
-  // Scoped tasks: Includes selected batch date PLUS active un-audited carryover tasks from previous days
+  // Scoped tasks: Includes selected batch date PLUS active tasks needing action from previous days
   const scopedTasks = useMemo(() => {
     if (!selectedBatchDate || selectedBatchDate === 'ALL') return tasks;
     return tasks.filter(t => {
       const d = getTaskBatchDateYMD(t);
       if (d === selectedBatchDate) return true;
       if (includeCarryover) {
-        const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-        return hasPhotos && !isTaskAlreadyAudited(t);
+        return isTaskNeedingAction(t);
       }
       return false;
     });
   }, [tasks, selectedBatchDate, includeCarryover]);
 
-  // Strictly filter unassigned tasks that HAVE AUDIT PHOTOS waiting for an auditor
+  // Strictly filter unassigned tasks waiting for an auditor/city admin to verify or audit
   const unassignedPool = useMemo(() => {
     return scopedTasks.filter(t => {
-      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
       const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
-      return hasPhotos && !isTaskAlreadyAudited(t) && isUnassigned;
+      return isTaskNeedingAction(t) && isUnassigned;
     });
   }, [scopedTasks]);
 
-  // All pending tasks with photos (both currently assigned and unassigned) that can be re-distributed
+  // All tasks needing action (both currently assigned and unassigned) that can be re-distributed
   const pendingAuditablePool = useMemo(() => {
-    return scopedTasks.filter(t => {
-      const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-      return hasPhotos && !isTaskAlreadyAudited(t);
-    });
+    return scopedTasks.filter(t => isTaskNeedingAction(t));
+  }, [scopedTasks]);
+
+  // AI-Audited specific breakdown in scoped tasks
+  const aiPoolStats = useMemo(() => {
+    const totalAi = scopedTasks.filter(t => isAiAuditedTask(t));
+    const awaitingVerify = totalAi.filter(t => isAwaitingHumanVerification(t));
+    const unassignedVerify = awaitingVerify.filter(t => !t.assignedAuditorId && !t.assignedAuditorName);
+    const assignedVerify = awaitingVerify.filter(t => t.assignedAuditorId || t.assignedAuditorName);
+    const verified = totalAi.filter(t => getHumanVerificationStatus(t) === 'VERIFIED');
+    const overturned = totalAi.filter(t => getHumanVerificationStatus(t) === 'OVERTURNED');
+    const reaudit = totalAi.filter(t => getHumanVerificationStatus(t) === 'REAUDIT');
+    return {
+      totalAi: totalAi.length,
+      awaitingVerify: awaitingVerify.length,
+      unassignedVerify: unassignedVerify.length,
+      assignedVerify: assignedVerify.length,
+      verified: verified.length,
+      overturned: overturned.length,
+      reaudit: reaudit.length
+    };
   }, [scopedTasks]);
 
   // Tasks without audit photos that are purposefully excluded from allocation
@@ -282,7 +319,7 @@ export default function AutoAllocationRoster({
     return scopedTasks.filter(t => {
       const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
       const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
-      return !hasPhotos && !isTaskAlreadyAudited(t) && isUnassigned;
+      return !hasPhotos && !isTaskFullyCompleted(t) && isUnassigned;
     });
   }, [scopedTasks]);
 
@@ -334,17 +371,21 @@ export default function AutoAllocationRoster({
       });
 
       const todayBatchAssigned = assigned.filter(t => getTaskBatchDateYMD(t) === selectedBatchDate);
-      const carryoverAssigned = assigned.filter(t => getTaskBatchDateYMD(t) !== selectedBatchDate && !isTaskAlreadyAudited(t));
+      const carryoverAssigned = assigned.filter(t => getTaskBatchDateYMD(t) !== selectedBatchDate && isTaskNeedingAction(t));
 
-      const pending = assigned.filter(t => !isTaskAlreadyAudited(t)).length;
-      const completed = assigned.filter(t => isTaskAlreadyAudited(t)).length;
+      const pending = assigned.filter(t => isTaskNeedingAction(t)).length;
+      const completed = assigned.filter(t => isTaskFullyCompleted(t)).length;
+      const aiAwaitingVerify = assigned.filter(t => isAwaitingHumanVerification(t)).length;
+      const aiVerified = assigned.filter(t => isAiAuditedTask(t) && getHumanVerificationStatus(t) === 'VERIFIED').length;
 
       map[a.id] = {
         total: assigned.length,
         todayBatch: todayBatchAssigned.length,
         carryover: carryoverAssigned.length,
         pending,
-        completed
+        completed,
+        aiAwaitingVerify,
+        aiVerified
       };
     });
     return map;
@@ -523,11 +564,10 @@ export default function AutoAllocationRoster({
     setIsAllocating(true);
 
     try {
-      // 1. Reset assignments ONLY on pending tasks with photos in the active batch
+      // 1. Reset assignments ONLY on tasks needing action in the active batch
       const resetTasks = tasks.map(t => {
         const isFromBatch = !selectedBatchDate || selectedBatchDate === 'ALL' || getTaskBatchDateYMD(t) === selectedBatchDate;
-        const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
-        if (isFromBatch && hasPhotos && !isTaskAlreadyAudited(t)) {
+        if (isFromBatch && isTaskNeedingAction(t)) {
           return {
             ...t,
             assignedAuditorId: null,
@@ -640,7 +680,7 @@ export default function AutoAllocationRoster({
         const tName = String(t.assignedAuditorName || '').toLowerCase().trim();
         const isThisAuditor = (tId && tId === audId) || (tName && tName === audName);
 
-        if (isThisAuditor && t.auditStatus === 'PENDING') {
+        if (isThisAuditor && isTaskNeedingAction(t)) {
           return {
             ...t,
             assignedAuditorId: null,
@@ -792,8 +832,9 @@ export default function AutoAllocationRoster({
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-slate-800">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-              Workload & Real Auditor Roster
+            <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+              <span>AI Audits & Human Verification Roster</span>
             </span>
             <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
               <CheckCircle2 className="w-3 h-3" />
@@ -807,10 +848,10 @@ export default function AutoAllocationRoster({
             )}
           </div>
           <h2 className="text-2xl font-black text-white mt-1">
-            Equal Task Distribution & Auditor Allocations
+            Equal Task Distribution for Human Verification
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Divides 100% of pending tasks with photos equally among active {includeSuperAdmin ? 'City Admins & SuperAdmin' : 'City Admins'} handling auditing on shift in Supabase. Each member only sees their allocated queue.
+            Initial audits are executed 100% automatically by AI. This console equitably allocates AI-audited dispatches awaiting Human Verification among active {includeSuperAdmin ? 'City Admins & SuperAdmin' : 'City Admins'} on shift.
           </p>
         </div>
 
@@ -999,33 +1040,33 @@ export default function AutoAllocationRoster({
         
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">Ready for Allocation</span>
+            <span className="text-xs font-semibold">Ready for Verification Allocation</span>
             <Layers className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-black text-emerald-400">{unassignedPool.length}</div>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            {tempTotalQuota > 0 
-              ? `Exact ${tempTotalQuota} temp quota + ${Math.max(0, unassignedPool.length - tempTotalQuota)} permanent` 
-              : 'With photos • Waiting for auditor'}
+            {aiPoolStats.unassignedVerify > 0
+              ? `${aiPoolStats.unassignedVerify} AI audits awaiting reviewer allocation`
+              : 'Tasks awaiting human reviewer assignment'}
           </p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">Blank Image Leads</span>
-            <ShieldAlert className={`w-4 h-4 ${blankCompletedTasks.length > 0 ? 'text-rose-400' : 'text-slate-400'}`} />
+            <span className="text-xs font-semibold">AI Verification Progress</span>
+            <Sparkles className="w-4 h-4 text-purple-400" />
           </div>
-          <div className={`text-2xl font-black ${blankCompletedTasks.length > 0 ? 'text-rose-400' : 'text-slate-300'}`}>
-            {blankCompletedTasks.length}
+          <div className="text-2xl font-black text-purple-300">
+            {aiPoolStats.verified + aiPoolStats.overturned} <span className="text-xs font-normal text-slate-400">/ {aiPoolStats.totalAi}</span>
           </div>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            {blankCompletedTasks.length > 0 ? 'Zero photos • Ready for auto-fatal' : 'All zero-photo leads processed'}
+            {aiPoolStats.verified} Confirmed • {aiPoolStats.overturned} Overruled • {aiPoolStats.awaitingVerify} In Queue
           </p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">On-Duty Auditors</span>
+            <span className="text-xs font-semibold">On-Duty Reviewers</span>
             <Users className="w-4 h-4 text-sky-400" />
           </div>
           <div className="text-2xl font-black text-white">
@@ -1034,20 +1075,20 @@ export default function AutoAllocationRoster({
           <p className="text-[11px] text-slate-500 mt-0.5">
             {tempAuditors.length > 0 
               ? `${permanentAuditors.length} permanent + ${tempAuditors.length} temporary surge`
-              : 'Available for day dispatches'}
+              : 'Active for Human Verification shift'}
           </p>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between text-slate-400 mb-1">
-            <span className="text-xs font-semibold">Permanent Share</span>
+            <span className="text-xs font-semibold">Estimated Quota</span>
             <TrendingUp className="w-4 h-4 text-blue-400" />
           </div>
           <div className="text-2xl font-black text-blue-400">
-            ~{expectedSharePerAuditor} <span className="text-xs font-normal text-slate-400">tasks</span>
+            ~{expectedSharePerAuditor} <span className="text-xs font-normal text-slate-400">tasks / reviewer</span>
           </div>
           <p className="text-[11px] text-slate-500 mt-0.5">
-            {tempTotalQuota > 0 ? `After ${tempTotalQuota} surge quota deduction` : 'Equal photo task distribution'}
+            Equal allocation of AI verification queues
           </p>
         </div>
 
@@ -1197,8 +1238,8 @@ export default function AutoAllocationRoster({
                     )}
 
                     <div className="bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
-                      <span className="text-[10px] text-amber-400 font-bold uppercase block">Pending</span>
-                      <span className="font-extrabold text-amber-300 text-xs">{stats.pending} to do</span>
+                      <span className="text-[10px] text-amber-400 font-bold uppercase block">Pending Verification</span>
+                      <span className="font-extrabold text-amber-300 text-xs">{stats.pending} to verify</span>
                       {stats.carryover > 0 && (
                         <span className="text-[9px] text-rose-400 font-mono block mt-0.5 font-bold">
                           ({stats.carryover} D+1 overdue)
@@ -1206,8 +1247,8 @@ export default function AutoAllocationRoster({
                       )}
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-500 uppercase block">Audited</span>
-                      <span className="font-bold text-emerald-400">{stats.completed} done</span>
+                      <span className="text-[10px] text-slate-500 uppercase block">Verified</span>
+                      <span className="font-bold text-emerald-400">{stats.completed} completed</span>
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 uppercase block">Total Workload</span>

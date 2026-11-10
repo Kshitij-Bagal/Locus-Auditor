@@ -434,24 +434,94 @@ export function subscribeToTable(table, onPayload) {
 }
 
 // ====================================================================
-// AUTO-ALLOCATION ENGINE (Pure Equal Distribution Among Active Auditors)
-// Ensures 100% of pending tasks with images are evenly divided. Zero tasks left pending.
+// AI AUDIT & HUMAN VERIFICATION ENGINE & AUTO-ALLOCATION
 // ====================================================================
 
+/**
+ * Checks if a dispatch has been audited by an AI model.
+ */
+export function isAiAuditedTask(t) {
+  if (!t) return false;
+  const status = String(t.auditStatus || t.audit_status || '').toUpperCase();
+  if (status !== 'PASSED' && status !== 'FATAL' && status !== 'PASS') return false;
+  const by = String(t.auditedBy || t.audited_by_name || '').toLowerCase();
+  const rem = String(t.remarks || t.auditor_remarks || '').toLowerCase();
+  return (
+    by.includes('ai') || 
+    by.includes('gemini') || 
+    by.includes('gpt') || 
+    by.includes('claude') || 
+    by.includes('llama') || 
+    by.includes('groq') || 
+    by.includes('openrouter') ||
+    rem.includes('ai passed') || 
+    rem.includes('ai fatal') || 
+    rem.includes('(score:')
+  );
+}
+
+/**
+ * Returns human verification status: 'PENDING' | 'VERIFIED' | 'OVERTURNED' | 'REAUDIT'
+ */
+export function getHumanVerificationStatus(t) {
+  if (!isAiAuditedTask(t)) return null;
+  const rem = String(t.remarks || t.auditor_remarks || '');
+  if (t.auditStatus === 'NEEDS_REAUDIT' || rem.includes('[AI Audit Failed') || Boolean(t.isAiReAudit)) {
+    return 'REAUDIT';
+  }
+  if (rem.includes('[Human Overturned') || Boolean(t.human_overturned) || Boolean(t.humanOverturned)) {
+    return 'OVERTURNED';
+  }
+  if (rem.includes('[Human Verified') || Boolean(t.human_verified) || Boolean(t.humanVerified)) {
+    return 'VERIFIED';
+  }
+  return 'PENDING';
+}
+
+/**
+ * Checks if an AI-audited task is awaiting human verification sign-off.
+ */
+export function isAwaitingHumanVerification(t) {
+  if (!isAiAuditedTask(t)) return false;
+  const status = getHumanVerificationStatus(t);
+  return status === 'PENDING';
+}
+
+/**
+ * AI-First Auto-Allocation Engine:
+ * Equitably allocates AI-audited tasks awaiting Human Verification across active City Admins / Auditors.
+ * If no AI-audited tasks are present, falls back gracefully to any unassigned auditable tasks with photos.
+ */
 export function runAutoAllocationAlgorithm({
   tasks,
-  rosterAuditors
+  rosterAuditors,
+  targetMode = 'AI_VERIFICATION' // 'AI_VERIFICATION' | 'ALL_PENDING' | 'FORCE_AI_ONLY'
 }) {
-  // 1. Strictly filter tasks that HAVE COMPLIANCE AUDIT PHOTOS (hasImages === true and imageCount > 0)
-  // Tasks without uploaded equipment photos cannot be audited and must NEVER be allocated.
-  const actionablePool = tasks.filter(t => {
+  // 1. Identify AI-audited tasks awaiting human verification
+  const aiAwaitingPool = tasks.filter(t => {
+    const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
+    return isAwaitingHumanVerification(t) && isUnassigned;
+  });
+
+  // 2. Fallback pool: raw unassigned tasks with photos awaiting manual audit
+  const rawPendingPool = tasks.filter(t => {
     const hasPhotos = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
     const isPending = !t.auditStatus || t.auditStatus === 'PENDING';
     const isUnassigned = !t.assignedAuditorId && !t.assignedAuditorName;
     return hasPhotos && isPending && isUnassigned;
   });
 
-  // 2. Filter available auditors who are not on leave
+  let actionablePool = [];
+  if (targetMode === 'FORCE_AI_ONLY') {
+    actionablePool = aiAwaitingPool;
+  } else if (targetMode === 'ALL_PENDING') {
+    actionablePool = rawPendingPool;
+  } else {
+    // Default AI_VERIFICATION: Prioritize AI-audited verification queue, fallback to raw if none
+    actionablePool = aiAwaitingPool.length > 0 ? aiAwaitingPool : rawPendingPool;
+  }
+
+  // 3. Filter available auditors who are not on leave
   const activeAuditors = rosterAuditors.filter(a => a.shiftStatus !== 'ON_LEAVE');
 
   if (activeAuditors.length === 0 || actionablePool.length === 0) {
@@ -462,16 +532,26 @@ export function runAutoAllocationAlgorithm({
     };
   }
 
-  // 3. Workload buckets for each active auditor
+  // 4. Workload buckets for each active auditor
   const auditorWorkloads = {};
   activeAuditors.forEach(a => {
     const isTemporary = Boolean(a.isTemporary);
     const targetQuota = Math.max(0, parseInt(a.targetQuota ?? a.quota ?? 0, 10));
     // Weight: 0.5 for HALF_DAY, 1.0 for AVAILABLE / full day
     const weight = a.shiftStatus === 'HALF_DAY' ? 0.5 : 1.0;
-    const alreadyAssigned = tasks.filter(t => 
-      t.assignedAuditorId === a.id && t.auditStatus === 'PENDING'
-    ).length;
+    
+    // Existing pending workload for this auditor (either awaiting verification or pending raw audit)
+    const alreadyAssigned = tasks.filter(t => {
+      const isAssignedToMe = (
+        t.assignedAuditorId === a.id || 
+        String(t.assignedAuditorName || '').trim().toLowerCase() === String(a.full_name || a.name || '').trim().toLowerCase()
+      );
+      if (!isAssignedToMe) return false;
+      if (isAiAuditedTask(t)) {
+        return isAwaitingHumanVerification(t);
+      }
+      return !t.auditStatus || t.auditStatus === 'PENDING';
+    }).length;
 
     auditorWorkloads[a.id] = {
       auditor: a,
@@ -492,7 +572,6 @@ export function runAutoAllocationAlgorithm({
   const permanentAuditors = activeAuditors.filter(a => !a.isTemporary);
 
   // STEP 4A: Allocate EXACT Input Quota to Temporary Auditors First
-  // Deduct these exact tasks from the actionable pool so temp auditors only do what's entered in their input
   for (const tempAuditor of tempAuditors) {
     const quota = Math.max(0, parseInt(tempAuditor.targetQuota ?? tempAuditor.quota ?? 0, 10));
     const tasksToAssignCount = Math.min(quota, unassignedQueue.length);
@@ -544,6 +623,7 @@ export function runAutoAllocationAlgorithm({
     allocatedTasks: updatedTasks,
     newlyAssignedCount,
     auditorWorkloads,
-    batchId
+    batchId,
+    isAiAllocation: aiAwaitingPool.length > 0
   };
 }

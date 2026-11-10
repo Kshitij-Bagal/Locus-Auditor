@@ -26,7 +26,12 @@ import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
 import { exportAuditReport } from './utils/excelParser.js';
 import { getTaskSLAStatus, filterDPlusOneOverdueTasks } from './utils/slaHelper.js';
 import { getTaskBatchDateYMD } from './utils/dailyDigestHelper.js';
-import { runAutoAllocationAlgorithm } from './lib/supabase.js';
+import { 
+  runAutoAllocationAlgorithm,
+  isAiAuditedTask,
+  isAwaitingHumanVerification,
+  getHumanVerificationStatus
+} from './lib/supabase.js';
 import { 
   parseRoles, 
   normalizeRoleName,
@@ -705,6 +710,155 @@ export default function App() {
     }
   };
 
+  // Human Verification: Confirm AI Verdict (instantly saves human verification to DB)
+  const handleConfirmAiVerdict = async (taskId, notes = '') => {
+    try {
+      const target = tasks.find(t => String(t.id || t.taskId) === String(taskId));
+      if (!target) return;
+      const reviewerName = currentUser?.full_name || currentUser?.name || 'QA Reviewer';
+      const origRemarks = String(target.remarks || target.auditor_remarks || '')
+        .replace(/\[Human Verified[^\]]*\]\s*/g, '')
+        .replace(/\[Human Overturned[^\]]*\]\s*/g, '');
+      const notesClean = String(notes || '').trim();
+      const updatedRemarks = `[Human Verified by ${reviewerName}${notesClean ? `: ${notesClean}` : ''}] ${origRemarks}`.trim();
+      const isPass = target.auditStatus === 'PASSED' || target.auditStatus === 'PASS';
+      const modelName = target.auditedBy || target.audited_by_name || 'AI Auditor';
+
+      showToast(`Confirming AI verdict for Task #${target.taskId || taskId}...`, 'info');
+
+      if (isPass) {
+        await tasksApi.passAudit({
+          taskId,
+          auditorName: modelName,
+          auditorLocation: target.facilityCode || 'Central QA',
+          remarks: updatedRemarks,
+          criteriaStatus: target.criteriaStatus || {},
+          replacements: target.replacements || [],
+          taskData: target,
+          totalTokens: target.totalTokens || 0
+        });
+      } else {
+        await tasksApi.failAudit({
+          taskId,
+          taskData: target,
+          failedReasons: target.failedReasons || ['AI Fatal Strike Confirmed by Human Reviewer'],
+          remarks: updatedRemarks,
+          criteriaStatus: target.criteriaStatus || {},
+          replacements: target.replacements || [],
+          auditorName: modelName,
+          auditorLocation: target.facilityCode || 'Central QA',
+          immediateEmail: false,
+          totalTokens: target.totalTokens || 0
+        });
+      }
+
+      setTasks(prev => prev.map(t => {
+        if (String(t.id || t.taskId) === String(taskId)) {
+          return {
+            ...t,
+            remarks: updatedRemarks,
+            auditor_remarks: updatedRemarks,
+            human_verified: true,
+            humanVerified: true,
+            humanStatus: 'VERIFIED'
+          };
+        }
+        return t;
+      }));
+
+      showToast(`Task #${target.taskId || taskId} AI verdict confirmed & saved!`, 'success');
+    } catch (err) {
+      console.error('Failed to confirm AI verdict:', err);
+      showToast(`Error confirming AI verdict: ${err.message}`, 'error');
+    }
+  };
+
+  // Human Verification: Overturn AI Verdict (PASS -> FATAL or FATAL -> PASS)
+  const handleOverturnAiVerdict = async (taskId, targetVerdict, reason = '') => {
+    try {
+      const target = tasks.find(t => String(t.id || t.taskId) === String(taskId));
+      if (!target) return;
+      const reviewerName = currentUser?.full_name || currentUser?.name || 'QA Reviewer';
+      const origRemarks = String(target.remarks || target.auditor_remarks || '')
+        .replace(/\[Human Verified[^\]]*\]\s*/g, '')
+        .replace(/\[Human Overturned[^\]]*\]\s*/g, '');
+      const cleanReason = String(reason || 'Overturned upon visual inspection by QA reviewer').trim();
+
+      showToast(`Overturning AI verdict to ${targetVerdict}...`, 'info');
+
+      if (targetVerdict === 'PASS') {
+        const updatedRemarks = `[Human Overturned FATAL to PASS by ${reviewerName}: ${cleanReason}] Original AI: ${origRemarks}`.trim();
+        await tasksApi.passAudit({
+          taskId,
+          auditorName: reviewerName,
+          auditorLocation: target.facilityCode || 'Central QA',
+          remarks: updatedRemarks,
+          criteriaStatus: { selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS' },
+          replacements: [],
+          taskData: target,
+          totalTokens: target.totalTokens || 0
+        });
+
+        setTasks(prev => prev.map(t => {
+          if (String(t.id || t.taskId) === String(taskId)) {
+            return {
+              ...t,
+              auditStatus: 'PASSED',
+              audit_status: 'PASSED',
+              failedReasons: [],
+              failed_reasons: [],
+              remarks: updatedRemarks,
+              auditor_remarks: updatedRemarks,
+              human_overturned: true,
+              humanOverturned: true,
+              humanStatus: 'OVERTURNED',
+              auditedBy: reviewerName
+            };
+          }
+          return t;
+        }));
+      } else {
+        const updatedRemarks = `[Human Overturned PASS to FATAL by ${reviewerName}: ${cleanReason}] Original AI: ${origRemarks}`.trim();
+        await tasksApi.failAudit({
+          taskId,
+          taskData: target,
+          failedReasons: [cleanReason],
+          remarks: updatedRemarks,
+          criteriaStatus: target.criteriaStatus || {},
+          replacements: [],
+          auditorName: reviewerName,
+          auditorLocation: target.facilityCode || 'Central QA',
+          immediateEmail: false,
+          totalTokens: target.totalTokens || 0
+        });
+
+        setTasks(prev => prev.map(t => {
+          if (String(t.id || t.taskId) === String(taskId)) {
+            return {
+              ...t,
+              auditStatus: 'FATAL',
+              audit_status: 'FATAL',
+              failedReasons: [cleanReason],
+              failed_reasons: [cleanReason],
+              remarks: updatedRemarks,
+              auditor_remarks: updatedRemarks,
+              human_overturned: true,
+              humanOverturned: true,
+              humanStatus: 'OVERTURNED',
+              auditedBy: reviewerName
+            };
+          }
+          return t;
+        }));
+      }
+
+      showToast(`Task #${target.taskId || taskId} overturned to ${targetVerdict}!`, 'success');
+    } catch (err) {
+      console.error('Failed to overturn AI verdict:', err);
+      showToast(`Error overturning verdict: ${err.message}`, 'error');
+    }
+  };
+
   // Fatal Objection / Dispute Handlers
   const handleRaiseDispute = async (disputeData) => {
     try {
@@ -1123,7 +1277,15 @@ export default function App() {
     const withImages = visibleTasks.filter(t => t.hasImages).length;
     const passed = visibleTasks.filter(t => t.auditStatus === 'PASSED').length;
     const fatal = visibleTasks.filter(t => t.auditStatus === 'FATAL').length;
-    const pending = visibleTasks.filter(t => t.hasImages && (!t.auditStatus || t.auditStatus === 'PENDING')).length;
+
+    // AI & Human Verification Metrics
+    const aiAuditedCount = visibleTasks.filter(t => isAiAuditedTask(t)).length;
+    const awaitingVerificationCount = visibleTasks.filter(t => isAwaitingHumanVerification(t)).length;
+    const humanVerifiedCount = visibleTasks.filter(t => isAiAuditedTask(t) && getHumanVerificationStatus(t) === 'VERIFIED').length;
+    const humanOverturnedCount = visibleTasks.filter(t => isAiAuditedTask(t) && getHumanVerificationStatus(t) === 'OVERTURNED').length;
+
+    // Pending: Either AI audit awaiting human verification, or un-audited raw task with photos
+    const pending = visibleTasks.filter(t => isAwaitingHumanVerification(t) || (t.hasImages && (!t.auditStatus || t.auditStatus === 'PENDING'))).length;
     const auditedCount = passed + fatal;
     const fatalRate = auditedCount > 0 ? Math.round((fatal / auditedCount) * 100) : 0;
 
@@ -1154,7 +1316,11 @@ export default function App() {
       totalFEs: uniqueFEs.size,
       totalZones: uniqueZones.size || 1,
       fesWithFatals: fesWithFatal.size,
-      emailsSent: fatal
+      emailsSent: fatal,
+      aiAuditedCount,
+      awaitingVerificationCount,
+      humanVerifiedCount,
+      humanOverturnedCount
     };
   }, [visibleTasks]);
 
@@ -1246,11 +1412,17 @@ export default function App() {
         if (taskStatus !== selectedStatus.trim().toUpperCase()) return false;
       }
 
-      // 4. Audit Status Filter (PENDING vs PASSED vs FATAL)
+      // 4. Audit & Verification Status Filter (PENDING / AWAITING_VERIFICATION vs PASSED vs FATAL vs VERIFIED)
       if (selectedAuditStatus !== 'ALL') {
         const taskAuditStatus = String(task.auditStatus || task.audit_status || 'PENDING').trim().toUpperCase();
-        if (selectedAuditStatus === 'PENDING') {
-          if (taskAuditStatus === 'PASSED' || taskAuditStatus === 'FATAL') return false;
+        if (selectedAuditStatus === 'PENDING' || selectedAuditStatus === 'AWAITING_VERIFICATION') {
+          // Show tasks that need action: AI audits awaiting human review, or pending raw tasks
+          const needsAction = isAwaitingHumanVerification(task) || (!task.auditStatus || task.auditStatus === 'PENDING');
+          if (!needsAction) return false;
+        } else if (selectedAuditStatus === 'HUMAN_VERIFIED' || selectedAuditStatus === 'VERIFIED') {
+          if (getHumanVerificationStatus(task) !== 'VERIFIED') return false;
+        } else if (selectedAuditStatus === 'OVERTURNED') {
+          if (getHumanVerificationStatus(task) !== 'OVERTURNED') return false;
         } else if (taskAuditStatus !== selectedAuditStatus.trim().toUpperCase()) {
           return false;
         }
@@ -1434,6 +1606,8 @@ export default function App() {
               pendingCount={stats.pending}
               fatalCount={stats.fatal}
               passedCount={stats.passed}
+              verifiedCount={stats.humanVerifiedCount}
+              awaitingCount={stats.awaitingVerificationCount}
               onClearFilters={() => {
                 setSearchQuery('');
                 setSelectedZone('ALL');
@@ -1497,6 +1671,8 @@ export default function App() {
                   onQuickPass={(task) => handlePassAudit(task.id, { remarks: 'Quick pass by auditor' })}
                   onQuickFatal={(task) => setInspectingTask(task)}
                   onOpenEmail={(task) => setInspectingTask(task)}
+                  onConfirmAiVerdict={handleConfirmAiVerdict}
+                  onOverturnAiVerdict={handleOverturnAiVerdict}
                 />
               ) : (
                 <TaskCardGrid
@@ -1506,6 +1682,8 @@ export default function App() {
                   onQuickPass={(task) => handlePassAudit(task.id, { remarks: 'Quick pass by auditor' })}
                   onQuickFatal={(task) => setInspectingTask(task)}
                   onOpenEmail={(task) => setInspectingTask(task)}
+                  onConfirmAiVerdict={handleConfirmAiVerdict}
+                  onOverturnAiVerdict={handleOverturnAiVerdict}
                 />
               )
             )}
@@ -1655,6 +1833,8 @@ export default function App() {
           isReAudit={isReAuditMode}
           onOverturnAudit={handleOverturnDispute}
           onUpholdAudit={handleUpholdDispute}
+          onConfirmAiVerdict={handleConfirmAiVerdict}
+          onOverturnAiVerdict={handleOverturnAiVerdict}
           onNextTask={() => {
             const idx = filteredTasks.findIndex(t => t.id === inspectingTask.id);
             if (idx >= 0 && idx < filteredTasks.length - 1) {
