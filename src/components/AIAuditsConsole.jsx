@@ -45,6 +45,7 @@ import {
   listAvailableGeminiModels,
   normalizeLocusUrl 
 } from '../utils/geminiAuditHelper.js';
+import { extractAiStationEvaluation } from './VerificationModal.jsx';
 import { scanTasksForAiExclusion } from '../utils/imageForensics.js';
 import {
   SUPPORTED_PROVIDERS,
@@ -2621,6 +2622,9 @@ export default function AIAuditsConsole({
                 { key: 'frameDisplay', label: '5. Frame Display', icon: '👓' }
               ].map(st => {
                 const url = taskImages[st.key];
+                const aiEval = selectedTask ? extractAiStationEvaluation(selectedTask, st.key, activeRules) : null;
+                const isAudited = selectedTask && (selectedTask.auditStatus === 'FATAL' || selectedTask.auditStatus === 'PASSED' || selectedTask.auditStatus === 'PASS' || activeAuditResult?.result);
+
                 return (
                   <div
                     key={st.key}
@@ -2643,14 +2647,75 @@ export default function AIAuditsConsole({
                               src={url}
                               alt={st.label}
                               className="w-full h-full object-cover cursor-pointer group-hover/img:scale-105 transition-transform duration-200"
-                              onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}` })}
+                              onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}`, aiEval, stationLabel: st.label })}
                             />
-                            <div
-                              onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}` })}
-                              className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center cursor-pointer text-white font-bold text-xs gap-1"
-                            >
-                              <Eye className="w-3.5 h-3.5" /> Zoom
-                            </div>
+                            
+                            {/* ON-HOVER AI CRITERIA OVERLAY */}
+                            {isAudited && aiEval ? (
+                              <div
+                                onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}`, aiEval, stationLabel: st.label })}
+                                className="absolute inset-0 bg-slate-950/92 backdrop-blur-sm p-2.5 flex flex-col justify-between opacity-0 group-hover/img:opacity-100 transition-all duration-200 z-20 cursor-pointer select-none"
+                              >
+                                <div className="space-y-1 overflow-hidden">
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="text-[9px] font-mono uppercase tracking-wider text-slate-400">
+                                      AI Evaluation
+                                    </span>
+                                    {aiEval.status === 'FAIL' ? (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase bg-red-500/25 text-red-300 border border-red-500/40 flex items-center gap-1">
+                                        <AlertTriangle className="w-2.5 h-2.5 text-red-400" />
+                                        <span>AI FAILED</span>
+                                      </span>
+                                    ) : (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-black uppercase bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
+                                        <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                                        <span>AI PASSED</span>
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {aiEval.status === 'FAIL' ? (
+                                    <div className="space-y-0.5">
+                                      <span className="text-[9px] font-bold text-red-400 uppercase tracking-wider block">
+                                        Failed Criteria:
+                                      </span>
+                                      <div className="space-y-0.5 max-h-16 overflow-y-auto pr-0.5">
+                                        {aiEval.failureReasons.map((reason, rIdx) => (
+                                          <div key={rIdx} className="flex items-start gap-1 text-[10px] text-red-200 leading-snug">
+                                            <span className="text-red-400 font-bold shrink-0">❌</span>
+                                            <span className="line-clamp-2">{reason}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-0.5">
+                                      <span className="text-[9px] font-bold text-emerald-400 uppercase tracking-wider block">
+                                        Compliance:
+                                      </span>
+                                      <div className="text-[10px] text-emerald-200 flex items-start gap-1 leading-snug">
+                                        <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0 mt-0.5" />
+                                        <span className="line-clamp-3">{aiEval.observations || "Compliant with clinical SOP standards."}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="pt-1 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-sky-300 font-semibold">
+                                  <span className="flex items-center gap-1">
+                                    <Maximize2 className="w-2.5 h-2.5" /> Enlarge
+                                  </span>
+                                  <span className="text-[9px] text-slate-400">Inspect</span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div
+                                onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}`, aiEval, stationLabel: st.label })}
+                                className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center cursor-pointer text-white font-bold text-xs gap-1"
+                              >
+                                <Eye className="w-3.5 h-3.5" /> Zoom
+                              </div>
+                            )}
                           </>
                         ) : (
                           <div className="w-full h-full flex flex-col items-center justify-center text-slate-600 font-bold text-[10px] gap-1 p-2 text-center">
@@ -2663,7 +2728,7 @@ export default function AIAuditsConsole({
 
                     {url && (
                       <button
-                        onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}` })}
+                        onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}`, aiEval, stationLabel: st.label })}
                         className="mt-2 w-full py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold transition-colors cursor-pointer text-center"
                       >
                         Enlarge Photo
@@ -3843,32 +3908,122 @@ export default function AIAuditsConsole({
         />
       )}
 
-      {/* Enlarged Photo Preview Modal */}
+      {/* Enlarged Photo Preview Modal with AI Criteria Breakdown */}
       {previewImage && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-3 sm:p-5"
           onClick={() => setPreviewImage(null)}
         >
           <div
-            className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden shadow-2xl flex flex-col animate-in zoom-in-95 duration-200"
+            className="bg-slate-900 border border-slate-800 rounded-2xl max-w-5xl w-full max-h-[92vh] overflow-hidden shadow-2xl flex flex-col md:flex-row animate-in zoom-in-95 duration-200"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-              <span className="text-sm font-bold text-white">{previewImage.title}</span>
-              <button
-                onClick={() => setPreviewImage(null)}
-                className="text-slate-400 hover:text-white text-xs font-bold px-2 py-1 rounded-lg bg-slate-800 cursor-pointer"
-              >
-                Close (ESC)
-              </button>
-            </div>
-            <div className="p-4 flex items-center justify-center bg-slate-950 flex-1 overflow-auto">
+            {/* Left Photo View */}
+            <div className="flex-1 bg-slate-950 p-4 flex flex-col items-center justify-center min-h-0 relative select-none">
+              <div className="absolute top-3 left-4 flex items-center gap-2 z-10">
+                <span className="text-xs font-bold text-white bg-slate-900/90 px-3 py-1 rounded-lg border border-slate-800 shadow">
+                  {previewImage.title}
+                </span>
+              </div>
               <img
                 src={previewImage.url}
                 alt={previewImage.title}
-                className="max-h-[70vh] object-contain rounded-lg"
+                className="max-h-[75vh] max-w-full object-contain rounded-xl shadow-xl"
               />
             </div>
+
+            {/* Right Criteria Panel (if aiEval is present) */}
+            {previewImage.aiEval ? (
+              <div className="w-full md:w-84 bg-slate-900 border-t md:border-t-0 md:border-l border-slate-800 p-4 overflow-y-auto flex flex-col justify-between space-y-4 shrink-0">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                    <div>
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 block">Inspection Details</span>
+                      <span className="text-xs font-bold text-white">{previewImage.stationLabel || 'Station Photo'}</span>
+                    </div>
+                    <button
+                      onClick={() => setPreviewImage(null)}
+                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* AI Status Badge */}
+                  <div className={`p-3 rounded-xl border flex items-center justify-between ${
+                    previewImage.aiEval.status === 'FAIL' ? 'bg-red-950/30 border-red-500/40' : 'bg-emerald-950/30 border-emerald-500/40'
+                  }`}>
+                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                      {previewImage.aiEval.status === 'FAIL' ? (
+                        <>
+                          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                          <span className="text-red-300">Station FAILED by AI</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <span className="text-emerald-300">Station PASSED by AI</span>
+                        </>
+                      )}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase font-mono ${
+                      previewImage.aiEval.status === 'FAIL' ? 'bg-red-500/30 text-red-200' : 'bg-emerald-500/30 text-emerald-200'
+                    }`}>
+                      {previewImage.aiEval.status}
+                    </span>
+                  </div>
+
+                  {/* Failure Reasons or Compliance */}
+                  {previewImage.aiEval.status === 'FAIL' ? (
+                    <div className="space-y-2">
+                      <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider block">
+                        Criteria Violations Detected by AI:
+                      </span>
+                      <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                        {previewImage.aiEval.failureReasons.map((reason, idx) => (
+                          <div key={idx} className="p-2 rounded-lg bg-red-950/40 border border-red-500/30 text-xs text-red-200 flex items-start gap-1.5 leading-snug">
+                            <span className="text-red-400 font-bold shrink-0 mt-0.5">❌</span>
+                            <span>{reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {previewImage.aiEval.observations && (
+                        <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-slate-300">
+                          <span className="font-bold text-slate-400 block mb-0.5 text-[10px] uppercase">Observations & Evidence:</span>
+                          "{previewImage.aiEval.observations}"
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block">
+                        Compliance Standards Met:
+                      </span>
+                      <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-xs text-emerald-200 flex items-start gap-1.5 leading-snug">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                        <span>{previewImage.aiEval.observations || "All mandatory equipment visible & verified compliant with DLC SOP standards."}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => setPreviewImage(null)}
+                  className="w-full py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold transition-colors cursor-pointer text-center"
+                >
+                  Close Inspection
+                </button>
+              </div>
+            ) : (
+              <div className="p-3 border-t md:border-t-0 md:border-l border-slate-800 flex items-center justify-end">
+                <button
+                  onClick={() => setPreviewImage(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  Close (ESC)
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

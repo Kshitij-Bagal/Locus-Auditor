@@ -45,12 +45,96 @@ function normalizeImageUrl(rawUrl, taskId) {
 }
 
 const STATION_KEYS = [
-  { id: 'selfie', label: '1. Selfie & ID Card', imageKey: 'selfie' },
-  { id: 'torches', label: '2. Dual Torches', imageKey: 'torches' },
-  { id: 'visionChart', label: '3. Vision Standee', imageKey: 'visionChart' },
-  { id: 'toolkit', label: '4. Refraction Toolkit', imageKey: 'toolkit' },
-  { id: 'frameDisplay', label: '5. Frame Display Tray', imageKey: 'frameDisplay' }
+  { id: 'selfie', label: '1. Selfie & ID Card', imageKey: 'selfie', icon: '👤' },
+  { id: 'torches', label: '2. Dual Torches', imageKey: 'torches', icon: '🔦' },
+  { id: 'visionChart', label: '3. Vision Standee', imageKey: 'visionChart', icon: '👁️' },
+  { id: 'toolkit', label: '4. Refraction Toolkit', imageKey: 'toolkit', icon: '🧰' },
+  { id: 'frameDisplay', label: '5. Frame Display Tray', imageKey: 'frameDisplay', icon: '👓' }
 ];
+
+export function extractAiStationEvaluation(task, stationId, rules = []) {
+  if (!task) {
+    return {
+      status: 'PASS',
+      failureReasons: [],
+      observations: 'No task evaluation data available'
+    };
+  }
+
+  // 1. Check if criteriaEvaluation exists in task / aiResult / auditMetadata
+  const evalList = Array.isArray(task.criteriaEvaluation) 
+    ? task.criteriaEvaluation 
+    : (Array.isArray(task.aiResult?.criteriaEvaluation) 
+        ? task.aiResult.criteriaEvaluation 
+        : (Array.isArray(task.auditMetadata?.criteriaEvaluation) ? task.auditMetadata.criteriaEvaluation : []));
+
+  if (evalList && evalList.length > 0) {
+    const found = evalList.find(c => 
+      c.id === stationId || 
+      c.imageKey === stationId ||
+      (stationId === 'frameDisplay' && (c.id === 'trialLenses' || c.id === 'frameDisplay')) ||
+      (stationId === 'trialLenses' && (c.id === 'frameDisplay' || c.id === 'trialLenses'))
+    );
+    if (found) {
+      const isFailed = found.status === 'FAIL';
+      return {
+        status: isFailed ? 'FAIL' : 'PASS',
+        score: found.score,
+        failureReasons: Array.isArray(found.failureReasons) && found.failureReasons.length > 0 
+          ? found.failureReasons 
+          : (isFailed ? [found.observations || 'Criterion non-compliance identified by AI'] : []),
+        observations: found.observations || (isFailed ? 'Non-compliance detected by AI' : 'Verified compliant with clinical DLC SOP standards')
+      };
+    }
+  }
+
+  // 2. Reconstruct from criteria_status / criteriaStatus and failed_reasons
+  const statusMap = task.criteriaStatus || task.criteria_status || {};
+  const failedList = task.failedReasons || task.failed_reasons || [];
+  const rawStatus = statusMap[stationId] || (stationId === 'frameDisplay' ? statusMap['trialLenses'] : null);
+  const ruleDef = rules.find(r => r.id === stationId || r.imageKey === stationId);
+
+  const matchingReasons = failedList.filter(r => {
+    const lower = String(r).toLowerCase();
+    if (stationId === 'selfie' && (lower.includes('selfie') || lower.includes('t-shirt') || lower.includes('badge') || lower.includes('id card') || lower.includes('uniform') || lower.includes('polo'))) return true;
+    if (stationId === 'torches' && (lower.includes('torch') || lower.includes('penlight') || lower.includes('blue') || lower.includes('yellow') || lower.includes('batter'))) return true;
+    if (stationId === 'visionChart' && (lower.includes('chart') || lower.includes('standee') || lower.includes('vision') || lower.includes('snellen') || lower.includes('logmar'))) return true;
+    if (stationId === 'toolkit' && (lower.includes('toolkit') || lower.includes('sanitizer') || lower.includes('jcc') || lower.includes('trial frame') || lower.includes('ruler') || lower.includes('kit'))) return true;
+    if ((stationId === 'frameDisplay' || stationId === 'trialLenses') && (lower.includes('frame') || lower.includes('display') || lower.includes('tray') || lower.includes('lens') || lower.includes('trial'))) return true;
+    return (ruleDef?.commonFailures || []).some(cf => cf.toLowerCase() === lower);
+  });
+
+  const isFatalAudit = task.auditStatus === 'FATAL';
+  let computedStatus = 'PASS';
+  if (rawStatus) {
+    computedStatus = rawStatus === 'PASS' ? 'PASS' : 'FAIL';
+  } else if (matchingReasons.length > 0) {
+    computedStatus = 'FAIL';
+  } else if (isFatalAudit && failedList.length === 1) {
+    const lowerFirst = String(failedList[0]).toLowerCase();
+    const isThisStation = (stationId === 'selfie' && (lowerFirst.includes('selfie') || lowerFirst.includes('t-shirt') || lowerFirst.includes('badge'))) ||
+                          (stationId === 'torches' && (lowerFirst.includes('torch') || lowerFirst.includes('penlight'))) ||
+                          (stationId === 'visionChart' && (lowerFirst.includes('chart') || lowerFirst.includes('standee'))) ||
+                          (stationId === 'toolkit' && (lowerFirst.includes('toolkit') || lowerFirst.includes('sanitizer'))) ||
+                          (stationId === 'frameDisplay' && (lowerFirst.includes('frame') || lowerFirst.includes('tray')));
+    if (isThisStation) computedStatus = 'FAIL';
+  }
+
+  let finalReasons = matchingReasons;
+  if (computedStatus === 'FAIL' && finalReasons.length === 0) {
+    if (ruleDef?.commonFailures?.[0]) finalReasons = [ruleDef.commonFailures[0]];
+    else finalReasons = ['Clinical non-compliance identified by AI model'];
+  }
+
+  return {
+    status: computedStatus,
+    score: computedStatus === 'PASS' ? 100 : 0,
+    failureReasons: finalReasons,
+    observations: computedStatus === 'FAIL' 
+      ? (finalReasons.join('; ') || task.remarks || 'Station non-compliance detected')
+      : 'All mandatory equipment verified present and compliant with SOP'
+  };
+}
 
 export default function VerificationModal({
   task,
@@ -68,8 +152,20 @@ export default function VerificationModal({
   const [stationStatuses, setStationStatuses] = useState({});
   const [stationReasons, setStationReasons] = useState({});
   const [reviewerNotes, setReviewerNotes] = useState('');
-  const [previewImage, setPreviewImage] = useState(null);
+  const [lightboxIndex, setLightboxIndex] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Keyboard navigation for lightbox (ESC, ArrowLeft, ArrowRight)
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setLightboxIndex(null);
+      else if (e.key === 'ArrowLeft') setLightboxIndex(prev => (prev > 0 ? prev - 1 : prev));
+      else if (e.key === 'ArrowRight') setLightboxIndex(prev => (prev < STATION_KEYS.length - 1 ? prev + 1 : prev));
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxIndex]);
 
   // Initialize station statuses from task's AI criteria status & failed reasons
   useEffect(() => {
@@ -309,13 +405,14 @@ export default function VerificationModal({
         {/* Middle Scrollable Section: 5 Mandatory Images Grid */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3.5">
-            {STATION_KEYS.map(stn => {
+            {STATION_KEYS.map((stn, index) => {
               const ruleDef = rules.find(r => r.id === stn.id || r.imageKey === stn.imageKey);
               const currentStatus = stationStatuses[stn.id] || 'PASS';
               const isPass = currentStatus === 'PASS';
               const rawImgUrl = task.images?.[stn.imageKey] || task.images?.[stn.id];
               const normalizedUrl = normalizeImageUrl(rawImgUrl, task.taskId || task.id);
               const currentReason = stationReasons[stn.id];
+              const aiEval = extractAiStationEvaluation(task, stn.id, rules);
 
               // Inverse criteria choices
               const fatalCriteriaOptions = (ruleDef?.commonFailures && ruleDef.commonFailures.length > 0)
@@ -349,7 +446,7 @@ export default function VerificationModal({
                   <div className="p-2.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-1.5">
                     <div className="overflow-hidden">
                       <span className="font-bold text-white text-xs truncate block" title={stn.label}>
-                        {stn.label}
+                        {stn.icon ? `${stn.icon} ` : ''}{stn.label}
                       </span>
                     </div>
 
@@ -378,25 +475,85 @@ export default function VerificationModal({
                     </div>
                   </div>
 
-                  {/* Photo Display Area */}
+                  {/* Photo Display Area with Hover Overlay */}
                   <div className="relative bg-slate-950 aspect-[4/3] flex items-center justify-center overflow-hidden group">
                     {normalizedUrl ? (
                       <>
                         <img 
                           src={normalizedUrl} 
                           alt={stn.label}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200 cursor-zoom-in"
-                          onClick={() => setPreviewImage({ url: normalizedUrl, title: stn.label, status: currentStatus })}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 cursor-pointer"
+                          onClick={() => setLightboxIndex(index)}
                           loading="lazy"
                         />
+
+                        {/* Floating Enlarge Button */}
                         <button
                           type="button"
-                          onClick={() => setPreviewImage({ url: normalizedUrl, title: stn.label, status: currentStatus })}
-                          className="absolute bottom-2 right-2 p-1.5 rounded-lg bg-slate-900/80 text-white opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-sm hover:bg-blue-600"
-                          title="Zoom / Inspect Photo"
+                          onClick={(e) => { e.stopPropagation(); setLightboxIndex(index); }}
+                          className="absolute bottom-2 right-2 p-1.5 rounded-lg bg-slate-900/85 hover:bg-purple-600 text-white opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-sm z-30 shadow-lg cursor-pointer"
+                          title="Enlarge photo & view criteria breakdown"
                         >
                           <Maximize2 className="w-3.5 h-3.5" />
                         </button>
+
+                        {/* ON-HOVER AI CRITERIA OVERLAY */}
+                        <div 
+                          onClick={() => setLightboxIndex(index)}
+                          className="absolute inset-0 bg-slate-950/92 backdrop-blur-sm p-3 flex flex-col justify-between opacity-0 group-hover:opacity-100 transition-all duration-200 z-20 cursor-pointer select-none"
+                        >
+                          <div className="space-y-1.5 overflow-hidden">
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                                AI Evaluation
+                              </span>
+                              {aiEval.status === 'FAIL' ? (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-red-500/25 text-red-300 border border-red-500/40 flex items-center gap-1 shadow-sm">
+                                  <AlertTriangle className="w-3 h-3 text-red-400" />
+                                  <span>AI FAILED</span>
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 flex items-center gap-1 shadow-sm">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                  <span>AI PASSED</span>
+                                </span>
+                              )}
+                            </div>
+
+                            {aiEval.status === 'FAIL' ? (
+                              <div className="space-y-1">
+                                <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider block">
+                                  Failed Criteria:
+                                </span>
+                                <div className="space-y-1 max-h-20 overflow-y-auto pr-1">
+                                  {aiEval.failureReasons.map((reason, rIdx) => (
+                                    <div key={rIdx} className="flex items-start gap-1 text-[11px] text-red-200 leading-snug">
+                                      <span className="text-red-400 font-bold shrink-0">❌</span>
+                                      <span className="line-clamp-2">{reason}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-1">
+                                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block">
+                                  Compliance Criteria:
+                                </span>
+                                <div className="text-[11px] text-emerald-200 flex items-start gap-1 leading-snug">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                                  <span className="line-clamp-3">{aiEval.observations || "All mandatory equipment visible & fully compliant with DLC SOP."}</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="pt-1.5 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-purple-300 font-semibold">
+                            <span className="flex items-center gap-1">
+                              <Maximize2 className="w-3 h-3" /> Click to enlarge
+                            </span>
+                            <span className="text-[9px] text-slate-400">View high-res</span>
+                          </div>
+                        </div>
                       </>
                     ) : (
                       <div className="text-center p-3 text-slate-500 text-xs">
@@ -569,37 +726,272 @@ export default function VerificationModal({
 
       </div>
 
-      {/* Lightbox Image Preview Modal */}
-      {previewImage && (
-        <div 
-          className="fixed inset-0 z-60 bg-black/95 flex flex-col items-center justify-center p-4"
-          onClick={() => setPreviewImage(null)}
-        >
-          <div className="absolute top-4 right-4 flex items-center gap-2">
-            <span className={`px-2.5 py-1 rounded text-xs font-bold uppercase ${
-              previewImage.status === 'PASS' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'bg-red-500/20 text-red-400 border border-red-500/40'
-            }`}>
-              {previewImage.status}
-            </span>
-            <button
-              type="button"
-              onClick={() => setPreviewImage(null)}
-              className="p-2 rounded-xl bg-slate-800 text-white hover:bg-slate-700 cursor-pointer"
+      {/* Lightbox / Enlarged Photo & Criteria Inspection Modal */}
+      {lightboxIndex !== null && (() => {
+        const curStn = STATION_KEYS[lightboxIndex];
+        if (!curStn) return null;
+        const rawUrl = task.images?.[curStn.imageKey] || task.images?.[curStn.id];
+        const curUrl = normalizeImageUrl(rawUrl, task.taskId || task.id);
+        const curStatus = stationStatuses[curStn.id] || 'PASS';
+        const curReason = stationReasons[curStn.id];
+        const curAiEval = extractAiStationEvaluation(task, curStn.id, rules);
+        const curRuleDef = rules.find(r => r.id === curStn.id || r.imageKey === curStn.imageKey);
+
+        const fatalOptions = (curRuleDef?.commonFailures && curRuleDef.commonFailures.length > 0)
+          ? curRuleDef.commonFailures
+          : [
+              'Missing / obscured equipment',
+              'Photo blurry or unidentifiable',
+              'Duplicate / recycled image',
+              'SOP clinical non-compliance'
+            ];
+
+        const positiveOptions = (curRuleDef?.standards && curRuleDef.standards.length > 0)
+          ? curRuleDef.standards
+          : [
+              'All equipment clearly visible and compliant',
+              'Non-duplicate authentic clinical photo',
+              'Meets clinical accuracy standard',
+              'False positive AI flag overturned'
+            ];
+
+        return (
+          <div 
+            className="fixed inset-0 z-60 bg-black/95 backdrop-blur-md flex flex-col md:flex-row items-stretch justify-between p-3 sm:p-5 overflow-hidden animate-in fade-in duration-150"
+            onClick={() => setLightboxIndex(null)}
+          >
+            {/* Main Photo Area (Left/Center) */}
+            <div 
+              className="flex-1 relative flex flex-col items-center justify-center p-2 sm:p-4 min-h-0 select-none"
+              onClick={(e) => e.stopPropagation()}
             >
-              <X className="w-5 h-5" />
-            </button>
+              {/* Top Floating Station Banner with Lightbox Navigation */}
+              <div className="absolute top-3 left-4 right-4 flex items-center justify-between z-10 pointer-events-none">
+                <div className="flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl border border-slate-700 shadow-xl pointer-events-auto">
+                  <span className="text-base">{curStn.icon}</span>
+                  <span className="text-sm font-bold text-white font-mono">
+                    {curStn.label}
+                  </span>
+                  <span className="text-xs text-slate-400 font-mono">
+                    ({lightboxIndex + 1} of {STATION_KEYS.length})
+                  </span>
+                </div>
+
+                {/* Prev / Next photo buttons in Lightbox */}
+                <div className="flex items-center gap-1.5 bg-slate-900/90 backdrop-blur-md p-1 rounded-xl border border-slate-700 shadow-xl pointer-events-auto">
+                  <button
+                    type="button"
+                    onClick={() => setLightboxIndex(prev => Math.max(0, prev - 1))}
+                    disabled={lightboxIndex === 0}
+                    className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-300 disabled:opacity-30 cursor-pointer transition-colors"
+                    title="Previous Photo (Left Arrow)"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLightboxIndex(prev => Math.min(STATION_KEYS.length - 1, prev + 1))}
+                    disabled={lightboxIndex === STATION_KEYS.length - 1}
+                    className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-300 disabled:opacity-30 cursor-pointer transition-colors"
+                    title="Next Photo (Right Arrow)"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLightboxIndex(null)}
+                    className="p-1.5 rounded-lg hover:bg-red-500/20 text-slate-400 hover:text-red-400 cursor-pointer ml-1 transition-colors"
+                    title="Close Lightbox (ESC)"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* High-Resolution Image */}
+              {curUrl ? (
+                <img 
+                  src={curUrl} 
+                  alt={curStn.label}
+                  className="max-h-[82vh] max-w-full object-contain rounded-2xl shadow-2xl border border-white/10"
+                />
+              ) : (
+                <div className="p-8 text-center text-slate-500">
+                  <AlertTriangle className="w-12 h-12 mx-auto mb-2 text-slate-600" />
+                  <p className="text-sm font-bold">No photo attached for this station</p>
+                </div>
+              )}
+            </div>
+
+            {/* Dedicated Right Inspection & Overturn Sidebar */}
+            <div 
+              className="w-full md:w-96 bg-slate-900 border-t md:border-t-0 md:border-l border-slate-800 flex flex-col p-4 sm:p-5 overflow-y-auto space-y-4 shrink-0 shadow-2xl rounded-2xl md:rounded-l-2xl md:rounded-r-none max-h-[48vh] md:max-h-full"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header & Status */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div>
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 block">
+                    Station #{lightboxIndex + 1} Inspection
+                  </span>
+                  <span className="text-sm font-bold text-white">
+                    {curStn.label}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {curStatus === 'PASS' ? (
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> PASS
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-1 rounded-lg text-xs font-black uppercase bg-red-500/20 text-red-300 border border-red-500/40 flex items-center gap-1 animate-pulse">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-400" /> FAIL
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => toggleStation(curStn.id)}
+                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                    title="Toggle PASS / FAIL"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* AI Evaluation Criteria Breakdown */}
+              <div className={`p-4 rounded-xl border space-y-2.5 ${
+                curAiEval.status === 'FAIL' 
+                  ? 'bg-red-950/25 border-red-500/40' 
+                  : 'bg-emerald-950/25 border-emerald-500/40'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 text-white">
+                    {curAiEval.status === 'FAIL' ? (
+                      <>
+                        <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                        <span className="text-red-300">AI Flagged Violations</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span className="text-emerald-300">AI Compliance Evaluation</span>
+                      </>
+                    )}
+                  </span>
+                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded font-mono ${
+                    curAiEval.status === 'FAIL' ? 'bg-red-500/30 text-red-200' : 'bg-emerald-500/30 text-emerald-200'
+                  }`}>
+                    AI: {curAiEval.status}
+                  </span>
+                </div>
+
+                {curAiEval.status === 'FAIL' ? (
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider block">
+                      Criteria Failed by AI:
+                    </span>
+                    <div className="space-y-1.5">
+                      {curAiEval.failureReasons.map((reason, rIdx) => (
+                        <div key={rIdx} className="p-2 rounded-lg bg-red-950/40 border border-red-500/30 flex items-start gap-2 text-xs text-red-200 leading-relaxed">
+                          <span className="text-red-400 font-bold shrink-0 mt-0.5">❌</span>
+                          <span>{reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {curAiEval.observations && (
+                      <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800 text-[11px] text-slate-300">
+                        <span className="font-bold text-slate-400 block mb-0.5 text-[10px] uppercase">AI Notes & Observations:</span>
+                        "{curAiEval.observations}"
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block">
+                      Criteria Verified Compliant:
+                    </span>
+                    <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 flex items-start gap-2 text-xs text-emerald-200 leading-relaxed">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <span>{curAiEval.observations || "All required equipment visible, powered on, and fully compliant with DLC SOP standards."}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Inverse Criteria Overturn Control */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+                {curStatus === 'PASS' ? (
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-amber-300 block mb-1.5">
+                      Overturn this station to FAIL:
+                    </label>
+                    <select
+                      value=""
+                      onChange={(e) => handleInverseSelect(curStn.id, 'PASS', e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 hover:border-amber-500/60 rounded-xl px-3 py-2 text-xs text-amber-200 focus:outline-none focus:border-amber-400 cursor-pointer font-medium truncate"
+                    >
+                      <option value="">Select Fatal Violation Reason...</option>
+                      {fatalOptions.map((reason, i) => (
+                        <option key={i} value={reason} className="bg-slate-900 text-white">
+                          ❌ {reason}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-emerald-300 block mb-1.5">
+                      Overturn this station to PASS:
+                    </label>
+                    <select
+                      value=""
+                      onChange={(e) => handleInverseSelect(curStn.id, 'FAIL', e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 hover:border-emerald-500/60 rounded-xl px-3 py-2 text-xs text-emerald-200 focus:outline-none focus:border-emerald-400 cursor-pointer font-medium truncate"
+                    >
+                      <option value="">Select Positive Standard Reason...</option>
+                      {positiveOptions.map((standard, i) => (
+                        <option key={i} value={standard} className="bg-slate-900 text-white">
+                          ✅ {standard}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {curReason && (
+                  <div className={`p-2 rounded-lg text-xs leading-relaxed ${
+                    curStatus === 'PASS' 
+                      ? 'bg-emerald-950/40 text-emerald-300 border border-emerald-500/20' 
+                      : 'bg-red-950/40 text-red-300 border border-red-500/20'
+                  }`}>
+                    <span className="font-bold">{curStatus === 'PASS' ? 'Current Standard:' : 'Active Violation:'}</span> {curReason}
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Actions at bottom of drawer */}
+              <div className="pt-2 flex items-center justify-between gap-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => toggleStation(curStn.id)}
+                  className="flex-1 py-2 rounded-xl text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer text-center"
+                >
+                  Toggle {curStatus === 'PASS' ? 'to FAIL' : 'to PASS'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLightboxIndex(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-500 text-white transition-colors cursor-pointer text-center"
+                >
+                  Done
+                </button>
+              </div>
+
+            </div>
           </div>
-          <div className="text-white font-bold text-sm mb-3">
-            {previewImage.title}
-          </div>
-          <img 
-            src={previewImage.url} 
-            alt={previewImage.title}
-            className="max-h-[85vh] max-w-[90vw] object-contain rounded-xl shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
