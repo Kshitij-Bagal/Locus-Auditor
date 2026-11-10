@@ -209,9 +209,56 @@ export function saveProviderModel(providerId, model) {
 /**
  * Standardized SOP Clinical Audit Prompt (Shared across ALL providers)
  */
-export function buildStandardAuditPrompt(task, rules = INITIAL_CENTRAL_RULES) {
+export function buildStandardAuditPrompt(task, rules = INITIAL_CENTRAL_RULES, strictAntiFalsePositive = true, customDirectives = '') {
+  const effectiveRules = (rules && Array.isArray(rules) && rules.length > 0) ? rules : INITIAL_CENTRAL_RULES;
+
+  const formattedCriteria = effectiveRules.map((r, idx) => {
+    const key = r.imageKey || r.field || r.id || `station_${idx + 1}`;
+    const label = r.label || r.title || `Station ${idx + 1}`;
+    const standardsList = (r.standards && r.standards.length > 0)
+      ? r.standards.map(s => `     * ${s}`).join('\n')
+      : '     * Compliant with clinical standard setup';
+    const failuresList = (r.commonFailures && r.commonFailures.length > 0)
+      ? r.commonFailures.map(f => `     * ${f}`).join('\n')
+      : '     * Missing, damaged, or unverified equipment';
+
+    return `${idx + 1}. [${key}] ${label}:
+   - Description: ${r.description || 'Mandatory clinical equipment inspection.'}
+   - Mandatory Standards (Must meet ALL):
+${standardsList}
+   - Instant Non-Compliance Triggers (If ANY detected, must FAIL with status 'FAIL'):
+${failuresList}`;
+  }).join('\n\n');
+
+  const criteriaSchemaExample = effectiveRules.map(r => {
+    const key = r.imageKey || r.field || r.id;
+    const label = r.label || r.title;
+    return `    {
+      "id": "${key}",
+      "label": "${label}",
+      "status": "PASS" | "FAIL",
+      "score": number (0-100),
+      "observations": "Clear detailed observation of what is seen in the photo",
+      "failureReasons": []
+    }`;
+  }).join(',\n');
+
+  const antiFalsePositiveSection = strictAntiFalsePositive ? `
+STRICT ANTI-FALSE-POSITIVE QUALITY ENFORCEMENT DIRECTIVE (CRITICAL):
+- Lenskart QA audits currently have an unacceptably high rate of FALSE POSITIVES (substandard visits wrongly marked as PASS).
+- You are an unsparing, high-rigor Chief Clinical QA Inspector. You MUST NOT give Field Executives the benefit of the doubt.
+- If ANY required uniform item (Polo/T-shirt), employee ID badge, or piece of equipment is missing, unreadable, obscured, not visible, or doubtful, YOU MUST FAIL THAT CRITERION WITH "FAIL" AND ISSUE AN OVERALL "FATAL" STRIKE.
+- Torches: BOTH torches must be clearly turned ON and glowing with visible active light beams. If either torch is unlit or missing, FAIL immediately.
+- Selfie: ID card must be clearly visible and readable. If ID card is missing, turned backwards, unreadable, or official polo is not worn, FAIL immediately.
+- Vision Chart: Must be mounted on telescoping standee. If stuck on wall with tape or missing standee, FAIL immediately.
+- Toolkit: Must include hand sanitizer, trial frame, and JCC. If sanitizer or tools missing, FAIL immediately.
+- Frame Display: Trays must be cleanly displayed on customer table. If kept inside bag or on floor/hallway, FAIL immediately.
+- Blank/Black/Obscured/Duplicate photo: Automatic FATAL fraud strike.
+${customDirectives ? `\nADDITIONAL AUDITOR INSTRUCTIONS:\n${customDirectives}\n` : ''}
+` : (customDirectives ? `\nADDITIONAL AUDITOR INSTRUCTIONS:\n${customDirectives}\n` : '');
+
   return `You are the Chief Clinical QA Auditor for Lenskart Home Eye Checkup (DLC).
-Your task is to audit a field executive's (FE) customer home visit by inspecting the 5 mandatory equipment inspection photos submitted for this dispatch.
+Your task is to audit a field executive's (FE) customer home visit by inspecting the mandatory equipment inspection photos submitted for this dispatch.
 
 TASK METADATA:
 - Task ID: ${task.taskId || task.id}
@@ -220,32 +267,10 @@ TASK METADATA:
 - Dispatch Date: ${task.date || task.dispatch_date || 'N/A'}
 - Customer: ${task.customerName || 'Customer'}
 
-MANDATORY CLINICAL SOP CRITERIA (ALL 5 ARE REQUIRED TO PASS):
-1. [selfie] Selfie with Official Lenskart T-Shirt & Visible ID Card:
-   - Must be wearing official Lenskart Navy Blue Polo / T-shirt with logo.
-   - Physical Lenskart employee photo ID card badge must be clearly displayed and readable.
-   - Face clearly visible and matches profile.
+MANDATORY CLINICAL SOP CRITERIA (ALL REQUIRED TO PASS):
+${formattedCriteria}
 
-2. [torches] Dual Working Torches (Blue & Yellow):
-   - BOTH torches must be illuminated and working:
-     * Blue Torch (Cobalt blue filter for fluorescein corneal staining)
-     * Yellow Torch (White/yellow illumination for anterior segment & pupillary reflex)
-   - Visible light beam must be emitted.
-
-3. [visionChart] 6-Meter Vision Distance Chart & Standee:
-   - Vision testing chart properly mounted on wall or standee at required clinical distance.
-   - Letters/Snellen optotypes sharp, legible, and properly lit.
-
-4. [toolkit] Mandatory Refraction Diagnostic Toolkit:
-   - Must show organized clinical toolkit containing:
-     * Cross cylinder lens
-     * Occluder
-     * PD Ruler (Pupillary Distance)
-     * Trial frame in clean, calibrated condition.
-
-5. [frameDisplay] Frame Display & Trial Lens Kit:
-   - Official Lenskart display tray with complete sample frame collection intact.
-   - Full trial lens case present with sorted spherical/cylindrical lenses.
+${antiFalsePositiveSection}
 
 FRAUD & PHOTO INTEGRITY CHECK:
 - Check for fraudulent photo uploads: covered camera lens, solid black image, blank white screenshot, blurred unidentifiable object, or duplicate pictures.
@@ -256,7 +281,7 @@ DETERMINISTIC ERROR MARGIN & CONFIDENCE:
 - Calculate your Deterministic Error Margin as (100 - ConfidenceScore).
 
 VERDICT RULES:
-- If ALL 5 criteria pass and no photo fraud is detected -> verdict: "PASS"
+- If ALL criteria pass and no photo fraud is detected -> verdict: "PASS"
 - If ANY criterion fails or photo fraud is detected -> verdict: "FATAL"
 - Overall score: 0 to 100 based on weighted adherence.
 
@@ -270,46 +295,7 @@ You MUST respond strictly with valid JSON conforming to this exact structure:
   "summary": "1-2 sentence executive summary of the audit findings",
   "isFraudulentOrBlankDetected": boolean,
   "criteriaEvaluation": [
-    {
-      "id": "selfie",
-      "label": "1. Selfie: T-Shirt & ID Card",
-      "status": "PASS" | "FAIL",
-      "score": number (0-100),
-      "observations": "Clear detailed observation of what is seen in the photo",
-      "failureReasons": []
-    },
-    {
-      "id": "torches",
-      "label": "2. Working Blue & Yellow Torches",
-      "status": "PASS" | "FAIL",
-      "score": number (0-100),
-      "observations": "Observation details",
-      "failureReasons": []
-    },
-    {
-      "id": "visionChart",
-      "label": "3. Vision Distance Chart & Standee",
-      "status": "PASS" | "FAIL",
-      "score": number (0-100),
-      "observations": "Observation details",
-      "failureReasons": []
-    },
-    {
-      "id": "toolkit",
-      "label": "4. Refraction Diagnostic Toolkit",
-      "status": "PASS" | "FAIL",
-      "score": number (0-100),
-      "observations": "Observation details",
-      "failureReasons": []
-    },
-    {
-      "id": "frameDisplay",
-      "label": "5. Frame Display & Trial Lens Kit",
-      "status": "PASS" | "FAIL",
-      "score": number (0-100),
-      "observations": "Observation details",
-      "failureReasons": []
-    }
+${criteriaSchemaExample}
   ],
   "equipmentReplacementsNeeded": []
 }`;
@@ -480,6 +466,8 @@ export async function auditTaskMultiProvider({
   apiKey = null,
   modelId = null,
   rules = INITIAL_CENTRAL_RULES,
+  strictAntiFalsePositive = true,
+  customDirectives = '',
   onProgress,
   enableProviderFailover = true
 }) {
@@ -527,7 +515,7 @@ export async function auditTaskMultiProvider({
   const downloadedPhotos = await downloadAllPhotos(task);
 
   // 2. Build standard clinical audit instruction
-  const promptText = buildStandardAuditPrompt(task, rules);
+  const promptText = buildStandardAuditPrompt(task, rules, strictAntiFalsePositive, customDirectives);
 
   // Helper to execute single provider query
   const executeProviderQuery = async (targetProv, targetKey, targetModel) => {

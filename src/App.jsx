@@ -1327,6 +1327,7 @@ export default function App() {
             users={users}
             currentUser={currentUser}
             onNavigate={setActivePage}
+            rules={rules}
             onTaskAudited={(taskId, verdict, extraMetadata = {}) => {
               const normalizedVerdict = verdict === 'PASS' ? 'PASSED' : (verdict === 'FAIL' ? 'FATAL' : verdict);
               setTasks(prev => prev.map(t => {

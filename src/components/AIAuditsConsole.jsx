@@ -24,8 +24,12 @@ import {
   Award,
   TrendingUp,
   Sliders,
+  SlidersHorizontal,
   Check,
   X,
+  Plus,
+  Trash2,
+  Edit3,
   Clock,
   Info,
   Activity,
@@ -100,7 +104,8 @@ export default function AIAuditsConsole({
   users = [],
   currentUser,
   onNavigate,
-  onTaskAudited
+  onTaskAudited,
+  rules: propRules = null
 }) {
   // 1. Multi-AI Provider & Model State
   const [activeProvider, setActiveProvider] = useState(() => getActiveAiProvider());
@@ -257,6 +262,161 @@ export default function AIAuditsConsole({
   const [forensicDefectFilter, setForensicDefectFilter] = useState('ALL'); // 'ALL' | 'BLUR' | 'BLACK_BLANK'
   const [forensicSearchQuery, setForensicSearchQuery] = useState('');
   const forensicAbortControllerRef = useRef(null);
+
+  // 9. Centrally Governed & Custom AI Audit Criteria State
+  const [activeRules, setActiveRules] = useState(() => {
+    try {
+      const saved = localStorage.getItem('locus_ai_custom_rules');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (_) {}
+    return (propRules && propRules.length > 0) ? propRules : INITIAL_CENTRAL_RULES;
+  });
+
+  // Strict anti-false-positive enforcement directive toggle
+  const [strictAntiFalsePositive, setStrictAntiFalsePositive] = useState(() => {
+    try {
+      const saved = localStorage.getItem('locus_ai_strict_anti_false_positive');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch (_) {
+      return true;
+    }
+  });
+
+  // Custom prompt directives
+  const [customDirectives, setCustomDirectives] = useState(() => {
+    return localStorage.getItem('locus_ai_custom_directives') || '';
+  });
+
+  // Criteria Modal State
+  const [criteriaModalOpen, setCriteriaModalOpen] = useState(false);
+  const [criteriaModalTab, setCriteriaModalTab] = useState('selfie'); // 'selfie' | 'torches' | 'visionChart' | 'toolkit' | 'frameDisplay' | 'STRICTNESS'
+  const [draftRules, setDraftRules] = useState(activeRules);
+  const [draftStrictAntiFalsePositive, setDraftStrictAntiFalsePositive] = useState(strictAntiFalsePositive);
+  const [draftCustomDirectives, setDraftCustomDirectives] = useState(customDirectives);
+  const [newStandardInput, setNewStandardInput] = useState('');
+  const [newFailureInput, setNewFailureInput] = useState('');
+
+  // Fetch persisted rules from Supabase settings table on mount
+  useEffect(() => {
+    settingsApi.getSetting('locus_ai_audit_rules', null).then(saved => {
+      if (saved && Array.isArray(saved.rules) && saved.rules.length > 0) {
+        setActiveRules(saved.rules);
+        if (typeof saved.strictAntiFalsePositive === 'boolean') {
+          setStrictAntiFalsePositive(saved.strictAntiFalsePositive);
+        }
+        if (typeof saved.customDirectives === 'string') {
+          setCustomDirectives(saved.customDirectives);
+        }
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleOpenCriteriaModal = () => {
+    setDraftRules(JSON.parse(JSON.stringify(activeRules)));
+    setDraftStrictAntiFalsePositive(strictAntiFalsePositive);
+    setDraftCustomDirectives(customDirectives);
+    setNewStandardInput('');
+    setNewFailureInput('');
+    setCriteriaModalOpen(true);
+  };
+
+  const handleSaveCriteria = async () => {
+    setActiveRules(draftRules);
+    setStrictAntiFalsePositive(draftStrictAntiFalsePositive);
+    setCustomDirectives(draftCustomDirectives);
+
+    try {
+      localStorage.setItem('locus_ai_custom_rules', JSON.stringify(draftRules));
+      localStorage.setItem('locus_ai_strict_anti_false_positive', JSON.stringify(draftStrictAntiFalsePositive));
+      localStorage.setItem('locus_ai_custom_directives', draftCustomDirectives);
+    } catch (_) {}
+
+    try {
+      await settingsApi.setSetting('locus_ai_audit_rules', {
+        rules: draftRules,
+        strictAntiFalsePositive: draftStrictAntiFalsePositive,
+        customDirectives: draftCustomDirectives,
+        updatedAt: new Date().toISOString(),
+        updatedBy: currentUser?.full_name || currentUser?.name || currentUser?.email || 'Central Auditor'
+      });
+    } catch (e) {
+      console.warn('Could not save rules to Supabase settings:', e.message);
+    }
+
+    setCriteriaModalOpen(false);
+    showVerificationToast('Audit criteria updated! AI models will now enforce these exact standards.', 'success');
+  };
+
+  const handleResetCriteriaToDefaults = () => {
+    if (!confirm('Reset all 5 station criteria and strictness settings back to standard Lenskart DLC defaults?')) return;
+    setDraftRules(JSON.parse(JSON.stringify(INITIAL_CENTRAL_RULES)));
+    setDraftStrictAntiFalsePositive(true);
+    setDraftCustomDirectives('');
+  };
+
+  const handleUpdateDraftRuleField = (ruleId, field, value) => {
+    setDraftRules(prev => prev.map(r => {
+      if (r.id === ruleId) {
+        return { ...r, [field]: value };
+      }
+      return r;
+    }));
+  };
+
+  const handleAddStandardToDraft = (ruleId) => {
+    if (!newStandardInput.trim()) return;
+    setDraftRules(prev => prev.map(r => {
+      if (r.id === ruleId) {
+        return {
+          ...r,
+          standards: [...(r.standards || []), newStandardInput.trim()]
+        };
+      }
+      return r;
+    }));
+    setNewStandardInput('');
+  };
+
+  const handleRemoveStandardFromDraft = (ruleId, index) => {
+    setDraftRules(prev => prev.map(r => {
+      if (r.id === ruleId) {
+        return {
+          ...r,
+          standards: (r.standards || []).filter((_, i) => i !== index)
+        };
+      }
+      return r;
+    }));
+  };
+
+  const handleAddFailureToDraft = (ruleId) => {
+    if (!newFailureInput.trim()) return;
+    setDraftRules(prev => prev.map(r => {
+      if (r.id === ruleId) {
+        return {
+          ...r,
+          commonFailures: [...(r.commonFailures || []), newFailureInput.trim()]
+        };
+      }
+      return r;
+    }));
+    setNewFailureInput('');
+  };
+
+  const handleRemoveFailureFromDraft = (ruleId, index) => {
+    setDraftRules(prev => prev.map(r => {
+      if (r.id === ruleId) {
+        return {
+          ...r,
+          commonFailures: (r.commonFailures || []).filter((_, i) => i !== index)
+        };
+      }
+      return r;
+    }));
+  };
 
   // Auto-discover models quietly when API key exists (Gemini)
   useEffect(() => {
@@ -527,7 +687,9 @@ export default function AIAuditsConsole({
         providerId: activeProvider,
         apiKey,
         modelId: selectedModel,
-        rules: INITIAL_CENTRAL_RULES,
+        rules: activeRules,
+        strictAntiFalsePositive,
+        customDirectives,
         onProgress: (prog) => setCurrentProgress(prog),
         enableProviderFailover: allowFailover
       });
@@ -2051,16 +2213,35 @@ export default function AIAuditsConsole({
             <span className="font-bold text-white uppercase tracking-wider">Queue Selection ({queueTasks.length} Visits)</span>
           </div>
 
-          {/* Auto-commit checkbox */}
-          <label className="flex items-center gap-2 text-slate-300 font-semibold cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={autoCommitToDb}
-              onChange={(e) => setAutoCommitToDb(e.target.checked)}
-              className="w-4 h-4 rounded text-sky-600 focus:ring-0 bg-slate-950 border-slate-700 cursor-pointer"
-            />
-            <span>Auto-Save Verdict to Database</span>
-          </label>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {/* View Audit Criteria Button */}
+            <button
+              type="button"
+              onClick={handleOpenCriteriaModal}
+              className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-750 text-sky-300 hover:text-white border border-sky-500/30 hover:border-sky-400 flex items-center gap-2 font-bold transition-all shadow-md shadow-sky-950/40 cursor-pointer"
+              title="View and customize clinical SOP criteria, mandatory standards, fatal failure triggers, and strictness rules used by AI models"
+            >
+              <Sliders className="w-3.5 h-3.5 text-sky-400" />
+              <span>View Audit Criteria</span>
+              <span className="px-1.5 py-0.2 rounded-full bg-sky-950 text-sky-300 text-[10px] font-mono border border-sky-400/30">
+                {activeRules.length} Stations
+              </span>
+              {strictAntiFalsePositive && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="Strict Anti-False-Positive Engine Active" />
+              )}
+            </button>
+
+            {/* Auto-commit checkbox */}
+            <label className="flex items-center gap-2 text-slate-300 font-semibold cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={autoCommitToDb}
+                onChange={(e) => setAutoCommitToDb(e.target.checked)}
+                className="w-4 h-4 rounded text-sky-600 focus:ring-0 bg-slate-950 border-slate-700 cursor-pointer"
+              />
+              <span>Auto-Save Verdict to Database</span>
+            </label>
+          </div>
         </div>
 
         {/* Filter Dropdowns & Team Worker Seat Partitioning */}
@@ -3688,6 +3869,396 @@ export default function AIAuditsConsole({
                 className="max-h-[70vh] object-contain rounded-lg"
               />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIEW & EDIT AUDIT CRITERIA MODAL (ANTI-FALSE-POSITIVE ENGINE) */}
+      {criteriaModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-5">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-4xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+            
+            {/* Modal Header */}
+            <div className="p-5 border-b border-slate-800 flex items-center justify-between flex-wrap gap-3 bg-slate-950/70">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-sky-500/20 text-sky-400 border border-sky-500/30 flex items-center justify-center shadow-md">
+                  <Sliders className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-base font-black text-white">
+                      Clinical AI Audit Criteria & Strictness Studio
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      Anti-False-Positive Tuner
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    View & customize the exact clinical standards, fatal failure triggers, and strictness rules used by AI models to evaluate dispatches.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setCriteriaModalOpen(false)}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                title="Close without saving"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Station Tabs Navigation */}
+            <div className="px-5 pt-3 border-b border-slate-800 bg-slate-950/40 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+              {[
+                { id: 'selfie', label: '1. Selfie & ID', icon: '🤳' },
+                { id: 'torches', label: '2. Dual Torches', icon: '🔦' },
+                { id: 'visionChart', label: '3. Vision Chart & Standee', icon: '📊' },
+                { id: 'toolkit', label: '4. Diagnostic Toolkit', icon: '🧰' },
+                { id: 'frameDisplay', label: '5. Frame Display', icon: '👓' }
+              ].map((st) => {
+                const isSelected = criteriaModalTab === st.id;
+                const ruleObj = draftRules.find(r => r.id === st.id);
+                const standardsCount = ruleObj?.standards?.length || 0;
+                const failuresCount = ruleObj?.commonFailures?.length || 0;
+
+                return (
+                  <button
+                    key={st.id}
+                    onClick={() => setCriteriaModalTab(st.id)}
+                    className={`px-3.5 py-2.5 text-xs font-bold rounded-t-xl transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer border-b-2 ${
+                      isSelected
+                        ? 'bg-slate-800 text-sky-300 border-sky-400 shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200 border-transparent hover:bg-slate-850/60'
+                    }`}
+                  >
+                    <span>{st.icon}</span>
+                    <span>{st.label}</span>
+                    <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+                      isSelected ? 'bg-sky-950 text-sky-200' : 'bg-slate-900 text-slate-500'
+                    }`}>
+                      {standardsCount}+{failuresCount}
+                    </span>
+                  </button>
+                );
+              })}
+
+              <button
+                onClick={() => setCriteriaModalTab('STRICTNESS')}
+                className={`px-3.5 py-2.5 text-xs font-bold rounded-t-xl transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer border-b-2 ${
+                  criteriaModalTab === 'STRICTNESS'
+                    ? 'bg-amber-950/40 text-amber-300 border-amber-400 shadow-sm'
+                    : 'text-amber-400/80 hover:text-amber-300 border-transparent hover:bg-slate-850/60'
+                }`}
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Anti-False-Positive Engine</span>
+                {draftStrictAntiFalsePositive && (
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                )}
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto flex-1 space-y-5 text-xs text-slate-300">
+              {criteriaModalTab === 'STRICTNESS' ? (
+                /* GLOBAL STRICTNESS & ANTI-FALSE-POSITIVE ENGINE */
+                <div className="space-y-5 animate-fade-in">
+                  
+                  {/* Anti-False-Positive Quality Directive Toggle */}
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-950 to-indigo-950/40 border border-amber-500/40 space-y-3">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <ShieldAlert className="w-4 h-4 text-amber-400" />
+                          <h4 className="text-sm font-black text-white">
+                            Zero-Tolerance Anti-False-Positive Enforcement Directive
+                          </h4>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            Recommended
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          Actively addresses the <strong>80% false-positive rate</strong>. When enabled, this injects an unsparing clinical QA directive into the AI prompt that strictly forbids giving field executives the benefit of the doubt. If torch illumination, employee ID card, standee, or equipment is missing, unreadable, or ambiguous, the model is instructed to fail the station immediately with a <strong>FATAL</strong> verdict.
+                        </p>
+                      </div>
+
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0 mt-1">
+                        <input
+                          type="checkbox"
+                          checked={draftStrictAntiFalsePositive}
+                          onChange={(e) => setDraftStrictAntiFalsePositive(e.target.checked)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+                      </label>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-400 space-y-1">
+                      <div className="text-amber-400 font-bold uppercase tracking-wider text-[10px]">
+                        Directive Injected Into AI System Prompt:
+                      </div>
+                      <p className="text-slate-300 leading-relaxed">
+                        &quot;You are an unsparing, high-rigor Chief Clinical QA Inspector. Dispatches currently have an unacceptably high rate of FALSE POSITIVES. You MUST NOT give Field Executives the benefit of the doubt. If ANY required uniform item, employee ID badge, or piece of equipment is missing, unreadable, obscured, not visible, or doubtful, YOU MUST FAIL THAT CRITERION WITH &apos;FAIL&apos; AND ISSUE AN OVERALL &apos;FATAL&apos; STRIKE.&quot;
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Custom Clinical Auditor Prompt Directives */}
+                  <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-white text-xs flex items-center gap-1.5">
+                        <Edit3 className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Custom Clinical Prompt Directives (Optional Direct Prompt Injection)</span>
+                      </label>
+                      <span className="text-[10px] text-slate-500 font-mono">Appended to AI Prompt</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      Add any specific rules, equipment nuances, or strictness instructions for your region or current audit campaign.
+                    </p>
+                    <textarea
+                      value={draftCustomDirectives}
+                      onChange={(e) => setDraftCustomDirectives(e.target.value)}
+                      placeholder="e.g. Reject any selfie where the employee ID badge cannot be read clearly. Strictly check that both torches have glowing LEDs. Ensure vision chart is mounted on the standee and not taped to a door or wall."
+                      rows={4}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono leading-relaxed"
+                    />
+                  </div>
+
+                </div>
+              ) : (
+                /* SINGLE STATION CRITERIA CONFIGURATION */
+                (() => {
+                  const activeRule = draftRules.find(r => r.id === criteriaModalTab) || draftRules[0];
+                  if (!activeRule) return null;
+
+                  return (
+                    <div className="space-y-5 animate-fade-in">
+                      
+                      {/* Station Title & Description */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="sm:col-span-1 space-y-1.5">
+                          <label className="text-[11px] font-bold text-slate-300 block">
+                            Station Name / Label:
+                          </label>
+                          <input
+                            type="text"
+                            value={activeRule.label || activeRule.title || ''}
+                            onChange={(e) => handleUpdateDraftRuleField(activeRule.id, 'label', e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500 font-bold"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-2 space-y-1.5">
+                          <label className="text-[11px] font-bold text-slate-300 block">
+                            SOP Purpose & Clinical Expectations:
+                          </label>
+                          <input
+                            type="text"
+                            value={activeRule.description || ''}
+                            onChange={(e) => handleUpdateDraftRuleField(activeRule.id, 'description', e.target.value)}
+                            placeholder="Detailed description of what must be shown in this photo..."
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500 font-medium"
+                          />
+                        </div>
+                      </div>
+
+                      {/* 2-Column Grid: Mandatory Standards vs Instant Fatal Failures */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        
+                        {/* Column 1: Mandatory Standards (Must meet ALL) */}
+                        <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                              <span className="font-bold text-emerald-400 text-xs flex items-center gap-1.5">
+                                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                                <span>Mandatory Standards ({activeRule.standards?.length || 0})</span>
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">Must Meet All</span>
+                            </div>
+
+                            <p className="text-[11px] text-slate-400 mt-2">
+                              Items that AI must explicitly confirm are visible in the photo to pass.
+                            </p>
+
+                            <div className="mt-3 space-y-2 max-h-56 overflow-y-auto pr-1">
+                              {(activeRule.standards || []).map((std, idx) => (
+                                <div
+                                  key={idx}
+                                  className="p-2 rounded-xl bg-slate-900 border border-slate-800/80 flex items-start justify-between gap-2 group hover:border-slate-700 transition-colors"
+                                >
+                                  <div className="flex items-start gap-2 text-xs text-slate-200">
+                                    <span className="text-emerald-400 font-bold">•</span>
+                                    <span>{std}</span>
+                                  </div>
+                                  <button
+                                    onClick={() => handleRemoveStandardFromDraft(activeRule.id, idx)}
+                                    className="text-slate-500 hover:text-rose-400 p-1 rounded transition-colors opacity-60 group-hover:opacity-100 cursor-pointer"
+                                    title="Delete standard"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                              {(!activeRule.standards || activeRule.standards.length === 0) && (
+                                <p className="text-[11px] text-slate-500 italic p-2 text-center">
+                                  No standards defined for this station.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Add standard input */}
+                          <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={newStandardInput}
+                              onChange={(e) => setNewStandardInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleAddStandardToDraft(activeRule.id);
+                                }
+                              }}
+                              placeholder="Add new mandatory standard..."
+                              className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                            />
+                            <button
+                              onClick={() => handleAddStandardToDraft(activeRule.id)}
+                              disabled={!newStandardInput.trim()}
+                              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Add</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Column 2: Instant Non-Compliance / Fatal Triggers (Fixes 80% False Positives) */}
+                        <div className="p-4 rounded-2xl bg-rose-950/20 border border-rose-500/30 space-y-3 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center justify-between pb-2 border-b border-rose-500/20">
+                              <span className="font-bold text-rose-300 text-xs flex items-center gap-1.5">
+                                <ShieldAlert className="w-4 h-4 text-rose-400" />
+                                <span>Instant FATAL Failure Triggers ({activeRule.commonFailures?.length || 0})</span>
+                              </span>
+                              <span className="text-[10px] text-rose-400 font-mono font-bold">Strict Gate</span>
+                            </div>
+
+                            <p className="text-[11px] text-slate-300 mt-2">
+                              Defects that force AI to <strong>FAIL</strong> this station and strike <strong>FATAL</strong>. Add specific violations here to eradicate false passes!
+                            </p>
+
+                            <div className="mt-3 space-y-2 max-h-56 overflow-y-auto pr-1">
+                              {(activeRule.commonFailures || []).map((fail, idx) => (
+                                <div
+                                  key={idx}
+                                  className="p-2 rounded-xl bg-slate-950/80 border border-rose-900/40 flex items-start justify-between gap-2 group hover:border-rose-700/60 transition-colors"
+                                >
+                                  <div className="flex items-start gap-2 text-xs text-rose-200">
+                                    <span className="text-rose-400 font-bold">✕</span>
+                                    <span>{fail}</span>
+                                  </div>
+                                  <button
+                                    onClick={() => handleRemoveFailureFromDraft(activeRule.id, idx)}
+                                    className="text-slate-500 hover:text-rose-400 p-1 rounded transition-colors opacity-60 group-hover:opacity-100 cursor-pointer"
+                                    title="Delete failure trigger"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                              {(!activeRule.commonFailures || activeRule.commonFailures.length === 0) && (
+                                <p className="text-[11px] text-slate-500 italic p-2 text-center">
+                                  No fatal failure triggers defined.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Add failure input */}
+                          <div className="pt-2 border-t border-rose-900/30 flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={newFailureInput}
+                              onChange={(e) => setNewFailureInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleAddFailureToDraft(activeRule.id);
+                                }
+                              }}
+                              placeholder="Add defect that forces AI to fail..."
+                              className="flex-1 bg-slate-900 border border-rose-900/40 rounded-xl px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                            />
+                            <button
+                              onClick={() => handleAddFailureToDraft(activeRule.id)}
+                              disabled={!newFailureInput.trim()}
+                              className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Add</span>
+                            </button>
+                          </div>
+                        </div>
+
+                      </div>
+
+                      {/* Triggers Fatal Strike Toggle */}
+                      <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-bold text-white block">
+                            Station Fatal Strike Authority
+                          </span>
+                          <span className="text-[11px] text-slate-400">
+                            Failing this criterion marks the entire dispatch as FATAL in the database.
+                          </span>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                          <input
+                            type="checkbox"
+                            checked={activeRule.triggersFatal !== false}
+                            onChange={(e) => handleUpdateDraftRuleField(activeRule.id, 'triggersFatal', e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rose-600"></div>
+                        </label>
+                      </div>
+
+                    </div>
+                  );
+                })()
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between flex-wrap gap-3">
+              <button
+                onClick={handleResetCriteriaToDefaults}
+                className="px-3.5 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-rose-300 hover:bg-rose-950/30 border border-slate-800 hover:border-rose-900/50 transition-all flex items-center gap-1.5 cursor-pointer"
+                title="Restore official Lenskart central clinical defaults"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset to DLC Defaults</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCriteriaModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveCriteria}
+                  className="px-5 py-2 rounded-xl text-xs font-black bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 text-white shadow-lg shadow-sky-950/50 flex items-center gap-2 transition-all cursor-pointer"
+                >
+                  <CheckCheck className="w-4 h-4 text-emerald-300" />
+                  <span>Save & Apply Criteria to AI Audits</span>
+                </button>
+              </div>
+            </div>
+
           </div>
         </div>
       )}
