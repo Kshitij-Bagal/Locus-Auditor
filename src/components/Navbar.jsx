@@ -147,21 +147,21 @@ export default function Navbar({
       <div className="w-full px-3 sm:px-5 lg:px-6">
         <div className="flex items-center justify-between h-16 gap-3">
           
-          {/* Brand Logo & Title (Fixed width, clean spacing, never wraps or collides) */}
-          <div className="flex items-center space-x-2.5 shrink-0 select-none">
+          {/* Brand Logo & Title (Responsive, never wraps or collides on mobile) */}
+          <div className="flex items-center space-x-2.5 shrink-0 select-none max-w-[calc(100vw-85px)] sm:max-w-none overflow-hidden">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-sky-400 flex items-center justify-center shadow-lg shadow-blue-500/20 ring-1 ring-white/10 shrink-0">
               <ShieldAlert className="w-5 h-5 text-white" />
             </div>
-            <div className="flex flex-col justify-center">
+            <div className="flex flex-col justify-center min-w-0">
               <div className="flex items-center gap-1.5 whitespace-nowrap">
                 <span className="text-[10px] font-black tracking-wider uppercase px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
                   Lenskart DLC
                 </span>
                 <span className="text-xs font-bold text-white tracking-tight">Audit Console</span>
               </div>
-              <div className="flex items-center gap-1 mt-0.5 whitespace-nowrap">
-                {userRoles.map(r => (
-                  <span key={r} className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${
+              <div className="flex items-center gap-1 mt-0.5 whitespace-nowrap overflow-x-auto no-scrollbar max-w-[180px] sm:max-w-none">
+                {userRoles.slice(0, 2).map(r => (
+                  <span key={r} className={`text-[9px] font-bold px-1.5 py-0.2 rounded border shrink-0 ${
                     r === 'SuperAdmin' ? 'bg-purple-500/20 text-purple-300 border-purple-500/40' :
                     r === 'BH' ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' :
                     r === 'GM' ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' :
@@ -176,7 +176,12 @@ export default function Navbar({
                     {displayRoleName(r)}
                   </span>
                 ))}
-                <span className="text-[10px] text-slate-400 font-medium truncate max-w-[120px]">
+                {userRoles.length > 2 && (
+                  <span className="text-[9px] font-bold px-1 py-0.2 rounded bg-slate-800 text-slate-400 border border-slate-700 shrink-0">
+                    +{userRoles.length - 2}
+                  </span>
+                )}
+                <span className="text-[10px] text-slate-400 font-medium truncate shrink-0">
                   • {currentUser?.facility_code || 'Ahmedabad'}
                 </span>
               </div>
@@ -260,6 +265,33 @@ export default function Navbar({
           </div>
 
         </div>
+      </div>
+
+      {/* Tablet & Mobile Quick Scrollable Navigation Pills (Visible on md and sm screens) */}
+      <div className="lg:hidden border-t border-slate-800/80 bg-slate-900/70 backdrop-blur-md px-3 py-1.5 overflow-x-auto no-scrollbar flex items-center gap-1.5 select-none">
+        {approvedNavItems.map(item => {
+          const Icon = item.icon;
+          const isActive = activePage === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => handleSelectPage(item.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer ${
+                isActive
+                  ? 'bg-blue-600 text-white shadow-md font-bold'
+                  : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800 border border-slate-700/60'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5 shrink-0" />
+              <span>{item.label}</span>
+              {item.badge && (
+                <span className="px-1.5 py-0.2 rounded-full text-[9px] font-black bg-red-500 text-white">
+                  {item.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Mobile Responsive Hamburger Dropdown Menu */}

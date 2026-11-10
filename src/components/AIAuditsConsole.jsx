@@ -2613,7 +2613,7 @@ export default function AIAuditsConsole({
               <span className="text-[10px] text-slate-500 font-normal">Click any photo to zoom & enlarge</span>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
               {[
                 { key: 'selfie', label: '1. Selfie & ID', icon: '🤳' },
                 { key: 'torches', label: '2. Dual Torches', icon: '🔦' },
@@ -2640,13 +2640,13 @@ export default function AIAuditsConsole({
                         </span>
                       </div>
 
-                      <div className="aspect-[4/3] rounded-xl bg-slate-900 border border-slate-800/80 overflow-hidden relative group/img">
+                      <div className="h-56 sm:h-60 w-full rounded-xl bg-slate-900 border border-slate-800/80 overflow-hidden relative group/img flex items-center justify-center">
                         {url ? (
                           <>
                             <img
                               src={url}
                               alt={st.label}
-                              className="w-full h-full object-cover cursor-pointer group-hover/img:scale-105 transition-transform duration-200"
+                              className="w-full h-full object-contain p-1 cursor-pointer group-hover/img:scale-[1.02] transition-transform duration-200"
                               onClick={() => setPreviewImage({ url, title: `${st.label} - Task #${selectedTask?.taskId || selectedTask?.id}`, aiEval, stationLabel: st.label })}
                             />
                             

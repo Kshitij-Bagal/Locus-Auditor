@@ -578,10 +578,10 @@ export default function AuditModal({
   ]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-1.5 sm:p-3 md:p-5 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
       
       {/* Modal Container */}
-      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-6xl max-h-[94vh] flex flex-col shadow-2xl overflow-hidden relative">
+      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-[98vw] 2xl:max-w-7xl h-[96vh] max-h-[96vh] flex flex-col shadow-2xl overflow-hidden relative">
         
         {/* Top Header Bar */}
         <div className="px-5 py-3 bg-slate-850 border-b border-slate-700/80 flex items-center justify-between">
@@ -929,7 +929,7 @@ export default function AuditModal({
         </div>
 
         {/* Modal Main Content */}
-        <div className="flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-12 min-h-0">
+        <div className="flex-1 overflow-y-auto lg:overflow-hidden grid grid-cols-1 lg:grid-cols-12 min-h-0">
           
           {/* Left Column: Image Viewer (7 cols) - Fixed Height, Static Coordinates, No Scroll */}
           <div className="lg:col-span-7 bg-slate-950 p-4 flex flex-col justify-between border-b lg:border-b-0 lg:border-r border-slate-800 overflow-hidden h-full min-h-0">

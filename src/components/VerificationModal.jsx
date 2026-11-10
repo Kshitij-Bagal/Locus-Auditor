@@ -152,6 +152,7 @@ export default function VerificationModal({
   const [stationStatuses, setStationStatuses] = useState({});
   const [stationReasons, setStationReasons] = useState({});
   const [reviewerNotes, setReviewerNotes] = useState('');
+  const [hoveredStationId, setHoveredStationId] = useState(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -229,6 +230,14 @@ export default function VerificationModal({
     });
     return list;
   }, [stationStatuses, stationReasons, rules]);
+
+  // Dynamic station criteria displayed above Reviewer Commentary (updates on hover of any station)
+  const activeStationId = hoveredStationId || (STATION_KEYS.find(s => stationStatuses[s.id] === 'FAIL')?.id) || 'selfie';
+  const activeStationDef = STATION_KEYS.find(s => s.id === activeStationId) || STATION_KEYS[0];
+  const activeStationRule = rules.find(r => r.id === activeStationDef.id || r.imageKey === activeStationDef.imageKey);
+  const activeStationAiEval = extractAiStationEvaluation(task, activeStationDef.id, rules);
+  const activeStationCurStatus = stationStatuses[activeStationDef.id] || 'PASS';
+  const activeStationCurReason = stationReasons[activeStationDef.id];
 
   // Handle station status toggle
   const toggleStation = (stationId) => {
@@ -314,8 +323,8 @@ export default function VerificationModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150">
-      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-6xl max-h-[96vh] flex flex-col shadow-2xl overflow-hidden ring-1 ring-white/10">
+    <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-1 sm:p-2.5 md:p-4 animate-in fade-in duration-150">
+      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-[98vw] 2xl:max-w-[1720px] h-[97vh] max-h-[97vh] flex flex-col shadow-2xl overflow-hidden ring-1 ring-white/10">
         
         {/* Top Header Bar */}
         <div className="px-5 py-3.5 bg-slate-850 border-b border-slate-800 flex items-center justify-between gap-3 shrink-0">
@@ -403,8 +412,8 @@ export default function VerificationModal({
         )}
 
         {/* Middle Scrollable Section: 5 Mandatory Images Grid */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3.5">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3.5">
             {STATION_KEYS.map((stn, index) => {
               const ruleDef = rules.find(r => r.id === stn.id || r.imageKey === stn.imageKey);
               const currentStatus = stationStatuses[stn.id] || 'PASS';
@@ -413,6 +422,7 @@ export default function VerificationModal({
               const normalizedUrl = normalizeImageUrl(rawImgUrl, task.taskId || task.id);
               const currentReason = stationReasons[stn.id];
               const aiEval = extractAiStationEvaluation(task, stn.id, rules);
+              const isItemActive = activeStationId === stn.id;
 
               // Inverse criteria choices
               const fatalCriteriaOptions = (ruleDef?.commonFailures && ruleDef.commonFailures.length > 0)
@@ -436,7 +446,11 @@ export default function VerificationModal({
               return (
                 <div 
                   key={stn.id}
-                  className={`bg-slate-850/80 rounded-xl border flex flex-col justify-between overflow-hidden shadow-md transition-all ${
+                  onMouseEnter={() => setHoveredStationId(stn.id)}
+                  onClick={() => setHoveredStationId(stn.id)}
+                  className={`bg-slate-850/80 rounded-xl border flex flex-col justify-between overflow-hidden shadow-md transition-all cursor-pointer ${
+                    isItemActive ? 'ring-2 ring-purple-500/80 border-purple-400 shadow-purple-500/10' : ''
+                  } ${
                     isPass 
                       ? 'border-emerald-500/40 hover:border-emerald-500/70' 
                       : 'border-red-500/50 hover:border-red-500/80 bg-red-950/10'
@@ -466,7 +480,10 @@ export default function VerificationModal({
                       {/* Quick Toggle Button */}
                       <button
                         type="button"
-                        onClick={() => toggleStation(stn.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleStation(stn.id);
+                        }}
                         className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
                         title={`Click to flip status to ${isPass ? 'FAIL' : 'PASS'}`}
                       >
@@ -475,14 +492,14 @@ export default function VerificationModal({
                     </div>
                   </div>
 
-                  {/* Photo Display Area with Hover Overlay */}
-                  <div className="relative bg-slate-950 aspect-[4/3] flex items-center justify-center overflow-hidden group">
+                  {/* Photo Display Area with Hover Overlay - Fully Uncropped (object-contain, 1.4x scale) */}
+                  <div className="relative bg-slate-950 h-64 sm:h-72 xl:h-80 w-full flex items-center justify-center overflow-hidden group rounded-lg">
                     {normalizedUrl ? (
                       <>
                         <img 
                           src={normalizedUrl} 
                           alt={stn.label}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 cursor-pointer"
+                          className="w-full h-full object-contain p-1 group-hover:scale-[1.02] transition-transform duration-300 cursor-pointer"
                           onClick={() => setLightboxIndex(index)}
                           loading="lazy"
                         />
@@ -564,7 +581,7 @@ export default function VerificationModal({
                   </div>
 
                   {/* Inverse Criteria Dropdown Section */}
-                  <div className="p-2.5 bg-slate-900/60 border-t border-slate-800 space-y-2">
+                  <div className="p-2.5 bg-slate-900/60 border-t border-slate-800 space-y-2" onClick={(e) => e.stopPropagation()}>
                     {isPass ? (
                       /* Station is PASS -> Inverse Dropdown gives Fatal Criteria to Fail */
                       <div>
@@ -618,6 +635,135 @@ export default function VerificationModal({
                 </div>
               );
             })}
+          </div>
+
+          {/* DYNAMIC STATION CRITERIA PANEL (Changes on hover of any station photo above) */}
+          <div className="bg-slate-850/95 border border-purple-500/40 rounded-xl p-3.5 sm:p-4 shadow-xl transition-all duration-200">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 mb-3 border-b border-slate-700/80">
+              <div className="flex items-center gap-2.5">
+                <span className="text-2xl shrink-0 p-1.5 rounded-xl bg-purple-500/10 border border-purple-500/20">
+                  {activeStationDef.icon || '🔍'}
+                </span>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
+                      {activeStationDef.label}
+                    </span>
+                    <span className="text-[10px] text-purple-300 font-mono bg-purple-500/20 px-2 py-0.5 rounded border border-purple-500/30 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-purple-300" />
+                      Hovered Item Criteria
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">
+                    {activeStationRule?.description || 'Inspect clinical SOP standards, failure triggers, and AI evaluations.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Badges & Actions */}
+              <div className="flex items-center gap-2 flex-wrap shrink-0">
+                <span className={`px-2.5 py-1 rounded-lg text-xs font-bold font-mono uppercase flex items-center gap-1 ${
+                  activeStationAiEval.status === 'FAIL' 
+                    ? 'bg-red-500/20 text-red-300 border border-red-500/40' 
+                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                }`}>
+                  {activeStationAiEval.status === 'FAIL' ? <AlertTriangle className="w-3.5 h-3.5 text-red-400" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                  <span>AI: {activeStationAiEval.status}</span>
+                </span>
+
+                <span className={`px-2.5 py-1 rounded-lg text-xs font-black uppercase flex items-center gap-1 ${
+                  activeStationCurStatus === 'PASS'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    : 'bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse'
+                }`}>
+                  <span>Reviewer: {activeStationCurStatus}</span>
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => toggleStation(activeStationDef.id)}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                  title="Toggle this station's reviewed status"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Toggle</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Criteria Breakdown: 3 Responsive Columns */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+              
+              {/* 1. Mandatory Clinical Standards */}
+              <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> Mandatory Clinical Standards
+                </span>
+                <ul className="space-y-1 text-slate-300 text-[11px]">
+                  {(activeStationRule?.standards && activeStationRule.standards.length > 0) ? (
+                    activeStationRule.standards.map((st, i) => (
+                      <li key={i} className="flex items-start gap-1.5 leading-snug">
+                        <span className="text-emerald-400 font-bold shrink-0 mt-0.5">✓</span>
+                        <span>{st}</span>
+                      </li>
+                    ))
+                  ) : (
+                    <li className="text-slate-400 italic">All equipment clearly visible and compliant with DLC SOP standards.</li>
+                  )}
+                </ul>
+              </div>
+
+              {/* 2. Fatal Triggers & AI Flagged Violations */}
+              <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-red-400 flex items-center gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" /> SOP Fatal Triggers & Violations
+                </span>
+                {activeStationAiEval.status === 'FAIL' && activeStationAiEval.failureReasons.length > 0 ? (
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold text-red-300 block">Flagged by AI Model:</span>
+                    {activeStationAiEval.failureReasons.map((reason, idx) => (
+                      <div key={idx} className="p-1.5 rounded-lg bg-red-950/40 border border-red-500/30 text-[11px] text-red-200 flex items-start gap-1.5 leading-snug">
+                        <span className="text-red-400 font-bold shrink-0">❌</span>
+                        <span>{reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <ul className="space-y-1 text-slate-300 text-[11px]">
+                    {(activeStationRule?.commonFailures && activeStationRule.commonFailures.length > 0) ? (
+                      activeStationRule.commonFailures.slice(0, 3).map((cf, i) => (
+                        <li key={i} className="flex items-start gap-1.5 text-slate-400 leading-snug">
+                          <span className="text-red-400 font-bold shrink-0 mt-0.5">•</span>
+                          <span>{cf}</span>
+                        </li>
+                      ))
+                    ) : (
+                      <li className="text-slate-400 italic">No fatal violations flagged for this item.</li>
+                    )}
+                  </ul>
+                )}
+              </div>
+
+              {/* 3. AI Observations & Active Reviewer Rationale */}
+              <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300 flex items-center gap-1">
+                  <Sparkles className="w-3.5 h-3.5 text-purple-400 shrink-0" /> AI Observations & Reviewer Rationale
+                </span>
+                <div className="text-[11px] text-slate-300 space-y-1.5">
+                  <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 leading-snug">
+                    <span className="text-[10px] font-bold text-slate-400 block uppercase mb-0.5">AI Evidence & Remarks:</span>
+                    <span className="italic">"{activeStationAiEval.observations || 'Verified compliant with clinical standards.'}"</span>
+                  </div>
+                  {activeStationCurReason && (
+                    <div className="p-2 rounded-lg bg-purple-950/30 border border-purple-500/20 text-purple-200 leading-snug">
+                      <span className="text-[10px] font-bold text-purple-300 block uppercase mb-0.5">Documented Rationale:</span>
+                      <span>{activeStationCurReason}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+            </div>
           </div>
 
           {/* Reviewer Overall Commentary */}
