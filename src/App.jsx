@@ -7,6 +7,7 @@ import FilterBar from './components/FilterBar.jsx';
 import TaskTable from './components/TaskTable.jsx';
 import TaskCardGrid from './components/TaskCardGrid.jsx';
 import AuditModal from './components/AuditModal.jsx';
+import VerificationModal from './components/VerificationModal.jsx';
 import CentralRuleStudio from './components/CentralRuleStudio.jsx';
 import AutoAllocationRoster from './components/AutoAllocationRoster.jsx';
 import AssetRequisitionDashboard from './components/AssetRequisitionDashboard.jsx';
@@ -158,6 +159,7 @@ export default function App() {
 
   // Modals
   const [inspectingTask, setInspectingTask] = useState(null);
+  const [verifyingTask, setVerifyingTask] = useState(null);
   const [toast, setToast] = useState(null);
   const [isReAuditMode, setIsReAuditMode] = useState(false);
 
@@ -856,6 +858,68 @@ export default function App() {
     } catch (err) {
       console.error('Failed to overturn AI verdict:', err);
       showToast(`Error overturning verdict: ${err.message}`, 'error');
+    }
+  };
+
+  // Flag task for clinical re-auditing
+  const handleSendToReAudit = async (taskId, reason) => {
+    try {
+      const target = tasks.find(t => String(t.id || t.taskId) === String(taskId));
+      if (!target) return;
+      const reviewerName = currentUser?.full_name || currentUser?.name || 'QA Reviewer';
+      const origRemarks = target.remarks || target.auditor_remarks || '';
+
+      showToast(`Flagging task #${target.taskId || taskId} for clinical re-audit...`, 'info');
+
+      await tasksApi.failAiAudit({
+        taskId,
+        taskData: target,
+        reviewerName,
+        reason: reason || 'Clinical re-audit requested by QA Reviewer',
+        originalRemarks: origRemarks
+      });
+
+      const updatedRemarks = `[AI Audit Failed / Re-Audit Requested by ${reviewerName}: ${reason || 'Clinical re-audit requested'}] ${origRemarks}`.trim();
+
+      setTasks(prev => prev.map(t => {
+        if (String(t.id || t.taskId) === String(taskId)) {
+          return {
+            ...t,
+            auditStatus: 'NEEDS_REAUDIT',
+            audit_status: 'NEEDS_REAUDIT',
+            isAiReAudit: true,
+            needsReAudit: true,
+            reAuditReason: reason,
+            remarks: updatedRemarks,
+            auditor_remarks: updatedRemarks,
+            humanStatus: 'REAUDIT'
+          };
+        }
+        return t;
+      }));
+
+      showToast(`Task #${target.taskId || taskId} queued for clinical re-audit!`, 'warning');
+    } catch (err) {
+      console.error('Failed to queue re-audit:', err);
+      showToast(`Error queuing re-audit: ${err.message}`, 'error');
+    }
+  };
+
+  // Dedicated dispatcher: Opens AuditModal strictly for re-audits; opens VerificationModal for verification
+  const handleOpenTask = (task) => {
+    if (!task) return;
+    const isReAudit = Boolean(
+      task.needsReAudit || 
+      task.isAiReAudit || 
+      task.reAuditReason || 
+      task.auditStatus === 'NEEDS_REAUDIT'
+    );
+
+    if (isReAudit) {
+      setIsReAuditMode(true);
+      setInspectingTask(task);
+    } else {
+      setVerifyingTask(task);
     }
   };
 
@@ -1666,22 +1730,22 @@ export default function App() {
               viewMode === 'table' ? (
                 <TaskTable
                   tasks={filteredTasks}
-                  onInspect={(task) => setInspectingTask(task)}
-                  onAuditTask={(task) => setInspectingTask(task)}
+                  onInspect={(task) => handleOpenTask(task)}
+                  onAuditTask={(task) => handleOpenTask(task)}
                   onQuickPass={(task) => handlePassAudit(task.id, { remarks: 'Quick pass by auditor' })}
-                  onQuickFatal={(task) => setInspectingTask(task)}
-                  onOpenEmail={(task) => setInspectingTask(task)}
+                  onQuickFatal={(task) => handleOpenTask(task)}
+                  onOpenEmail={(task) => handleOpenTask(task)}
                   onConfirmAiVerdict={handleConfirmAiVerdict}
                   onOverturnAiVerdict={handleOverturnAiVerdict}
                 />
               ) : (
                 <TaskCardGrid
                   tasks={filteredTasks}
-                  onInspect={(task) => setInspectingTask(task)}
-                  onAuditTask={(task) => setInspectingTask(task)}
+                  onInspect={(task) => handleOpenTask(task)}
+                  onAuditTask={(task) => handleOpenTask(task)}
                   onQuickPass={(task) => handlePassAudit(task.id, { remarks: 'Quick pass by auditor' })}
-                  onQuickFatal={(task) => setInspectingTask(task)}
-                  onOpenEmail={(task) => setInspectingTask(task)}
+                  onQuickFatal={(task) => handleOpenTask(task)}
+                  onOpenEmail={(task) => handleOpenTask(task)}
                   onConfirmAiVerdict={handleConfirmAiVerdict}
                   onOverturnAiVerdict={handleOverturnAiVerdict}
                 />
@@ -1820,7 +1884,7 @@ export default function App() {
 
       </main>
 
-      {/* SYSTEMATIC AUDIT & IMAGE INSPECTION MODAL */}
+      {/* SYSTEMATIC AUDIT & IMAGE INSPECTION MODAL (STRICTLY FOR RE-AUDITING) */}
       {inspectingTask && (
         <AuditModal
           task={inspectingTask}
@@ -1852,6 +1916,33 @@ export default function App() {
           auditorName={currentUser.full_name}
           auditorLocation={currentUser.facility_code}
           rules={rules}
+        />
+      )}
+
+      {/* DEDICATED HUMAN VERIFICATION MODAL FOR AI AUDITS */}
+      {verifyingTask && (
+        <VerificationModal
+          task={verifyingTask}
+          onClose={() => setVerifyingTask(null)}
+          onConfirmAiVerdict={handleConfirmAiVerdict}
+          onOverturnAiVerdict={handleOverturnAiVerdict}
+          onSendToReAudit={handleSendToReAudit}
+          onNextTask={() => {
+            const idx = filteredTasks.findIndex(t => t.id === verifyingTask.id);
+            if (idx >= 0 && idx < filteredTasks.length - 1) {
+              setVerifyingTask(filteredTasks[idx + 1]);
+            }
+          }}
+          onPrevTask={() => {
+            const idx = filteredTasks.findIndex(t => t.id === verifyingTask.id);
+            if (idx > 0) {
+              setVerifyingTask(filteredTasks[idx - 1]);
+            }
+          }}
+          hasNext={filteredTasks.findIndex(t => t.id === verifyingTask.id) < filteredTasks.length - 1}
+          hasPrev={filteredTasks.findIndex(t => t.id === verifyingTask.id) > 0}
+          rules={rules}
+          reviewerName={currentUser?.full_name || currentUser?.name || 'QA Reviewer'}
         />
       )}
 
