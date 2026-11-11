@@ -60,7 +60,8 @@ export default function AuditModal({
   onOverturnAudit,
   onUpholdAudit,
   onConfirmAiVerdict,
-  onOverturnAiVerdict
+  onOverturnAiVerdict,
+  canViewAiDetails = false
 }) {
   const [activeCriterionIndex, setActiveCriterionIndex] = useState(0);
   const [rightPanelTab, setRightPanelTab] = useState('sop'); // 'sop' | 'replacements'
@@ -82,21 +83,30 @@ export default function AuditModal({
   const verdictTimeoutRef = useRef(null);
   const remarksSelectRef = useRef(null);
 
-  // AI Audit & Human Verification State
-  const isAiAudited = isAiAuditedTask(task);
-  const humanVerificationStatus = getHumanVerificationStatus(task);
-  const isAwaitingVerification = isAwaitingHumanVerification(task);
+  // AI Audit & Human Verification State (Strictly gated by page access to prevent City Admin confirmation bias)
+  const isAiAudited = Boolean(canViewAiDetails && isAiAuditedTask(task));
+  const humanVerificationStatus = canViewAiDetails ? getHumanVerificationStatus(task) : null;
+  const isAwaitingVerification = Boolean(canViewAiDetails && isAwaitingHumanVerification(task));
 
   // AI Re-Audit Detection & Criteria Resolution
   const isAiReAudit = Boolean(
-    task?.isAiReAudit || 
-    task?.needsReAudit || 
-    task?.reAuditReason || 
-    (task?.auditor_remarks && (task.auditor_remarks.includes('[AI Audit Failed') || task.auditor_remarks.includes('[AI Audit Rejected')))
+    canViewAiDetails && (
+      task?.isAiReAudit || 
+      task?.needsReAudit || 
+      task?.reAuditReason || 
+      (task?.auditor_remarks && (task.auditor_remarks.includes('[AI Audit Failed') || task.auditor_remarks.includes('[AI Audit Rejected')))
+    )
   );
 
-  const aiCriteriaMap = useMemo(() => task?.criteriaStatus || task?.criteria_status || {}, [task]);
-  const aiFailedList = useMemo(() => task?.failedReasons || task?.failed_reasons || [], [task]);
+  const aiCriteriaMap = useMemo(() => {
+    if (!canViewAiDetails) return {};
+    return task?.aiCriteriaStatus || task?.criteriaStatus || task?.criteria_status || {};
+  }, [task, canViewAiDetails]);
+
+  const aiFailedList = useMemo(() => {
+    if (!canViewAiDetails) return [];
+    return task?.aiFailedReasons || task?.failedReasons || task?.failed_reasons || [];
+  }, [task, canViewAiDetails]);
 
   // Equipment Replacements Requisition State
   const [replacements, setReplacements] = useState([]);
@@ -110,19 +120,25 @@ export default function AuditModal({
       // Strictly reset item sequence to the 1st checklist item for each new task
       setActiveCriterionIndex(0);
       setSelectedRemarkPreset('');
-      setCriteriaStatus(task.criteriaStatus || {});
-      setSelectedViolations(task.failedReasons || []);
-      setCustomRemark(task.remarks || '');
-      setReplacements(task.replacements || []);
+
+      // Blind Manual Audit Guarantee:
+      // Always start with a 100% clean, blank task slate with 0 pre-filled item verdicts or failure selections.
+      // City Admins and Auditors must evaluate each station blindly from scratch without anchoring bias.
+      const shouldPreload = isReAudit && !task?.isAiReAudit && Boolean(task?.human_verified || task?.human_overturned);
+
+      setCriteriaStatus(shouldPreload ? (task.criteriaStatus || {}) : {});
+      setSelectedViolations(shouldPreload ? (task.failedReasons || []) : []);
+      setCustomRemark(shouldPreload ? (task.remarks || '') : '');
+      setReplacements(shouldPreload ? (task.replacements || []) : []);
       setZoomLevel(1);
       setRotation(0);
-      setShowFatalPicker(task.auditStatus === 'FATAL');
+      setShowFatalPicker(false);
       setShowBlanketFatalModal(false);
       setBlanketReasonIndex(0);
       setHighlightedFailureIndex(0);
       setHighlightedToolIndex(0);
     }
-  }, [task]);
+  }, [task, isReAudit]);
 
   if (!task) return null;
 
@@ -149,9 +165,9 @@ export default function AuditModal({
     return u;
   })();
 
-  // Current criterion AI diagnostic
+  // Current criterion AI diagnostic (gated strictly by page access)
   const currentCriterionAiStatus = useMemo(() => {
-    if (!currentCriterion) return null;
+    if (!canViewAiDetails || !currentCriterion) return null;
     const cid = currentCriterion.id;
     const fid = currentCriterion.field || currentCriterion.imageKey;
     const st = aiCriteriaMap[cid] || (fid ? aiCriteriaMap[fid] : null);
@@ -172,7 +188,7 @@ export default function AuditModal({
       status: st || (matchingReason ? 'FAIL' : 'PASS'),
       reason: matchingReason || null
     };
-  }, [currentCriterion, aiCriteriaMap, aiFailedList, isAiReAudit]);
+  }, [currentCriterion, aiCriteriaMap, aiFailedList, isAiReAudit, canViewAiDetails]);
 
   const handleZoomIn = () => setZoomLevel(prev => Math.min(prev + 0.5, 3));
   const handleZoomOut = () => setZoomLevel(prev => Math.max(prev - 0.5, 0.75));
@@ -603,21 +619,14 @@ export default function AuditModal({
                   Facility: {task.facilityCode}
                 </span>
 
-                {isReAudit && (
+                {isReAudit ? (
                   <span className="text-[10px] uppercase font-black px-2 py-0.5 rounded bg-amber-500 text-slate-950 flex items-center gap-1 shadow-sm animate-pulse">
                     <Scale className="w-3 h-3" />
                     SENIOR RE-AUDIT MODE
                   </span>
-                )}
-
-                {task.auditStatus === 'FATAL' && !isReAudit && (
-                  <span className="text-[10px] uppercase font-black px-2 py-0.2 rounded bg-red-500 text-white animate-pulse">
-                    FATAL STRIKE
-                  </span>
-                )}
-                {task.auditStatus === 'PASSED' && !isReAudit && (
-                  <span className="text-[10px] uppercase font-bold px-2 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-                    PASSED
+                ) : (
+                  <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">
+                    PENDING MANUAL AUDIT
                   </span>
                 )}
               </div>
@@ -878,10 +887,10 @@ export default function AuditModal({
             const isCurrent = idx === activeCriterionIndex;
             const status = criteriaStatus[crit.id || fieldKey];
 
-            // AI Status for this criterion
-            const aiCritStatus = aiCriteriaMap[crit.id] || (fieldKey ? aiCriteriaMap[fieldKey] : null);
-            const isAiFail = aiCritStatus === 'FAIL';
-            const isAiPass = aiCritStatus === 'PASS';
+            // AI Status for this criterion (strictly gated by canViewAiDetails)
+            const aiCritStatus = canViewAiDetails ? (aiCriteriaMap[crit.id] || (fieldKey ? aiCriteriaMap[fieldKey] : null)) : null;
+            const isAiFail = Boolean(canViewAiDetails && aiCritStatus === 'FAIL');
+            const isAiPass = Boolean(canViewAiDetails && aiCritStatus === 'PASS');
 
             // Color titles background directly instead of inserting icons to eliminate layout jumping / sizing jumps
             let tabStyle = '';

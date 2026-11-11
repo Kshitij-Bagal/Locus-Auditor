@@ -49,7 +49,8 @@ export default function TaskCardGrid({
   onQuickFatal, 
   onOpenEmail,
   onConfirmAiVerdict,
-  onOverturnAiVerdict
+  onOverturnAiVerdict,
+  canViewAiDetails = false
 }) {
   const handleAudit = onAuditTask || onInspect || (() => {});
   const handleEmail = onOpenEmail || onInspect || onAuditTask || (() => {});
@@ -74,9 +75,9 @@ export default function TaskCardGrid({
         const isFatal = task.auditStatus === 'FATAL';
         const isPassed = task.auditStatus === 'PASSED';
         const isPending = task.auditStatus === 'PENDING' || !task.auditStatus;
-        const isAi = isAiAuditedTask(task);
-        const humanStatus = getHumanVerificationStatus(task);
-        const needsVerification = isAwaitingHumanVerification(task);
+        const isAi = Boolean(canViewAiDetails && (isAiAuditedTask(task) || Boolean(task.aiAuditStatus)));
+        const humanStatus = canViewAiDetails ? getHumanVerificationStatus(task) : null;
+        const needsVerification = Boolean(canViewAiDetails && isAwaitingHumanVerification(task));
         const hasImages = task.hasImages;
         const sla = getTaskSLAStatus(task);
         const isOverdue = sla.isOverdue;
@@ -399,7 +400,7 @@ export default function TaskCardGrid({
                 className="flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
               >
                 <Eye className="w-3.5 h-3.5" />
-                <span>{isAi ? 'Verify AI Verdict' : 'Audit Images'}</span>
+                <span>{(isAi && !isPending && needsVerification) ? 'Verify AI Verdict' : 'Audit Images'}</span>
               </button>
 
               {isAi && needsVerification ? (

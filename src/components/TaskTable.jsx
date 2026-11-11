@@ -34,7 +34,8 @@ export default function TaskTable({
   onOpenEmail,
   onConfirmAiVerdict,
   onOverturnAiVerdict,
-  selectedTaskId 
+  selectedTaskId,
+  canViewAiDetails = false
 }) {
   const [copiedId, setCopiedId] = React.useState(null);
 
@@ -86,9 +87,9 @@ export default function TaskTable({
               const isFatal = task.auditStatus === 'FATAL';
               const isPassed = task.auditStatus === 'PASSED';
               const isPending = task.auditStatus === 'PENDING' || !task.auditStatus;
-              const isAi = isAiAuditedTask(task);
-              const humanStatus = getHumanVerificationStatus(task);
-              const needsVerification = isAwaitingHumanVerification(task);
+              const isAi = Boolean(canViewAiDetails && (isAiAuditedTask(task) || Boolean(task.aiAuditStatus)));
+              const humanStatus = canViewAiDetails ? getHumanVerificationStatus(task) : null;
+              const needsVerification = Boolean(canViewAiDetails && isAwaitingHumanVerification(task));
               const sla = getTaskSLAStatus(task);
               const isOverdue = sla.isOverdue;
 
@@ -251,11 +252,18 @@ export default function TaskTable({
                         </span>
                       )}
 
-                      {isAi && (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-950/60 border border-purple-500/30 px-1.5 py-0.2 rounded w-fit" title={`Audited by AI Model: ${task.auditedBy || 'AI'}`}>
-                          <Sparkles className="w-2.5 h-2.5 text-purple-400" />
-                          <span>AI: {task.auditedBy || 'gemini-3.8-flash'}</span>
-                        </span>
+                      {canViewAiDetails && (
+                        task.aiAuditStatus ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-950/60 border border-purple-500/30 px-1.5 py-0.2 rounded w-fit" title={`Audited by AI: ${task.aiAuditorName || 'AI'}`}>
+                            <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                            <span>AI: {task.aiAuditStatus}</span>
+                          </span>
+                        ) : isAi ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-950/60 border border-purple-500/30 px-1.5 py-0.2 rounded w-fit" title={`Audited by AI Model: ${task.auditedBy || 'AI'}`}>
+                            <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                            <span>AI: {task.auditedBy || 'gemini-3.8-flash'}</span>
+                          </span>
+                        ) : null
                       )}
                     </div>
                   </td>
@@ -364,7 +372,7 @@ export default function TaskTable({
                         title={isAi ? "Open AI audit verification console" : "Inspect photos and audit"}
                       >
                         <Eye className="w-3 h-3" />
-                        <span>{isAi ? 'Verify' : 'Inspect'}</span>
+                        <span>{(isAi && !isPending && needsVerification) ? 'Verify' : 'Inspect'}</span>
                       </button>
 
                       {isAi && needsVerification ? (

@@ -172,6 +172,11 @@ export default function App() {
   const isSuperAdmin = userRoles.includes('SuperAdmin');
   const isCentralOps = userRoles.includes('Central Ops');
 
+  // Strict Anti-Bias Guard: Only users with explicit granted access to the 'AI Audits' page can view AI verdicts, pre-audit hints & criteria
+  const canViewAiDetails = useMemo(() => {
+    return hasPageAccess(currentUser, 'aiAudits');
+  }, [currentUser]);
+
   // National supervisor mode (can view all auditors' tasks across India):
   // STRICTLY restricted to SuperAdmin and Central Ops!
   const canViewAllAuditorsTasks = isSuperAdmin || isCentralOps;
@@ -906,8 +911,8 @@ export default function App() {
     }
   };
 
-  // Dedicated dispatcher: Opens AuditModal strictly for re-audits; opens VerificationModal for verification
-  const handleOpenTask = (task) => {
+  // Dedicated dispatcher: Opens AuditModal for manual city audits and re-audits; opens VerificationModal if explicitly requested
+  const handleOpenTask = (task, preferredMode = null) => {
     if (!task) return;
     const isReAudit = Boolean(
       task.needsReAudit || 
@@ -919,8 +924,12 @@ export default function App() {
     if (isReAudit) {
       setIsReAuditMode(true);
       setInspectingTask(task);
-    } else {
+    } else if (preferredMode === 'VERIFY' && Boolean(task.aiAuditStatus || task.auditorModel)) {
       setVerifyingTask(task);
+    } else {
+      // Standard manual audit by City Admin / Auditor without AI confirmation bias
+      setIsReAuditMode(false);
+      setInspectingTask(task);
     }
   };
 
@@ -1571,17 +1580,20 @@ export default function App() {
                 if (String(t.id || t.taskId) === String(taskId)) {
                   return {
                     ...t,
-                    auditStatus: normalizedVerdict,
-                    auditedAt: new Date().toISOString(),
-                    auditedBy: extraMetadata.auditedBy || t.auditedBy || 'Gemini AI',
-                    remarks: extraMetadata.remarks || t.remarks,
-                    auditor_remarks: extraMetadata.auditor_remarks || extraMetadata.remarks || t.auditor_remarks || t.remarks,
-                    human_verified: extraMetadata.human_verified !== undefined ? extraMetadata.human_verified : t.human_verified,
-                    human_overturned: extraMetadata.human_overturned !== undefined ? extraMetadata.human_overturned : t.human_overturned,
-                    humanStatus: extraMetadata.humanStatus || t.humanStatus,
-                    needsReAudit: extraMetadata.needsReAudit !== undefined ? extraMetadata.needsReAudit : t.needsReAudit,
-                    reAuditReason: extraMetadata.reAuditReason || t.reAuditReason,
-                    ...extraMetadata
+                    // Separate AI Audit Fields (stored independently without overwriting city admin fields)
+                    aiAuditStatus: normalizedVerdict,
+                    aiAuditedAt: new Date().toISOString(),
+                    aiAuditorName: extraMetadata.aiAuditorName || extraMetadata.auditedBy || 'AI Engine',
+                    aiRemarks: extraMetadata.aiRemarks || extraMetadata.remarks || '',
+                    aiCriteriaStatus: extraMetadata.aiCriteriaStatus || extraMetadata.criteriaStatus || {},
+                    aiCriteriaEvaluation: extraMetadata.aiCriteriaEvaluation || [],
+                    aiFailedReasons: extraMetadata.aiFailedReasons || extraMetadata.failedReasons || [],
+                    aiConfidenceScore: extraMetadata.aiConfidenceScore !== undefined ? extraMetadata.aiConfidenceScore : extraMetadata.confidenceScore,
+                    aiErrorMargin: extraMetadata.aiErrorMargin !== undefined ? extraMetadata.aiErrorMargin : extraMetadata.errorMargin,
+                    aiScore: extraMetadata.aiScore !== undefined ? extraMetadata.aiScore : extraMetadata.overallScore,
+                    totalTokens: extraMetadata.totalTokens || t.totalTokens,
+                    // Preserve human audit status
+                    auditStatus: t.auditStatus || 'PENDING'
                   };
                 }
                 return t;
@@ -1738,6 +1750,7 @@ export default function App() {
                   onOpenEmail={(task) => handleOpenTask(task)}
                   onConfirmAiVerdict={handleConfirmAiVerdict}
                   onOverturnAiVerdict={handleOverturnAiVerdict}
+                  canViewAiDetails={canViewAiDetails}
                 />
               ) : (
                 <TaskCardGrid
@@ -1749,6 +1762,7 @@ export default function App() {
                   onOpenEmail={(task) => handleOpenTask(task)}
                   onConfirmAiVerdict={handleConfirmAiVerdict}
                   onOverturnAiVerdict={handleOverturnAiVerdict}
+                  canViewAiDetails={canViewAiDetails}
                 />
               )
             )}
@@ -1924,6 +1938,7 @@ export default function App() {
           auditorName={currentUser.full_name}
           auditorLocation={currentUser.facility_code}
           rules={rules}
+          canViewAiDetails={canViewAiDetails}
         />
       )}
 

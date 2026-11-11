@@ -38,7 +38,8 @@ import {
   ThumbsUp,
   ThumbsDown,
   CheckCheck,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Percent
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -63,6 +64,7 @@ import {
 import { tasksApi, settingsApi } from '../api/client.js';
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
 import AuditModal from './AuditModal.jsx';
+import AiDiscrepancyMatrix from './AiDiscrepancyMatrix.jsx';
 
 /**
  * Returns today's date in local YYYY-MM-DD format (resets cleanly at 00:00 local midnight)
@@ -220,8 +222,17 @@ export default function AIAuditsConsole({
   const [ledgerFilter, setLedgerFilter] = useState('ALL'); // 'ALL' | 'PASSED' | 'FATAL' | 'VERIFIED' | 'OVERTURNED'
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
 
-  // 5. Active Console Mode: 'EXECUTE' | 'VERIFY' | 'REAUDIT'
+  // 5. Active Console Mode: 'EXECUTE' | 'REAUDIT' | 'FORENSICS' | 'DISCREPANCY'
   const [activeConsoleTab, setActiveConsoleTab] = useState('EXECUTE');
+
+  // Dual-Audited Tasks Count for Discrepancy Matrix Tab Badge
+  const dualAuditedCount = useMemo(() => {
+    return (tasks || []).filter(t => {
+      const hasHuman = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
+      const hasAi = t.aiAuditStatus === 'PASSED' || t.aiAuditStatus === 'FATAL';
+      return hasHuman && hasAi;
+    }).length;
+  }, [tasks]);
 
   // 6. Human Review & Verification States
   const [verifySearchQuery, setVerifySearchQuery] = useState('');
@@ -614,9 +625,16 @@ export default function AIAuditsConsole({
   // Filter Tasks Queue
   const queueTasks = useMemo(() => {
     return tasks.filter(t => {
-      // Audit status filter
-      if (selectedStatusFilter === 'PENDING' && (t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL')) return false;
-      if (selectedStatusFilter === 'AUDITED' && t.auditStatus !== 'PASSED' && t.auditStatus !== 'FATAL') return false;
+      // Audit status filter (supports separate AI & City Admin status)
+      const hasCityAudit = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
+      const hasAiAudit = Boolean(t.aiAuditStatus);
+
+      if (selectedStatusFilter === 'CITY_AUDITED' && !hasCityAudit) return false;
+      if (selectedStatusFilter === 'NEEDS_AI' && hasAiAudit) return false;
+      if (selectedStatusFilter === 'DUAL_AUDITED' && (!hasCityAudit || !hasAiAudit)) return false;
+      if (selectedStatusFilter === 'DISCREPANCY' && (!hasCityAudit || !hasAiAudit || t.auditStatus === t.aiAuditStatus)) return false;
+      if (selectedStatusFilter === 'PENDING' && (hasCityAudit || hasAiAudit)) return false;
+      if (selectedStatusFilter === 'AUDITED' && !hasAiAudit) return false;
 
       // City filter
       if (selectedCity !== 'ALL') {
@@ -724,48 +742,42 @@ export default function AIAuditsConsole({
         }
       });
 
-      // Optionally commit to Supabase database
+      // Commit dedicated AI audit verdict without overwriting city admin / manual audit fields
       if (shouldCommit) {
-        setCurrentProgress({ step: 'COMMITTING', message: 'Writing AI audit verdict & tokens to Supabase database...' });
-
-        if (result.verdict === 'PASS') {
-          await tasksApi.passAudit({
-            taskId: taskToAudit.id || taskToAudit.taskId,
-            auditorName, // Overwrites Auditor Name with the model used
-            auditorLocation,
-            remarks: `AI PASSED (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`,
-            criteriaStatus,
-            replacements: [],
-            taskData: taskToAudit,
-            totalTokens: totToks // Stores total tokens in Supabase
-          });
-        } else {
-          await tasksApi.failAudit({
-            taskId: taskToAudit.id || taskToAudit.taskId,
-            taskData: taskToAudit,
-            failedReasons: failedReasons.length > 0 ? failedReasons : ['AI Non-Compliance Detection'],
-            remarks: `AI FATAL STRIKE (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`,
-            criteriaStatus,
-            replacements: [],
-            auditorName, // Overwrites Auditor Name with the model used
-            auditorLocation,
-            immediateEmail: false,
-            totalTokens: totToks // Stores total tokens in Supabase
-          });
-        }
+        setCurrentProgress({ step: 'COMMITTING', message: 'Writing separate AI audit verdict & tokens to database...' });
 
         const finalVerdict = result.verdict === 'PASS' ? 'PASSED' : 'FATAL';
         const formattedRemarks = result.verdict === 'PASS'
           ? `AI PASSED (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`
           : `AI FATAL STRIKE (Score: ${result.overallScore}/100, Conf: ${result.confidenceScore}% ±${result.errorMargin}%). ${result.summary}`;
 
+        await tasksApi.saveAiAuditVerdict({
+          taskId: taskToAudit.id || taskToAudit.taskId,
+          verdict: finalVerdict,
+          confidenceScore: result.confidenceScore,
+          errorMargin: result.errorMargin,
+          overallScore: result.overallScore,
+          summary: result.summary,
+          criteriaStatus,
+          criteriaEvaluation: result.criteriaEvaluation || [],
+          failedReasons: failedReasons.length > 0 ? failedReasons : (result.verdict === 'PASS' ? [] : ['AI Non-Compliance Detection']),
+          auditorName,
+          totalTokens: totToks,
+          taskData: taskToAudit
+        });
+
         if (onTaskAudited) {
           onTaskAudited(taskToAudit.id || taskToAudit.taskId, finalVerdict, {
-            auditedBy: auditorName,
-            remarks: formattedRemarks,
-            auditor_remarks: formattedRemarks,
-            overallScore: result.overallScore,
-            confidenceScore: result.confidenceScore,
+            aiAuditStatus: finalVerdict,
+            aiAuditedAt: new Date().toISOString(),
+            aiAuditorName: auditorName,
+            aiRemarks: formattedRemarks,
+            aiCriteriaStatus: criteriaStatus,
+            aiCriteriaEvaluation: result.criteriaEvaluation || [],
+            aiFailedReasons: failedReasons,
+            aiConfidenceScore: result.confidenceScore,
+            aiErrorMargin: result.errorMargin,
+            aiScore: result.overallScore,
             totalTokens: totToks
           });
         }
@@ -1904,6 +1916,29 @@ export default function AIAuditsConsole({
             </span>
           )}
         </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveConsoleTab('DISCREPANCY')}
+          className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+            activeConsoleTab === 'DISCREPANCY'
+              ? 'bg-gradient-to-r from-emerald-500/20 via-teal-500/20 to-sky-500/20 text-emerald-300 border border-emerald-500/40 shadow-lg shadow-emerald-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+          }`}
+          title="Compare City Admin manual audits with AI vision audits to pinpoint error margins per SOP station"
+        >
+          <Percent className="w-4 h-4 text-emerald-400" />
+          <span>🎯 AI vs City Auditor Matrix</span>
+          {dualAuditedCount > 0 ? (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-emerald-500 text-black font-black text-[10px] animate-pulse">
+              {dualAuditedCount} Dual-Audited
+            </span>
+          ) : (
+            <span className="ml-1 px-2 py-0.5 rounded-full bg-slate-950 text-[10px] text-slate-400 border border-slate-800 font-mono">
+              0
+            </span>
+          )}
+        </button>
       </div>
 
       {activeConsoleTab === 'EXECUTE' && (
@@ -2255,8 +2290,11 @@ export default function AIAuditsConsole({
               onChange={(e) => setSelectedStatusFilter(e.target.value)}
               className="w-full bg-transparent text-white font-semibold text-xs focus:outline-none cursor-pointer"
             >
-              <option value="PENDING" className="bg-slate-900">Unaudited Pending Only</option>
-              <option value="AUDITED" className="bg-slate-900">Already Audited Only</option>
+              <option value="CITY_AUDITED" className="bg-slate-900">City Audited (Ready for AI Compare)</option>
+              <option value="NEEDS_AI" className="bg-slate-900">Needs AI Audit Only</option>
+              <option value="DUAL_AUDITED" className="bg-slate-900">Dual-Audited (Both Human + AI)</option>
+              <option value="DISCREPANCY" className="bg-slate-900">Discrepancy (Human ≠ AI)</option>
+              <option value="PENDING" className="bg-slate-900">Unaudited Pending (Raw)</option>
               <option value="ALL" className="bg-slate-900">All Tasks</option>
             </select>
           </div>
@@ -3735,6 +3773,19 @@ export default function AIAuditsConsole({
             </div>
           )}
         </div>
+      )}
+
+      {/* 4. AI vs City Auditor Accuracy & Discrepancy Matrix Tab */}
+      {activeConsoleTab === 'DISCREPANCY' && (
+        <AiDiscrepancyMatrix
+          tasks={tasks}
+          onInspectTask={(t) => {
+            setSelectedTaskId(t.id || t.taskId);
+            setActiveConsoleTab('EXECUTE');
+          }}
+          onOpenCriteriaModal={handleOpenCriteriaModal}
+          rules={activeRules}
+        />
       )}
 
       {/* Overturn Reason Modal (Global) */}

@@ -454,73 +454,202 @@ export const tasksApi = {
         }
       }
 
-      return uniqueRows.map(row => ({
-        id: row.id,
-        taskId: row.task_id,
-        teamName: row.team_name,
-        facilityCode: row.facility_code || row.team_name,
-        zone: row.zone,
-        date: row.dispatch_date,
-        status: row.status,
-        feName: row.fe_name,
-        feCode: row.fe_code,
-        feId: row.fe_id,
-        feEmail: row.fe_email,
-        customerName: row.customer_name,
-        customerAddress: row.customer_address,
-        pincode: row.pincode,
-        pin: row.delivery_pin,
-        reason: row.cancellation_reason,
-        images: row.image_urls || {},
-        imageCount: row.image_count || 0,
-        hasImages: Boolean(row.has_images),
-        assignedAuditorId: row.assigned_auditor_id,
-        assignedAuditorName: row.assigned_auditor_name,
-        allocatedAt: row.allocated_at,
-        uploadedAt: row.uploaded_at || row.created_at || null,
-        createdAt: row.created_at || null,
-        auditStatus: row.audit_status || 'PENDING',
-        auditedAt: row.audited_at,
-        auditedBy: row.audited_by_name,
-        auditedLocation: row.audited_location,
-        failedReasons: Array.isArray(row.failed_reasons) ? row.failed_reasons : [],
-        remarks: row.auditor_remarks || '',
-        warningLevel: row.warning_level,
-        emailSent: Boolean(row.email_sent),
-        emailSentAt: row.email_sent_at,
-        criteriaStatus: row.criteria_status || {},
-        replacements: Array.isArray(row.replacements) ? row.replacements : [],
-        disputeStatus: row.dispute_status || 'NONE',
-        disputeCategory: row.dispute_category || null,
-        disputeReason: row.dispute_reason || null,
-        disputeRaisedByRole: row.dispute_raised_by_role || null,
-        disputeRaisedByName: row.dispute_raised_by_name || null,
-        disputeRaisedAt: row.dispute_raised_at || null,
-        disputeMeetUrl: row.dispute_meet_url || null,
-        disputeMeetTime: row.dispute_meet_time || null,
-        disputeMeetRequestedBy: row.dispute_meet_requested_by || null,
-        disputeResolvedAt: row.dispute_resolved_at || null,
-        disputeResolvedByName: row.dispute_resolved_by_name || null,
-        disputeResolutionRemarks: row.dispute_resolution_remarks || null,
-        disputeProofUrl: row.dispute_proof_url || null,
-        totalTokens: row.total_tokens || 0,
-        total_tokens: row.total_tokens || 0,
-        auditorModel: row.auditor_model || row.audited_by_name || null,
-        needsReAudit: Boolean(
-          row.needs_reaudit || 
-          row.audit_status === 'NEEDS_REAUDIT' || 
-          (row.auditor_remarks && (row.auditor_remarks.includes('[AI Audit Failed') || row.auditor_remarks.includes('[AI Audit Rejected')))
-        ),
-        reAuditReason: (() => {
-          if (!row.auditor_remarks) return null;
-          const match = row.auditor_remarks.match(/\[AI Audit (?:Failed|Rejected) [^:]+: ([^\]]+)\]/);
-          return match ? match[1] : null;
-        })()
-      }));
+      // Load local AI verdict ledger for zero-interruption cross-checks (survives refreshes even before SQL migration)
+      let localAiLedger = {};
+      try {
+        const rawAiLedger = localStorage.getItem('locus_ai_verdicts_ledger');
+        if (rawAiLedger) {
+          localAiLedger = JSON.parse(rawAiLedger);
+        }
+      } catch (_) {}
+
+      return uniqueRows.map(row => {
+        const fallbackAi = localAiLedger[String(row.id)] || localAiLedger[String(row.task_id)] || {};
+
+        return {
+          id: row.id,
+          taskId: row.task_id,
+          teamName: row.team_name,
+          facilityCode: row.facility_code || row.team_name,
+          zone: row.zone,
+          date: row.dispatch_date,
+          status: row.status,
+          feName: row.fe_name,
+          feCode: row.fe_code,
+          feId: row.fe_id,
+          feEmail: row.fe_email,
+          customerName: row.customer_name,
+          customerAddress: row.customer_address,
+          pincode: row.pincode,
+          pin: row.delivery_pin,
+          reason: row.cancellation_reason,
+          images: row.image_urls || {},
+          imageCount: row.image_count || 0,
+          hasImages: Boolean(row.has_images),
+          assignedAuditorId: row.assigned_auditor_id,
+          assignedAuditorName: row.assigned_auditor_name,
+          allocatedAt: row.allocated_at,
+          uploadedAt: row.uploaded_at || row.created_at || null,
+          createdAt: row.created_at || null,
+          auditStatus: row.audit_status || 'PENDING',
+          auditedAt: row.audited_at,
+          auditedBy: row.audited_by_name,
+          auditedLocation: row.audited_location,
+          failedReasons: Array.isArray(row.failed_reasons) ? row.failed_reasons : [],
+          remarks: row.auditor_remarks || '',
+          warningLevel: row.warning_level,
+          emailSent: Boolean(row.email_sent),
+          emailSentAt: row.email_sent_at,
+          criteriaStatus: row.criteria_status || {},
+          replacements: Array.isArray(row.replacements) ? row.replacements : [],
+          disputeStatus: row.dispute_status || 'NONE',
+          disputeCategory: row.dispute_category || null,
+          disputeReason: row.dispute_reason || null,
+          disputeRaisedByRole: row.dispute_raised_by_role || null,
+          disputeRaisedByName: row.dispute_raised_by_name || null,
+          disputeRaisedAt: row.dispute_raised_at || null,
+          disputeMeetUrl: row.dispute_meet_url || null,
+          disputeMeetTime: row.dispute_meet_time || null,
+          disputeMeetRequestedBy: row.dispute_meet_requested_by || null,
+          disputeResolvedAt: row.dispute_resolved_at || null,
+          disputeResolvedByName: row.dispute_resolved_by_name || null,
+          disputeResolutionRemarks: row.dispute_resolution_remarks || null,
+          disputeProofUrl: row.dispute_proof_url || null,
+          totalTokens: row.total_tokens || 0,
+          total_tokens: row.total_tokens || 0,
+          auditorModel: row.auditor_model || row.audited_by_name || null,
+          // Dedicated Independent AI Audit Verdict Fields
+          aiAuditStatus: row.ai_audit_status || fallbackAi.aiAuditStatus || null,
+          aiAuditedAt: row.ai_audited_at || fallbackAi.aiAuditedAt || null,
+          aiAuditorName: row.ai_auditor_name || fallbackAi.aiAuditorName || null,
+          aiRemarks: row.ai_remarks || fallbackAi.aiRemarks || null,
+          aiCriteriaStatus: row.ai_criteria_status || fallbackAi.aiCriteriaStatus || null,
+          aiCriteriaEvaluation: row.ai_criteria_evaluation || fallbackAi.aiCriteriaEvaluation || null,
+          aiFailedReasons: Array.isArray(row.ai_failed_reasons) ? row.ai_failed_reasons : (fallbackAi.aiFailedReasons || []),
+          aiConfidenceScore: (row.ai_confidence_score !== undefined && row.ai_confidence_score !== null)
+            ? row.ai_confidence_score
+            : (fallbackAi.aiConfidenceScore ?? null),
+          aiErrorMargin: (row.ai_error_margin !== undefined && row.ai_error_margin !== null)
+            ? row.ai_error_margin
+            : (fallbackAi.aiErrorMargin ?? null),
+          aiScore: (row.ai_score !== undefined && row.ai_score !== null)
+            ? row.ai_score
+            : (fallbackAi.aiScore ?? null),
+          needsReAudit: Boolean(
+            row.needs_reaudit || 
+            row.audit_status === 'NEEDS_REAUDIT' || 
+            (row.auditor_remarks && (row.auditor_remarks.includes('[AI Audit Failed') || row.auditor_remarks.includes('[AI Audit Rejected')))
+          ),
+          reAuditReason: (() => {
+            if (!row.auditor_remarks) return null;
+            const match = row.auditor_remarks.match(/\[AI Audit (?:Failed|Rejected) [^:]+: ([^\]]+)\]/);
+            return match ? match[1] : null;
+          })()
+        };
+      });
     } catch (e) {
       console.warn('tasksApi.getTasks error:', e.message);
       return null;
     }
+  },
+
+  // Independent AI Verdict Writer: Saves to dedicated AI columns without overwriting city admin / manual audit fields
+  async saveAiAuditVerdict({
+    taskId,
+    verdict,
+    confidenceScore,
+    errorMargin,
+    overallScore,
+    summary,
+    criteriaStatus,
+    criteriaEvaluation,
+    failedReasons,
+    auditorName,
+    totalTokens = null
+  }) {
+    const normalizedVerdict = (verdict === 'PASS' || verdict === 'PASSED') ? 'PASSED' : 'FATAL';
+    const nowIso = new Date().toISOString();
+
+    const aiPayload = {
+      ai_audit_status: normalizedVerdict,
+      ai_audited_at: nowIso,
+      ai_auditor_name: auditorName || 'AI Audit Engine',
+      ai_remarks: summary || '',
+      ai_criteria_status: criteriaStatus || {},
+      ai_criteria_evaluation: criteriaEvaluation || [],
+      ai_failed_reasons: failedReasons || [],
+      ai_confidence_score: (confidenceScore !== undefined && confidenceScore !== null) ? Number(confidenceScore) : null,
+      ai_error_margin: (errorMargin !== undefined && errorMargin !== null) ? Number(errorMargin) : null,
+      ai_score: (overallScore !== undefined && overallScore !== null) ? Number(overallScore) : null,
+      updated_at: nowIso
+    };
+
+    if (totalTokens !== null && totalTokens !== undefined) {
+      aiPayload.total_tokens = Number(totalTokens);
+    }
+
+    // 1. Immediately cache in local persistent ledger so cross-check is 100% responsive and survives refreshes
+    try {
+      const rawAiLedger = localStorage.getItem('locus_ai_verdicts_ledger');
+      const localLedger = rawAiLedger ? JSON.parse(rawAiLedger) : {};
+      localLedger[String(taskId)] = {
+        aiAuditStatus: normalizedVerdict,
+        aiAuditedAt: nowIso,
+        aiAuditorName: auditorName || 'AI Audit Engine',
+        aiRemarks: summary || '',
+        aiCriteriaStatus: criteriaStatus || {},
+        aiCriteriaEvaluation: criteriaEvaluation || [],
+        aiFailedReasons: failedReasons || [],
+        aiConfidenceScore: (confidenceScore !== undefined && confidenceScore !== null) ? Number(confidenceScore) : null,
+        aiErrorMargin: (errorMargin !== undefined && errorMargin !== null) ? Number(errorMargin) : null,
+        aiScore: (overallScore !== undefined && overallScore !== null) ? Number(overallScore) : null,
+        totalTokens: totalTokens || 0
+      };
+      localStorage.setItem('locus_ai_verdicts_ledger', JSON.stringify(localLedger));
+    } catch (_) {}
+
+    // 2. Persist to Supabase tasks table under dedicated ai_* columns
+    if (supabase) {
+      try {
+        let { data, error } = await supabase
+          .from('tasks')
+          .update(aiPayload)
+          .eq('id', String(taskId))
+          .select('id');
+
+        // Resilient fallback: If extra columns are not added, retry with strictly the 6 core columns
+        if (error && error.message && (error.message.includes('column') || error.code === '42703')) {
+          const coreAiPayload = {
+            ai_audit_status: normalizedVerdict,
+            ai_criteria_status: criteriaStatus || {},
+            ai_confidence_score: (confidenceScore !== undefined && confidenceScore !== null) ? Number(confidenceScore) : null,
+            ai_error_margin: (errorMargin !== undefined && errorMargin !== null) ? Number(errorMargin) : null,
+            ai_remarks: summary || '',
+            ai_auditor_name: auditorName || 'AI Audit Engine'
+          };
+          const retry = await supabase.from('tasks').update(coreAiPayload).eq('id', String(taskId)).select('id');
+          data = retry.data;
+          error = retry.error;
+        }
+
+        // Graceful handling if dedicated columns are not yet added via SQL in Supabase
+        if (error && (error.message?.includes('ai_') || error.message?.includes('column') || error.code === '42703')) {
+          console.warn('Notice: Supabase tasks table does not have dedicated ai_* columns yet. Saved in local persistent ledger. Run the provided SQL migration in Supabase SQL editor for cloud sync.');
+        } else if (!error && (!data || data.length === 0)) {
+          await supabase.from('tasks').update(aiPayload).eq('task_id', String(taskId)).select('id');
+        }
+      } catch (err) {
+        console.warn('saveAiAuditVerdict Supabase sync warning:', err.message);
+      }
+    }
+
+    return {
+      success: true,
+      aiAuditStatus: normalizedVerdict,
+      aiCriteriaStatus: criteriaStatus || {},
+      aiConfidenceScore: confidenceScore,
+      aiErrorMargin: errorMargin
+    };
   },
 
   // Auditor PASS write operation
