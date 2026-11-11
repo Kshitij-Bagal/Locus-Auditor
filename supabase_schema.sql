@@ -1270,7 +1270,57 @@ CREATE POLICY "Allow authenticated upsert on system_settings"
     TO authenticated, anon
     USING (true);
 
--- 18. RELOAD POSTGREST SCHEMA CACHE (Fixes column & RPC cache immediately)
+-- ====================================================================
+-- 18. DAILY FE GROOMING & UNIFORM COMPLIANCE CHECKS
+-- ====================================================================
+CREATE TABLE IF NOT EXISTS public.fe_grooming_checks (
+    id TEXT PRIMARY KEY, -- e.g. "<fe_code>_<YYYY-MM-DD>"
+    check_date DATE NOT NULL,
+    fe_id TEXT,
+    fe_code TEXT NOT NULL,
+    fe_name TEXT NOT NULL,
+    fe_email TEXT,
+    facility_code TEXT DEFAULT 'Ahmedabad',
+    upper_image_url TEXT NOT NULL, -- Live webcam/mobile captured JPEG with burned timestamp
+    lower_image_url TEXT NOT NULL, -- Live webcam/mobile captured JPEG with burned timestamp
+    upper_timestamp TEXT,
+    lower_timestamp TEXT,
+    upper_nonce TEXT,
+    lower_nonce TEXT,
+    status TEXT DEFAULT 'PENDING_AI' CHECK (status IN ('PASS', 'FATAL', 'PENDING_AI', 'RECAPTURE_REQUESTED')),
+    overall_score INT DEFAULT 0,
+    ai_summary TEXT,
+    ai_criteria JSONB DEFAULT '{}'::jsonb,
+    failed_reasons JSONB DEFAULT '[]'::jsonb,
+    timestamp_verified BOOLEAN DEFAULT true,
+    spoof_detected BOOLEAN DEFAULT false,
+    provider_used TEXT,
+    model_used TEXT,
+    human_override_status TEXT,
+    human_override_by TEXT,
+    human_override_notes TEXT,
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fe_grooming_date ON public.fe_grooming_checks(check_date);
+CREATE INDEX IF NOT EXISTS idx_fe_grooming_code ON public.fe_grooming_checks(fe_code);
+CREATE INDEX IF NOT EXISTS idx_fe_grooming_status ON public.fe_grooming_checks(status);
+CREATE INDEX IF NOT EXISTS idx_fe_grooming_hub ON public.fe_grooming_checks(facility_code);
+
+ALTER TABLE public.fe_grooming_checks ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow read on fe_grooming_checks"
+    ON public.fe_grooming_checks FOR SELECT
+    TO authenticated, anon
+    USING (true);
+
+CREATE POLICY "Allow insert/update on fe_grooming_checks"
+    ON public.fe_grooming_checks FOR ALL
+    TO authenticated, anon
+    USING (true);
+
+-- 19. RELOAD POSTGREST SCHEMA CACHE (Fixes column & RPC cache immediately)
 NOTIFY pgrst, 'reload schema';
 
 -- Verification notification

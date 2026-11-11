@@ -115,6 +115,13 @@ export const SYSTEM_PAGES = [
     fullName: 'Gemini 1.5 Flash AI Auditing Console',
     description: 'Autonomous multimodal photo compliance auditing, scoring, and error margin detection',
     category: 'Core Operations'
+  },
+  {
+    id: 'grooming',
+    label: 'FE Grooming',
+    fullName: 'Daily FE Grooming & Uniform Oversight',
+    description: 'Live camera daily FE uniform, ID card, grooming, jeans & shoes verification console',
+    category: 'Core Operations'
   }
 ];
 
@@ -122,6 +129,7 @@ export const SYSTEM_PAGES = [
 export const PAGE_ID_TO_LABEL = {
   audits: 'Audits',
   aiAudits: 'AI Audits',
+  grooming: 'FE Grooming',
   upload: 'Upload Task',
   allocation: 'Roster & Workload',
   escalations: 'D + 1 Escalations',
@@ -141,6 +149,8 @@ export const PAGE_LABEL_TO_ID = {
   'Audits': 'audits',
   'AI Audits': 'aiAudits',
   'AI Audit': 'aiAudits',
+  'FE Grooming': 'grooming',
+  'Grooming Check': 'grooming',
   'Upload Task': 'upload',
   'Upload Tasks': 'upload',
   'Roster & Workload': 'allocation',
@@ -183,6 +193,7 @@ export const DEFAULT_ROLE_PRESETS = {
     'Executive Summary',
     'AI Audits',
     'Audits',
+    'FE Grooming',
     'Upload Task',
     'Roster & Workload',
     'D + 1 Escalations',
@@ -197,28 +208,34 @@ export const DEFAULT_ROLE_PRESETS = {
   ],
   'City Admin': [
     'Audits',
+    'FE Grooming',
     'Tool Orders'
   ],
   Admin: [ // alias for City Admin
     'Audits',
+    'FE Grooming',
     'Tool Orders'
   ],
   Auditor: [
     'Audits',
     'AI Audits',
+    'FE Grooming',
     'Forensics Lab'
   ],
   AM: [
     'Tool Orders',
-    'Cluster Oversight'
+    'Cluster Oversight',
+    'FE Grooming'
   ],
   RM: [
     'Tool Orders',
-    'Cluster Oversight'
+    'Cluster Oversight',
+    'FE Grooming'
   ],
   'Central Ops': [
     'Audits',
     'AI Audits',
+    'FE Grooming',
     'Upload Task',
     'Tool Orders',
     'Cluster Oversight',
@@ -228,6 +245,7 @@ export const DEFAULT_ROLE_PRESETS = {
     'Executive Summary',
     'AI Audits',
     'Audits',
+    'FE Grooming',
     'Upload Task',
     'Roster & Workload',
     'D + 1 Escalations',
@@ -242,6 +260,7 @@ export const DEFAULT_ROLE_PRESETS = {
     'Executive Summary',
     'AI Audits',
     'Audits',
+    'FE Grooming',
     'Roster & Workload',
     'D + 1 Escalations',
     'Quality Rules',

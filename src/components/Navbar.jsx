@@ -19,7 +19,8 @@ import {
   Mail,
   Fingerprint,
   LayoutDashboard,
-  Sparkles
+  Sparkles,
+  UserCheck
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
 
@@ -62,6 +63,12 @@ export default function Navbar({
       label: 'AI Audits',
       icon: Sparkles,
       allowedRoles: ['Auditor', 'Central Ops', 'GM', 'BH', 'SuperAdmin']
+    },
+    {
+      id: 'grooming',
+      label: 'FE Grooming',
+      icon: UserCheck,
+      allowedRoles: ['Auditor', 'Central Ops', 'Admin', 'AM', 'RM', 'GM', 'BH', 'SuperAdmin']
     },
     {
       id: 'upload',

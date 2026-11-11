@@ -2556,6 +2556,208 @@ export const settingsApi = {
 
   async saveRolePresets(presets, updatedBy) {
     return this.setSetting('role_presets', presets, updatedBy);
+  },
+
+  // Shared AI configuration for automated FE Daily Grooming validation
+  async getGroomingAiConfig() {
+    return this.getSetting('ai_grooming_config', null);
+  },
+
+  async saveGroomingAiConfig(config, updatedBy) {
+    return this.setSetting('ai_grooming_config', config, updatedBy);
+  }
+};
+
+// ====================================================================
+// 9. DAILY FE GROOMING & UNIFORM CHECKS REST API
+// ====================================================================
+
+const GROOMING_LOCAL_CACHE_KEY = 'locus_fe_grooming_checks_v1';
+
+function normalizeGroomingRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    checkDate: row.check_date || row.checkDate,
+    feId: row.fe_id || row.feId || '',
+    feCode: row.fe_code || row.feCode || '',
+    feName: row.fe_name || row.feName || '',
+    feEmail: row.fe_email || row.feEmail || '',
+    facilityCode: row.facility_code || row.facilityCode || 'Ahmedabad',
+    upperImageUrl: row.upper_image_url || row.upperImageUrl || '',
+    lowerImageUrl: row.lower_image_url || row.lowerImageUrl || '',
+    upperTimestamp: row.upper_timestamp || row.upperTimestamp || '',
+    lowerTimestamp: row.lower_timestamp || row.lowerTimestamp || '',
+    upperNonce: row.upper_nonce || row.upperNonce || '',
+    lowerNonce: row.lower_nonce || row.lowerNonce || '',
+    status: row.status || 'PENDING_AI',
+    overallScore: row.overall_score ?? row.overallScore ?? 0,
+    aiSummary: row.ai_summary || row.aiSummary || '',
+    aiCriteria: row.ai_criteria || row.aiCriteria || {},
+    failedReasons: Array.isArray(row.failed_reasons || row.failedReasons) ? (row.failed_reasons || row.failedReasons) : [],
+    timestampVerified: row.timestamp_verified ?? row.timestampVerified ?? true,
+    spoofDetected: Boolean(row.spoof_detected ?? row.spoofDetected ?? false),
+    providerUsed: row.provider_used || row.providerUsed || '',
+    modelUsed: row.model_used || row.modelUsed || '',
+    humanOverrideStatus: row.human_override_status || row.humanOverrideStatus || null,
+    humanOverrideBy: row.human_override_by || row.humanOverrideBy || null,
+    humanOverrideNotes: row.human_override_notes || row.humanOverrideNotes || null,
+    submittedAt: row.submitted_at || row.submittedAt || new Date().toISOString(),
+    updatedAt: row.updated_at || row.updatedAt || new Date().toISOString()
+  };
+}
+
+function toDbGroomingPayload(record) {
+  return {
+    id: record.id,
+    check_date: record.checkDate,
+    fe_id: record.feId || '',
+    fe_code: record.feCode || 'FE',
+    fe_name: record.feName || 'Field Executive',
+    fe_email: record.feEmail || '',
+    facility_code: record.facilityCode || 'Ahmedabad',
+    upper_image_url: record.upperImageUrl || '',
+    lower_image_url: record.lowerImageUrl || '',
+    upper_timestamp: record.upperTimestamp || '',
+    lower_timestamp: record.lowerTimestamp || '',
+    upper_nonce: record.upperNonce || '',
+    lower_nonce: record.lowerNonce || '',
+    status: record.status || 'PENDING_AI',
+    overall_score: Number(record.overallScore || 0),
+    ai_summary: record.aiSummary || '',
+    ai_criteria: record.aiCriteria || {},
+    failed_reasons: Array.isArray(record.failedReasons) ? record.failedReasons : [],
+    timestamp_verified: Boolean(record.timestampVerified ?? true),
+    spoof_detected: Boolean(record.spoofDetected ?? false),
+    provider_used: record.providerUsed || '',
+    model_used: record.modelUsed || '',
+    human_override_status: record.humanOverrideStatus || null,
+    human_override_by: record.humanOverrideBy || null,
+    human_override_notes: record.humanOverrideNotes || null,
+    submitted_at: record.submittedAt || new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function readLocalGroomingCache() {
+  try {
+    const raw = localStorage.getItem(GROOMING_LOCAL_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(normalizeGroomingRow).filter(Boolean);
+    }
+  } catch (e) {}
+  return [];
+}
+
+function writeLocalGroomingCache(list) {
+  try {
+    // Keep up to the most recent 60 checks in localStorage to respect storage quotas
+    const trimmed = (list || []).slice(0, 60);
+    localStorage.setItem(GROOMING_LOCAL_CACHE_KEY, JSON.stringify(trimmed));
+  } catch (e) {
+    try {
+      // If quota exceeded, keep recent 15
+      localStorage.setItem(GROOMING_LOCAL_CACHE_KEY, JSON.stringify((list || []).slice(0, 15)));
+    } catch (_) {}
+  }
+}
+
+export const groomingApi = {
+  async getChecks(dateFilter = null) {
+    const tableMissing = typeof window !== 'undefined' && sessionStorage.getItem('locus_table_fe_grooming_missing') === 'true';
+
+    if (supabase && !tableMissing) {
+      try {
+        let query = supabase
+          .from('fe_grooming_checks')
+          .select('*')
+          .order('submitted_at', { ascending: false })
+          .limit(200);
+
+        if (dateFilter && dateFilter !== 'ALL') {
+          query = query.eq('check_date', dateFilter);
+        }
+
+        const { data, error } = await query;
+        if (error) {
+          if (error.code === 'PGRST205' && typeof window !== 'undefined') {
+            sessionStorage.setItem('locus_table_fe_grooming_missing', 'true');
+          } else {
+            throw error;
+          }
+        } else if (Array.isArray(data)) {
+          const normalized = data.map(normalizeGroomingRow).filter(Boolean);
+          if (!dateFilter || dateFilter === 'ALL') {
+            writeLocalGroomingCache(normalized);
+          }
+          return normalized;
+        }
+      } catch (err) {
+        console.warn('fe_grooming_checks query fallback:', err.message);
+      }
+    }
+
+    // Fallback: system_settings bucket + localStorage
+    const fallbackList = await settingsApi.getSetting('fe_grooming_checks_v1', null);
+    const list = Array.isArray(fallbackList) && fallbackList.length > 0
+      ? fallbackList.map(normalizeGroomingRow).filter(Boolean)
+      : readLocalGroomingCache();
+
+    if (Array.isArray(fallbackList)) {
+      writeLocalGroomingCache(list);
+    }
+
+    if (dateFilter && dateFilter !== 'ALL') {
+      return list.filter(item => item.checkDate === dateFilter);
+    }
+    return list;
+  },
+
+  async upsertCheck(record) {
+    const normalized = normalizeGroomingRow(record);
+    if (!normalized) throw new Error('Invalid grooming check payload');
+
+    // Update local cache immediately
+    const currentLocal = readLocalGroomingCache();
+    const mergedLocal = [normalized, ...currentLocal.filter(item => item.id !== normalized.id)]
+      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
+    writeLocalGroomingCache(mergedLocal);
+
+    const tableMissing = typeof window !== 'undefined' && sessionStorage.getItem('locus_table_fe_grooming_missing') === 'true';
+
+    if (supabase && !tableMissing) {
+      try {
+        const dbPayload = toDbGroomingPayload(normalized);
+        const { data, error } = await supabase
+          .from('fe_grooming_checks')
+          .upsert(dbPayload, { onConflict: 'id' })
+          .select()
+          .maybeSingle();
+
+        if (error) {
+          if (error.code === 'PGRST205' && typeof window !== 'undefined') {
+            sessionStorage.setItem('locus_table_fe_grooming_missing', 'true');
+          } else {
+            throw error;
+          }
+        } else if (data) {
+          return normalizeGroomingRow(data);
+        }
+      } catch (err) {
+        console.warn('fe_grooming_checks upsert fallback:', err.message);
+      }
+    }
+
+    // Fallback: store inside system_settings so cross-device syncing works seamlessly
+    const existingRemote = await settingsApi.getSetting('fe_grooming_checks_v1', []);
+    const baseList = Array.isArray(existingRemote) ? existingRemote.map(normalizeGroomingRow).filter(Boolean) : [];
+    const nextList = [normalized, ...baseList.filter(item => item.id !== normalized.id)]
+      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))
+      .slice(0, 60);
+
+    await settingsApi.setSetting('fe_grooming_checks_v1', nextList, normalized.feName || 'FE');
+    return normalized;
   }
 };
 
