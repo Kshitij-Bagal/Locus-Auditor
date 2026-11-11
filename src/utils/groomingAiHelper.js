@@ -277,14 +277,15 @@ function buildGroomingPrompt({
    - PASS: Wearing a SOLID dark navy-blue or SOLID jet-black official Lenskart polo/t-shirt (matte knit collar polo clearly visible with torso framed).
    - WARNING (minor mistake): Solid dark navy/black polo where the Lenskart chest logo is covered by lanyard/shadow, or collar/polo looks mildly wrinkled/untidy.
    - FAIL: Any patterned/floral/printed/checked/striped shirt, any casual or formal button-down shirt, hoodie, round-neck casual t-shirt, white/bright/colored non-uniform top, jacket completely covering the polo, shirtless, OR chest/torso cropped out so uniform cannot be verified.
-2. "idCard" (Lanyard & Employee Photo ID Card):
-   - PASS: Physical Lenskart lanyard strap AND employee photo ID card/badge clearly visible hanging on front chest/torso.
-   - WARNING (minor mistake): Lanyard strap clearly visible around neck/shirt collar, or ID badge edge is partially visible/flipped/angled sideways.
+2. "idCard" (Lanyard & Physical Photo ID Card):
+   - PASS: BOTH the neck lanyard strap AND the physical printed employee photo ID card/badge body are clearly visible in the chest area of the photo.
+   - WARNING (minor mistake): Lanyard strap is clearly visible around the collar, BUT the physical ID card/badge hangs below the bottom frame edge, is sideways/flipped, or is half-obscured. (Never mark PASS if the card body itself is cropped out!).
    - FAIL: No lanyard and no employee ID badge visible anywhere around neck/chest.
-3. "hairGrooming" (Head Hair Grooming):
-   - PASS: Hair is neat, combed, tidy, and professionally presentable.
-   - WARNING (minor mistake): Slightly windblown/stray locks or minor unevenness while overall neat.
-   - FAIL: Clearly disheveled, uncombed/messy hair, or wearing a casual cap/beanie indoors covering hair.
+3. "hairGrooming" (Head Hair Grooming — CHECK SILHOUETTE AGAINST BACKGROUND):
+   - Examine the outer silhouette of the top and sides of the head against the background wall carefully!
+   - PASS: Hair is flat, neatly combed, and cleanly settled along the scalp with a smooth outline and ZERO spikes or tufts sticking out against the background.
+   - WARNING (minor mistake): Hair is mostly combed/neat, with 1–2 minor loose hairs slightly out of place.
+   - FAIL: Visible tufts, clumps, cowlicks, bedhead spikes, or multiple stray hairs **sticking upward or outward haphazardly above/beside the head contour against the background**, visibly uncombed/messy hair, or wearing a casual cap/beanie indoors covering hair.
 4. "facialHair" (Facial Hair Grooming):
    - PASS: Clean-shaven OR neatly trimmed, well-shaped, sharp beard/mustache. (Female or naturally clean-shaven executives PASS facialHair).
    - WARNING (minor mistake): Light 1-2 day unedged stubble or minor cheek/neck stray hairs needing trim tomorrow.
@@ -294,14 +295,16 @@ function buildGroomingPrompt({
 
   const lowerSection = hasLower
     ? `ON IMAGE ${hasUpper ? '2' : '1'} ("LOWER_BODY" - Dark Blue Jeans Only & Plain Black Shoes):
-5. "jeans" (STRICT POLICY: DARK BLUE / DARK INDIGO JEANS ONLY — NO BLACK, NO FADING IN BOTTOM HALF):
-   - PASS: Clean, full-length DARK BLUE / DARK INDIGO / DEEP NAVY BLUE denim jeans with CONSISTENT, UNIFORM dark-blue color from waistband & upper thighs all the way down through knees, calves, and ankles (zero washed-out / faded pale patches, zero knee fading, zero bottom-half lightening, no rips).
-   - WARNING (minor mistake): Overall dark blue jeans that show mild/slight washout or minor fading along the knees or bottom half (calves/shins look slightly lighter than the dark-blue thighs) OR minor lint/creasing. Remind executive to switch to unfaded solid dark-blue jeans.
-   - FAIL: Noticeably faded/washed-out jeans (e.g., clearly lighter stone-wash, whisker creases, bleached/pale lower half from knees to ankles, acid wash), NON-DARK-BLUE pants (black jeans, black trousers, charcoal/grey jeans, light-blue / sky-blue jeans, beige/khaki/brown/olive/white/colored pants), torn/ripped/distressed jeans, cargo pants, sweatpants/trackpants, or shorts/half-pants.
+5. "jeans" (STRICT POLICY: DEEP DARK BLUE JEANS ONLY — REJECT FADED/GREY/SLATE/WASHED DENIM):
+   - BENCHMARK COMPARISON: Compare the denim color against a deep dark navy uniform swatch. Compliant jeans MUST be an unmistakably **deep, rich, saturated Dark Indigo / Deep Navy Blue** (near-navy darkness, even uniform color from waistband/thighs all the way down through knees, calves, and ankles).
+   - PASS: Deep, rich, saturated Dark Indigo Blue / Deep Navy Blue denim jeans with CONSISTENT unfaded color from waistband through thighs, knees, shins, and ankles (zero washed-out grey/silver sheen, zero pale highlights, zero knee fade, zero bottom-half lightening, no rips).
+   - WARNING (minor mistake): Overall deep Dark Blue jeans that show **slight/mild fading** only at the knees or lower shins, OR minor creases/dust — base fabric MUST still clearly be deep dark indigo blue, NOT medium/slate/grey denim!
+   - FAIL: **Medium-blue, washed slate-blue, sky/ice-blue, greyish-blue, charcoal-grey, black, or faded-looking denim jeans** (including washed charcoal/slate denim with pale/bright highlights across thighs & knees, stone-wash, whisker lines, or faded lower halves!), beige/khaki/brown/olive/white/colored pants, torn/ripped/distressed jeans, cargo pants, sweatpants/trackpants, or shorts/half-pants.
+   - ANTI-LENIENCY RULE: Do NOT excuse slate-grey or medium-washed denim because of indoor lighting/glare! If the denim visibly appears greyish, charcoal-washed, steel-blue, pale/light-washed, or uneven in tone, mark FAIL (not PASS, not WARNING unless the base denim is unmistakably deep navy/indigo with only slight wear).
 6. "shoes" (STRICT Footwear Rule: PLAIN BLACK SHOES WITH BLACK LACES):
    - PASS: Clean, closed-toe PLAIN SOLID BLACK formal/work shoes with PLAIN BLACK shoelaces (all-black upper, black laces, dark/black sole). Sleek plain solid-black formal slip-on shoes with zero colored/white trim also PASS.
    - WARNING (minor mistake): Plain black shoes with black laces that look slightly dusty/scuffed and need wiping/polish, OR black upper + black laces with a thin dark/muted sole trim.
-   - FAIL: Grey, charcoal-grey, brown, tan, blue, white, or multi-colored shoes (including grey/dark-grey sneakers or beige-soled casual sneakers), ANY white/grey/colored shoelaces (laces MUST be black!), prominent white/cream/beige sneaker soles or athletic stripes/logos, slippers, flip-flops, chappals, sandals, crocs, or barefoot/socks-only.`
+   - FAIL: Grey, charcoal-grey, brown, tan, blue, white, or multi-colored shoes (including grey/dark-grey sneakers or beige-soled casual sneakers), ANY white/grey/colored/tan shoelaces (laces MUST be black!), prominent white/cream/beige sneaker soles or athletic stripes/logos, slippers, flip-flops, chappals, sandals, crocs, or barefoot/socks-only.`
     : `IMAGE 2 ("LOWER_BODY") NOT PROVIDED IN THIS SINGLE-IMAGE TEST:
 - Set lowerBody.status to "PASS" and both lowerBody criteria to { "status": "SKIPPED", "note": "Not tested (upper-only test)" }.`;
 
@@ -321,13 +324,15 @@ ${upperSection}
 ${lowerSection}
 
 JUDGMENT & COLOR ACCURACY RULES:
-- Inspect the ENTIRE length of the jeans separately: compare UPPER THIGHS vs KNEES vs LOWER HALF (CALVES/ANKLES). Do NOT assume even color from the upper thighs alone! If the bottom half (knees down to ankles) looks noticeably lighter, washed-out, faded, or worn pale compared to the dark-blue upper section -> NEVER mark PASS (mark WARNING if slight fade, FAIL if clearly faded/washed-out).
-- Jeans color policy: ONLY Dark Blue Jeans / dark indigo blue variants are permitted (black pants/jeans, grey jeans, light-blue jeans MUST FAIL).
-- Inspect true shoe upper, lace, and sole COLORS carefully: do NOT pass dark-grey/charcoal sneakers or shoes with beige/white soles or non-black laces as plain black shoes.
-- Do NOT pass patterned/button-down casual dark shirts as official solid Lenskart polo.
+- Hair silhouette check: Inspect the top and sides of the hair against the wall/background. Any tufts, clumps, or messy strands sticking upright/outward haphazardly must FAIL "hairGrooming" (or WARNING only if 1–2 tiny stray strands).
+- ID card framing check: If only the neck lanyard strap is visible and the printed badge card is cropped below the frame, mark "idCard" as WARNING (never PASS without seeing the badge body).
+- Full-length jeans hue & fade check: Compare UPPER THIGHS vs KNEES vs LOWER HALF (CALVES/ANKLES), and judge against deep Dark Indigo Navy. Medium-blue, slate-blue, faded charcoal-grey denim, light blue, pale thigh highlights, or black trousers MUST FAIL "jeans".
+- Shoe upper/lace/sole check: Reject non-black uppers, tan/white/colored laces, or white/cream/beige sneaker soles as FAIL "shoes".
+- Uniform check: Reject patterned/button-down casual shirts as FAIL "uniform".
+- In every criterion's "note", explicitly describe the observed visual evidence (exact denim hue/fade, hair silhouette state, badge card visibility, shoe/sole/lace color).
 - Distinguish between CRITICAL violations ("FAIL") vs MINOR mistakes ("WARNING"):
-  * Use "FAIL" for missing ID card, non-uniform/patterned/button-down shirt, non-black/grey shoes, beige/white sneaker soles, white/colored shoelaces, open sandals/slippers, non-dark-blue pants (black/grey/light blue), torn/shorts, or heavily faded jeans.
-  * Use "WARNING" ONLY for minor correctable lapses (e.g., mild bottom-half/knee fade on otherwise dark-blue jeans, dusty plain black shoes, mild 1-day stubble, mildly untidy hair, or partially obscured ID/lanyard).
+  * Use "FAIL" for missing ID card, non-uniform/patterned/button-down shirt, noticeably sticking-up uncombed hair, non-black/grey shoes, beige/white sneaker soles, non-black shoelaces, open sandals/slippers, medium/light/grey/slate/washed/black/torn jeans, or clearly faded jeans.
+  * Use "WARNING" ONLY for minor correctable lapses (e.g., mild bottom-half/knee fade on otherwise deep dark-blue jeans, lanyard strap visible without badge card body in frame, dusty plain black shoes, mild 1-day stubble, or 1-2 minor loose hairs).
 - Verdict hierarchy:
   * If ANY criterion is "FAIL" or spoofDetected is true -> overallVerdict: "FATAL".
   * Else if NO criterion is "FAIL" AND at least one criterion is "WARNING" -> overallVerdict: "WARNING".

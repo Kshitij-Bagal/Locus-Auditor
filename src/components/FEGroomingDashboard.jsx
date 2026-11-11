@@ -613,6 +613,17 @@ export default function FEGroomingDashboard({ currentUser }) {
                       Violations: {chk.failedReasons.join(' • ')}
                     </div>
                   )}
+                  {allCriteria.some(c => c.data?.note && (c.data?.status === 'FAIL' || c.data?.status === 'WARNING')) && (
+                    <div className="pt-1 border-t border-slate-800/80 space-y-0.5">
+                      {allCriteria
+                        .filter(c => c.data?.note && (c.data?.status === 'FAIL' || c.data?.status === 'WARNING'))
+                        .map(c => (
+                          <div key={c.id} className={`text-[10px] ${c.data.status === 'FAIL' ? 'text-red-300/90' : 'text-amber-300/90'}`}>
+                            <strong>{CRITERIA_LABELS[c.id]}:</strong> {c.data.note}
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Supervisor Actions */}
