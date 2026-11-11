@@ -748,8 +748,8 @@ export default function FEGroomingCapture({
               onClick={handleValidateAndSubmit}
               className="px-6 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xl shadow-emerald-950/40 transition-all cursor-pointer"
             >
-              {isValidating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              <span>{isValidating ? 'AI Inspecting Grooming...' : 'Validate with AI & Submit Daily Check-In'}</span>
+              {isValidating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              <span>{isValidating ? 'Submitting...' : 'Submit'}</span>
             </button>
           </div>
         </div>
