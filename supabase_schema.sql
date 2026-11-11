@@ -1287,7 +1287,7 @@ CREATE TABLE IF NOT EXISTS public.fe_grooming_checks (
     lower_timestamp TEXT,
     upper_nonce TEXT,
     lower_nonce TEXT,
-    status TEXT DEFAULT 'PENDING_AI' CHECK (status IN ('PASS', 'FATAL', 'PENDING_AI', 'RECAPTURE_REQUESTED')),
+    status TEXT DEFAULT 'PENDING_AI' CHECK (status IN ('PASS', 'WARNING', 'FATAL', 'PENDING_AI', 'RECAPTURE_REQUESTED')),
     overall_score INT DEFAULT 0,
     ai_summary TEXT,
     ai_criteria JSONB DEFAULT '{}'::jsonb,

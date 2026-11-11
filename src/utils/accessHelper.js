@@ -119,9 +119,9 @@ export const SYSTEM_PAGES = [
   {
     id: 'grooming',
     label: 'FE Grooming',
-    fullName: 'Daily FE Grooming & Uniform Oversight',
-    description: 'Live camera daily FE uniform, ID card, grooming, jeans & shoes verification console',
-    category: 'Core Operations'
+    fullName: 'Daily FE Grooming & AI Test Bench (SuperAdmin)',
+    description: 'SuperAdmin FE grooming oversight logs and zero-DB AI combo testing console',
+    category: 'Governance'
   }
 ];
 
@@ -208,34 +208,28 @@ export const DEFAULT_ROLE_PRESETS = {
   ],
   'City Admin': [
     'Audits',
-    'FE Grooming',
     'Tool Orders'
   ],
   Admin: [ // alias for City Admin
     'Audits',
-    'FE Grooming',
     'Tool Orders'
   ],
   Auditor: [
     'Audits',
     'AI Audits',
-    'FE Grooming',
     'Forensics Lab'
   ],
   AM: [
     'Tool Orders',
-    'Cluster Oversight',
-    'FE Grooming'
+    'Cluster Oversight'
   ],
   RM: [
     'Tool Orders',
-    'Cluster Oversight',
-    'FE Grooming'
+    'Cluster Oversight'
   ],
   'Central Ops': [
     'Audits',
     'AI Audits',
-    'FE Grooming',
     'Upload Task',
     'Tool Orders',
     'Cluster Oversight',
@@ -245,7 +239,6 @@ export const DEFAULT_ROLE_PRESETS = {
     'Executive Summary',
     'AI Audits',
     'Audits',
-    'FE Grooming',
     'Upload Task',
     'Roster & Workload',
     'D + 1 Escalations',
@@ -260,7 +253,6 @@ export const DEFAULT_ROLE_PRESETS = {
     'Executive Summary',
     'AI Audits',
     'Audits',
-    'FE Grooming',
     'Roster & Workload',
     'D + 1 Escalations',
     'Quality Rules',

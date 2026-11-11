@@ -54,7 +54,8 @@ export default function FEPortal({
   const [disputeTask, setDisputeTask] = useState(null);
   const [previewImage, setPreviewImage] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState('FATAL'); // 'FATAL' | 'GROOMING' | 'ALL' | 'PASSED' | 'PENDING' | 'REPLACEMENTS'
+  const [mainSection, setMainSection] = useState('VISITS'); // 'VISITS' | 'GROOMING'
+  const [activeTab, setActiveTab] = useState('FATAL'); // 'FATAL' | 'ALL' | 'PASSED' | 'PENDING' | 'REPLACEMENTS'
   const [todayGrooming, setTodayGrooming] = useState(null);
 
   // Extract all identifiers from currentFE with full tolerance for snake_case and camelCase
@@ -73,14 +74,14 @@ export default function FEPortal({
     extractedName = parts.slice(1).join(' ').trim();
   }
 
-  // Load today's grooming check status for the top reminder banner & tab badge
+  // Load today's grooming check status for the Daily Grooming tab badge
   useEffect(() => {
     let active = true;
     const resolvedCode = feCode || extractedCode;
     if (!resolvedCode && !fePersonId && !feEmail) return;
     (async () => {
       try {
-        const rows = await groomingApi.getChecks({ checkDate: getTodayYMD() });
+        const rows = await groomingApi.getChecks(getTodayYMD());
         if (!active || !Array.isArray(rows)) return;
         const match = rows.find((r) => {
           if (resolvedCode && r.feCode && String(r.feCode).toLowerCase() === resolvedCode.toLowerCase()) return true;
@@ -276,76 +277,66 @@ export default function FEPortal({
         </div>
       </div>
 
-      {/* Daily Grooming Compliance Quick-Action Banner */}
-      <div
-        onClick={() => setActiveTab('GROOMING')}
-        className={`rounded-2xl border p-4 shadow-lg cursor-pointer transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-          todayGrooming?.overallStatus === 'PASS' || todayGrooming?.humanStatus === 'APPROVED'
-            ? 'bg-emerald-950/30 border-emerald-500/40 hover:border-emerald-400/70'
-            : todayGrooming?.overallStatus === 'FAIL' || todayGrooming?.humanStatus === 'FLAGGED' || todayGrooming?.humanStatus === 'RECAPTURE_REQUESTED'
-            ? 'bg-red-950/40 border-red-500/50 hover:border-red-400'
-            : todayGrooming
-            ? 'bg-amber-950/30 border-amber-500/40 hover:border-amber-400'
-            : 'bg-sky-950/40 border-sky-500/50 hover:border-sky-400'
-        }`}
-      >
-        <div className="flex items-start sm:items-center gap-3">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
-            todayGrooming?.overallStatus === 'PASS' || todayGrooming?.humanStatus === 'APPROVED'
-              ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300'
-              : todayGrooming?.overallStatus === 'FAIL' || todayGrooming?.humanStatus === 'FLAGGED' || todayGrooming?.humanStatus === 'RECAPTURE_REQUESTED'
-              ? 'bg-red-600/20 border-red-500/40 text-red-300'
-              : 'bg-sky-600/20 border-sky-500/40 text-sky-300'
-          }`}>
-            <Camera className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-black uppercase tracking-wider text-white">
-                Daily Grooming Check ({getTodayYMD()})
-              </span>
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase border ${
-                todayGrooming?.overallStatus === 'PASS' || todayGrooming?.humanStatus === 'APPROVED'
-                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                  : todayGrooming?.overallStatus === 'FAIL' || todayGrooming?.humanStatus === 'FLAGGED' || todayGrooming?.humanStatus === 'RECAPTURE_REQUESTED'
-                  ? 'bg-red-500/20 text-red-300 border-red-500/40'
-                  : todayGrooming
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                  : 'bg-sky-500/20 text-sky-300 border-sky-500/40'
-              }`}>
-                {todayGrooming
-                  ? (todayGrooming.humanStatus === 'RECAPTURE_REQUESTED'
-                      ? 'Recapture Requested'
-                      : todayGrooming.humanStatus === 'APPROVED'
-                      ? 'Supervisor Approved'
-                      : todayGrooming.humanStatus === 'FLAGGED'
-                      ? 'Violation Flagged'
-                      : todayGrooming.overallStatus === 'PASS'
-                      ? 'AI Passed'
-                      : todayGrooming.overallStatus === 'FAIL'
-                      ? 'AI Flagged — Retake Available'
-                      : 'Submitted (Awaiting AI)')
-                  : 'Pending Today — Live Camera Required'}
-              </span>
-            </div>
-            <p className="text-xs text-slate-300 mt-0.5">
-              Take 2 live timestamped photos daily: (1) Chest/Torso/Face for Uniform, ID Card, Hair &amp; Facial Hair, and (2) Jeans &amp; Shoes. Gallery upload is disabled.
-            </p>
-          </div>
-        </div>
+      {/* My Visits Top-Level Section Tabs: Visit Audits & Fatals vs Daily Grooming */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-2 flex flex-wrap items-center gap-2 shadow-lg">
+        <button
+          type="button"
+          onClick={() => setMainSection('VISITS')}
+          className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            mainSection === 'VISITS'
+              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          <Layers className="w-4 h-4" />
+          <span>Visit Audits</span>
+          {fatalCount > 0 && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-red-500/20 text-red-200 border border-red-400/40">
+              {fatalCount} Fatal
+            </span>
+          )}
+        </button>
 
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); setActiveTab('GROOMING'); }}
-          className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-lg shadow-sky-950/50 shrink-0 cursor-pointer"
+          onClick={() => setMainSection('GROOMING')}
+          className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            mainSection === 'GROOMING'
+              ? 'bg-sky-600 text-white shadow-lg shadow-sky-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
         >
-          <Camera className="w-3.5 h-3.5" />
-          <span>{todayGrooming ? 'View / Update Grooming' : 'Start Grooming Check'}</span>
-          <ChevronRight className="w-3.5 h-3.5" />
+          <Camera className="w-4 h-4" />
+          <span>Daily Grooming</span>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+            todayGrooming?.status === 'PASS' || todayGrooming?.humanOverrideStatus === 'PASS'
+              ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
+              : todayGrooming?.status === 'FATAL' || todayGrooming?.status === 'RECAPTURE_REQUESTED'
+              ? 'bg-red-500/20 text-red-200 border-red-400/40'
+              : todayGrooming
+              ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
+              : 'bg-sky-950 text-sky-200 border-sky-400/40'
+          }`}>
+            {todayGrooming
+              ? (todayGrooming.status === 'PASS' ? 'PASS' : todayGrooming.status === 'WARNING' ? 'WARN' : todayGrooming.status === 'FATAL' ? 'FATAL' : todayGrooming.status === 'RECAPTURE_REQUESTED' ? 'RETAKE' : 'SENT')
+              : 'DUE TODAY'}
+          </span>
         </button>
       </div>
 
-      {/* KPI Stats Grid */}
+      {mainSection === 'GROOMING' ? (
+        <FEGroomingCapture
+          feProfile={currentFE}
+          feName={extractedName || feFullName}
+          feCode={feCode || extractedCode}
+          feId={fePersonId}
+          feEmail={feEmail}
+          facilityCode={feFacility}
+          onCheckCompleted={(saved) => setTodayGrooming(saved)}
+        />
+      ) : (
+        <>
+          {/* KPI Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
         <div 
           onClick={() => setActiveTab('ALL')}
@@ -420,31 +411,6 @@ export default function FEPortal({
                   Action Required
                 </span>
               )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab('GROOMING')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeTab === 'GROOMING'
-                  ? 'bg-sky-600 text-white shadow-lg shadow-sky-950/50'
-                  : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-750 border border-sky-500/30'
-              }`}
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>Daily Grooming</span>
-              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                todayGrooming?.overallStatus === 'PASS' || todayGrooming?.humanStatus === 'APPROVED'
-                  ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/40'
-                  : todayGrooming?.overallStatus === 'FAIL'
-                  ? 'bg-red-500/20 text-red-200 border border-red-400/40'
-                  : todayGrooming
-                  ? 'bg-amber-500/20 text-amber-200 border border-amber-400/40'
-                  : 'bg-sky-950 text-sky-200 border border-sky-400/40'
-              }`}>
-                {todayGrooming
-                  ? (todayGrooming.overallStatus === 'PASS' || todayGrooming.humanStatus === 'APPROVED' ? 'PASS' : todayGrooming.overallStatus === 'FAIL' ? 'FAIL' : 'SENT')
-                  : 'DUE'}
-              </span>
             </button>
 
             <button
@@ -912,19 +878,6 @@ export default function FEPortal({
           </div>
         )}
 
-        {/* TAB 6: DAILY LIVE CAMERA GROOMING CHECK */}
-        {activeTab === 'GROOMING' && (
-          <FEGroomingCapture
-            feProfile={currentFE}
-            feName={extractedName || feFullName}
-            feCode={feCode || extractedCode}
-            feId={fePersonId}
-            feEmail={feEmail}
-            facilityCode={feFacility}
-            onCheckCompleted={(saved) => setTodayGrooming(saved)}
-          />
-        )}
-
       </div>
 
       {/* Mandatory SOP Refresher Guide */}
@@ -956,6 +909,8 @@ export default function FEPortal({
           </div>
         </div>
       </div>
+        </>
+      )}
 
       {/* FULL TASK DETAILS MODAL */}
       {selectedTaskForDetails && (

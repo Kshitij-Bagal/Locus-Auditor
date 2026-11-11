@@ -183,6 +183,64 @@ export function captureAndWatermarkVideoFrame(videoEl, metadata = {}) {
   };
 }
 
+/**
+ * Prepares a user-uploaded image File for SuperAdmin AI Sandbox testing (browser RAM only, never stored in DB).
+ * Scales down to max 960px JPEG, optionally burning a synthetic test timestamp watermark.
+ */
+export function prepareUploadedTestImage(file, watermarkMeta = null) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error('No file selected'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Failed to read file: ${file.name}`));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error(`Invalid image file: ${file.name}`));
+      img.onload = () => {
+        const maxDim = 960;
+        let targetW = img.width || 640;
+        let targetH = img.height || 640;
+        if (targetW > maxDim || targetH > maxDim) {
+          const ratio = Math.min(maxDim / targetW, maxDim / targetH);
+          targetW = Math.round(targetW * ratio);
+          targetH = Math.round(targetH * ratio);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+
+        const now = new Date();
+        const timestampStr = formatReadableTimestamp(now);
+        const nonce = generateLiveCaptureNonce(watermarkMeta?.feCode || 'TEST');
+
+        if (watermarkMeta) {
+          burnTimestampWatermark(canvas, {
+            ...watermarkMeta,
+            capturedDate: now,
+            timestampStr,
+            nonce
+          });
+        }
+
+        resolve({
+          dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+          timestampStr,
+          nonce,
+          width: targetW,
+          height: targetH
+        });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function splitDataUrl(dataUrl) {
   if (!dataUrl || typeof dataUrl !== 'string') return null;
   const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -190,75 +248,117 @@ function splitDataUrl(dataUrl) {
   return { mimeType: match[1] || 'image/jpeg', data: match[2] };
 }
 
-function buildGroomingPrompt({ feName, feCode, expectedDate, upperTimestamp, lowerTimestamp, upperNonce, lowerNonce }) {
+function buildGroomingPrompt({
+  feName,
+  feCode,
+  expectedDate,
+  upperTimestamp,
+  lowerTimestamp,
+  upperNonce,
+  lowerNonce,
+  skipTimestampCheck = false,
+  hasUpper = true,
+  hasLower = true
+}) {
+  const timestampSection = skipTimestampCheck
+    ? `SANDBOX QA ACCURACY TEST MODE:
+- You are running an internal SuperAdmin accuracy evaluation on test photo(s).
+- Do NOT fail for missing burned-in timestamp telemetry watermark or date mismatch.
+- Always set "timestampVerified": true and "spoofDetected": false (unless image is completely blank/black/unreadable).
+- Focus 100% strictly on visual compliance of the uniform, ID card, hair grooming, facial hair, jeans, and shoes.`
+    : `CRITICAL ANTI-CHEATING & TIMESTAMP CHECK:
+1. Read the burned-in bottom telemetry watermark strip on BOTH images.
+2. Confirm the burned-in timestamp date matches today (${expectedDate}) and verify the tokens exist (Expected tokens: ${upperNonce || 'N/A'} / ${lowerNonce || 'N/A'}).
+3. Check for spoofing/cheating: if either photo is clearly a photograph of another phone/laptop/monitor screen (visible screen bezel, pixel moiré grid, glare from a screen) OR is blank/black/covered -> set "spoofDetected": true and FAIL.`;
+
+  const upperSection = hasUpper
+    ? `ON IMAGE 1 ("UPPER_BODY" - Chest / Torso / Face):
+1. "uniform" (Official Lenskart Polo Uniform):
+   - PASS: Wearing a SOLID dark navy-blue or SOLID jet-black official Lenskart polo/t-shirt (matte knit collar polo clearly visible with torso framed).
+   - WARNING (minor mistake): Solid dark navy/black polo where the Lenskart chest logo is covered by lanyard/shadow, or collar/polo looks mildly wrinkled/untidy.
+   - FAIL: Any patterned/floral/printed/checked/striped shirt, any casual or formal button-down shirt, hoodie, round-neck casual t-shirt, white/bright/colored non-uniform top, jacket completely covering the polo, shirtless, OR chest/torso cropped out so uniform cannot be verified.
+2. "idCard" (Lanyard & Employee Photo ID Card):
+   - PASS: Physical Lenskart lanyard strap AND employee photo ID card/badge clearly visible hanging on front chest/torso.
+   - WARNING (minor mistake): Lanyard strap clearly visible around neck/shirt collar, or ID badge edge is partially visible/flipped/angled sideways.
+   - FAIL: No lanyard and no employee ID badge visible anywhere around neck/chest.
+3. "hairGrooming" (Head Hair Grooming):
+   - PASS: Hair is neat, combed, tidy, and professionally presentable.
+   - WARNING (minor mistake): Slightly windblown/stray locks or minor unevenness while overall neat.
+   - FAIL: Clearly disheveled, uncombed/messy hair, or wearing a casual cap/beanie indoors covering hair.
+4. "facialHair" (Facial Hair Grooming):
+   - PASS: Clean-shaven OR neatly trimmed, well-shaped, sharp beard/mustache. (Female or naturally clean-shaven executives PASS facialHair).
+   - WARNING (minor mistake): Light 1-2 day unedged stubble or minor cheek/neck stray hairs needing trim tomorrow.
+   - FAIL: Heavily overgrown, patchy, unkempt scruff or untrimmed neckbeard clearly violating professional grooming standards.`
+    : `IMAGE 1 ("UPPER_BODY") NOT PROVIDED IN THIS SINGLE-IMAGE TEST:
+- Set upperBody.status to "PASS" and all 4 upperBody criteria to { "status": "SKIPPED", "note": "Not tested (lower-only test)" }.`;
+
+  const lowerSection = hasLower
+    ? `ON IMAGE ${hasUpper ? '2' : '1'} ("LOWER_BODY" - Dark Blue Jeans Only & Plain Black Shoes):
+5. "jeans" (STRICT POLICY: DARK BLUE / DARK INDIGO JEANS ONLY — NO BLACK, NO FADING IN BOTTOM HALF):
+   - PASS: Clean, full-length DARK BLUE / DARK INDIGO / DEEP NAVY BLUE denim jeans with CONSISTENT, UNIFORM dark-blue color from waistband & upper thighs all the way down through knees, calves, and ankles (zero washed-out / faded pale patches, zero knee fading, zero bottom-half lightening, no rips).
+   - WARNING (minor mistake): Overall dark blue jeans that show mild/slight washout or minor fading along the knees or bottom half (calves/shins look slightly lighter than the dark-blue thighs) OR minor lint/creasing. Remind executive to switch to unfaded solid dark-blue jeans.
+   - FAIL: Noticeably faded/washed-out jeans (e.g., clearly lighter stone-wash, whisker creases, bleached/pale lower half from knees to ankles, acid wash), NON-DARK-BLUE pants (black jeans, black trousers, charcoal/grey jeans, light-blue / sky-blue jeans, beige/khaki/brown/olive/white/colored pants), torn/ripped/distressed jeans, cargo pants, sweatpants/trackpants, or shorts/half-pants.
+6. "shoes" (STRICT Footwear Rule: PLAIN BLACK SHOES WITH BLACK LACES):
+   - PASS: Clean, closed-toe PLAIN SOLID BLACK formal/work shoes with PLAIN BLACK shoelaces (all-black upper, black laces, dark/black sole). Sleek plain solid-black formal slip-on shoes with zero colored/white trim also PASS.
+   - WARNING (minor mistake): Plain black shoes with black laces that look slightly dusty/scuffed and need wiping/polish, OR black upper + black laces with a thin dark/muted sole trim.
+   - FAIL: Grey, charcoal-grey, brown, tan, blue, white, or multi-colored shoes (including grey/dark-grey sneakers or beige-soled casual sneakers), ANY white/grey/colored shoelaces (laces MUST be black!), prominent white/cream/beige sneaker soles or athletic stripes/logos, slippers, flip-flops, chappals, sandals, crocs, or barefoot/socks-only.`
+    : `IMAGE 2 ("LOWER_BODY") NOT PROVIDED IN THIS SINGLE-IMAGE TEST:
+- Set lowerBody.status to "PASS" and both lowerBody criteria to { "status": "SKIPPED", "note": "Not tested (upper-only test)" }.`;
+
   return `You are the Lenskart Home Eye Checkup (DLC) Daily Grooming & Uniform Compliance Auditor.
-You are inspecting two LIVE timestamped check-in photographs submitted by Field Executive:
+You are inspecting check-in photograph(s) submitted for Field Executive:
 - FE Name: ${feName || 'Unknown FE'}
 - FE Code: ${feCode || 'N/A'}
 - Expected Today Date: ${expectedDate}
 
-IMAGE 1 = "UPPER_BODY": Chest, Torso & Face Check
-IMAGE 2 = "LOWER_BODY": Jeans & Shoes Check
+${hasUpper ? 'IMAGE 1 = "UPPER_BODY": Chest, Torso & Face Check\n' : ''}${hasLower ? `IMAGE ${hasUpper ? '2' : '1'} = "LOWER_BODY": Dark Blue Jeans Only & Plain Black Shoes Check\n` : ''}
+${timestampSection}
 
-CRITICAL ANTI-CHEATING & TIMESTAMP CHECK:
-1. Read the burned-in bottom telemetry watermark strip on BOTH images.
-2. Confirm the burned-in timestamp date matches today (${expectedDate}) and verify the tokens exist (Expected tokens: ${upperNonce || 'N/A'} / ${lowerNonce || 'N/A'}).
-3. Check for spoofing/cheating: if either photo is clearly a photograph of another phone/laptop/monitor screen (visible screen bezel, pixel moiré grid, glare from a screen) OR is blank/black/covered -> set "spoofDetected": true and FAIL.
+STRICT GROOMING & ATTIRE INSPECTION CRITERIA (3 LEVELS: PASS | WARNING | FAIL):
 
-STRICT GROOMING & ATTIRE INSPECTION CRITERIA:
+${upperSection}
 
-ON IMAGE 1 ("UPPER_BODY" - Chest / Torso / Face):
-1. "uniform" (Official Lenskart Uniform):
-   - PASS: Executive is wearing the official Lenskart navy blue/black polo/t-shirt (visible collar/uniform fabric).
-   - FAIL: Casual hoodie, non-uniform t-shirt, jacket completely hiding uniform, shirtless, or chest not visible.
-2. "idCard" (Lanyard & Employee Photo ID Card):
-   - PASS: Physical Lenskart lanyard and employee ID badge/card clearly visible hanging on chest/torso.
-   - FAIL: No lanyard/ID card visible, tucked inside pocket, or obscured.
-3. "hairGrooming" (Head Hair Grooming):
-   - PASS: Hair is neat, combed, tidy, and professionally presentable.
-   - FAIL: Disheveled, messy/uncombed, wearing casual cap/beanie indoors covering hair.
-4. "facialHair" (Facial Hair Grooming):
-   - PASS: Clean-shaven OR neatly trimmed, well-shaped, well-maintained beard/mustache.
-   - FAIL: Unkempt, patchy overgrown scruff/neckbeard clearly violating professional grooming standards. (Note: Female executives or naturally clean-shaven executives PASS facialHair).
+${lowerSection}
 
-ON IMAGE 2 ("LOWER_BODY" - Jeans & Shoes):
-5. "jeans" (Trousers / Jeans):
-   - PASS: Clean, presentable full-length dark/blue/black jeans or formal trousers.
-   - FAIL: Torn/ripped jeans, casual shorts, half-pants, sweatpants/trackpants/pajamas, or legs not visible.
-6. "shoes" (Footwear):
-   - PASS: Clean, closed-toe formal shoes or clean closed sneakers/sports shoes suitable for field visits.
-   - FAIL: Slippers, flip-flops, chappals, open-toe sandals, crocs, or barefoot/socks-only.
-
-JUDGMENT RULES:
-- Be objective and fair, but never ignore clear violations (e.g., wearing slippers/chappals, missing ID card, non-uniform shirt, torn jeans).
-- If an area is moderately shadowed due to indoor lighting, examine carefully before failing; if genuinely not wearing/showing the required item, mark FAIL with an exact concise reason.
-- If ANY criterion fails or spoofDetected is true -> overallVerdict: "FATAL". Otherwise "PASS".
+JUDGMENT & COLOR ACCURACY RULES:
+- Inspect the ENTIRE length of the jeans separately: compare UPPER THIGHS vs KNEES vs LOWER HALF (CALVES/ANKLES). Do NOT assume even color from the upper thighs alone! If the bottom half (knees down to ankles) looks noticeably lighter, washed-out, faded, or worn pale compared to the dark-blue upper section -> NEVER mark PASS (mark WARNING if slight fade, FAIL if clearly faded/washed-out).
+- Jeans color policy: ONLY Dark Blue Jeans / dark indigo blue variants are permitted (black pants/jeans, grey jeans, light-blue jeans MUST FAIL).
+- Inspect true shoe upper, lace, and sole COLORS carefully: do NOT pass dark-grey/charcoal sneakers or shoes with beige/white soles or non-black laces as plain black shoes.
+- Do NOT pass patterned/button-down casual dark shirts as official solid Lenskart polo.
+- Distinguish between CRITICAL violations ("FAIL") vs MINOR mistakes ("WARNING"):
+  * Use "FAIL" for missing ID card, non-uniform/patterned/button-down shirt, non-black/grey shoes, beige/white sneaker soles, white/colored shoelaces, open sandals/slippers, non-dark-blue pants (black/grey/light blue), torn/shorts, or heavily faded jeans.
+  * Use "WARNING" ONLY for minor correctable lapses (e.g., mild bottom-half/knee fade on otherwise dark-blue jeans, dusty plain black shoes, mild 1-day stubble, mildly untidy hair, or partially obscured ID/lanyard).
+- Verdict hierarchy:
+  * If ANY criterion is "FAIL" or spoofDetected is true -> overallVerdict: "FATAL".
+  * Else if NO criterion is "FAIL" AND at least one criterion is "WARNING" -> overallVerdict: "WARNING".
+  * Else -> overallVerdict: "PASS".
 
 Respond STRICTLY in valid JSON conforming to this exact structure:
 {
-  "overallVerdict": "PASS" | "FATAL",
+  "overallVerdict": "PASS" | "WARNING" | "FATAL",
   "overallScore": number (0-100),
   "timestampVerified": boolean,
   "timestampNotes": "short note verifying the watermark date/time seen on the images",
   "spoofDetected": boolean,
   "summary": "1-2 sentence clinical grooming verdict summary",
   "upperBody": {
-    "status": "PASS" | "FAIL",
+    "status": "PASS" | "WARNING" | "FAIL",
     "criteria": {
-      "uniform": { "status": "PASS" | "FAIL", "note": "brief observation" },
-      "idCard": { "status": "PASS" | "FAIL", "note": "brief observation" },
-      "hairGrooming": { "status": "PASS" | "FAIL", "note": "brief observation" },
-      "facialHair": { "status": "PASS" | "FAIL", "note": "brief observation" }
+      "uniform": { "status": "PASS" | "WARNING" | "FAIL", "note": "brief observation" },
+      "idCard": { "status": "PASS" | "WARNING" | "FAIL", "note": "brief observation" },
+      "hairGrooming": { "status": "PASS" | "WARNING" | "FAIL", "note": "brief observation" },
+      "facialHair": { "status": "PASS" | "WARNING" | "FAIL", "note": "brief observation" }
     }
   },
   "lowerBody": {
-    "status": "PASS" | "FAIL",
+    "status": "PASS" | "WARNING" | "FAIL",
     "criteria": {
-      "jeans": { "status": "PASS" | "FAIL", "note": "brief observation" },
-      "shoes": { "status": "PASS" | "FAIL", "note": "brief observation" }
+      "jeans": { "status": "PASS" | "WARNING" | "FAIL", "note": "brief observation" },
+      "shoes": { "status": "PASS" | "WARNING" | "FAIL", "note": "brief observation" }
     }
   },
-  "failedReasons": ["concise human-readable reason for every FAIL item, or empty array if PASS"]
+  "warnings": ["concise coaching warning for every WARNING item, or empty array"],
+  "failedReasons": ["concise human-readable reason for every FAIL item, or empty array"]
 }`;
 }
 
@@ -325,7 +425,9 @@ export async function evaluateGroomingWithAi({
   lowerTimestamp,
   upperNonce,
   lowerNonce,
-  sharedAiConfig = null
+  sharedAiConfig = null,
+  skipTimestampCheck = false,
+  allowPartialTest = false
 }) {
   const creds = resolveGroomingAiCredentials(sharedAiConfig);
   if (!creds) {
@@ -335,9 +437,15 @@ export async function evaluateGroomingWithAi({
   const upperObj = splitDataUrl(upperImageUrl);
   const lowerObj = splitDataUrl(lowerImageUrl);
 
-  if (!upperObj || !lowerObj) {
+  if (!allowPartialTest && (!upperObj || !lowerObj)) {
     throw new Error('Both live captured photos (Upper Body & Jeans/Shoes) must be present as valid images.');
   }
+  if (allowPartialTest && !upperObj && !lowerObj) {
+    throw new Error('At least one valid image (Upper Body or Jeans/Shoes) is required for testing.');
+  }
+
+  const hasUpper = Boolean(upperObj);
+  const hasLower = Boolean(lowerObj);
 
   const promptText = buildGroomingPrompt({
     feName,
@@ -346,7 +454,10 @@ export async function evaluateGroomingWithAi({
     upperTimestamp,
     lowerTimestamp,
     upperNonce,
-    lowerNonce
+    lowerNonce,
+    skipTimestampCheck,
+    hasUpper,
+    hasLower
   });
 
   const { providerId, apiKey, model } = creds;
@@ -355,18 +466,18 @@ export async function evaluateGroomingWithAi({
 
   if (providerId === 'gemini') {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const geminiParts = [{ text: promptText }];
+    if (hasUpper) {
+      geminiParts.push({ text: '[IMAGE 1: UPPER_BODY - Chest / Torso / Face]' });
+      geminiParts.push({ inline_data: { mime_type: upperObj.mimeType, data: upperObj.data } });
+    }
+    if (hasLower) {
+      geminiParts.push({ text: `[IMAGE ${hasUpper ? '2' : '1'}: LOWER_BODY - Jeans & Shoes]` });
+      geminiParts.push({ inline_data: { mime_type: lowerObj.mimeType, data: lowerObj.data } });
+    }
+
     const payload = {
-      contents: [
-        {
-          parts: [
-            { text: promptText },
-            { text: '[IMAGE 1: UPPER_BODY - Chest / Torso / Face]' },
-            { inline_data: { mime_type: upperObj.mimeType, data: upperObj.data } },
-            { text: '[IMAGE 2: LOWER_BODY - Jeans & Shoes]' },
-            { inline_data: { mime_type: lowerObj.mimeType, data: lowerObj.data } }
-          ]
-        }
-      ],
+      contents: [{ parts: geminiParts }],
       generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
     };
 
@@ -391,20 +502,19 @@ export async function evaluateGroomingWithAi({
       ? 'https://api.openai.com/v1/chat/completions'
       : (providerId === 'openrouter' ? 'https://openrouter.ai/api/v1/chat/completions' : 'https://api.groq.com/openai/v1/chat/completions');
 
+    const openAiContent = [{ type: 'text', text: promptText }];
+    if (hasUpper) {
+      openAiContent.push({ type: 'text', text: '[IMAGE 1: UPPER_BODY - Chest / Torso / Face]' });
+      openAiContent.push({ type: 'image_url', image_url: { url: upperImageUrl, detail: 'high' } });
+    }
+    if (hasLower) {
+      openAiContent.push({ type: 'text', text: `[IMAGE ${hasUpper ? '2' : '1'}: LOWER_BODY - Jeans & Shoes]` });
+      openAiContent.push({ type: 'image_url', image_url: { url: lowerImageUrl, detail: 'high' } });
+    }
+
     const payload = {
       model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: promptText },
-            { type: 'text', text: '[IMAGE 1: UPPER_BODY - Chest / Torso / Face]' },
-            { type: 'image_url', image_url: { url: upperImageUrl, detail: 'high' } },
-            { type: 'text', text: '[IMAGE 2: LOWER_BODY - Jeans & Shoes]' },
-            { type: 'image_url', image_url: { url: lowerImageUrl, detail: 'high' } }
-          ]
-        }
-      ],
+      messages: [{ role: 'user', content: openAiContent }],
       response_format: { type: 'json_object' },
       temperature: 0.1
     };
@@ -435,22 +545,21 @@ export async function evaluateGroomingWithAi({
     tokensUsed = data.usage?.total_tokens || 1400;
   } else if (providerId === 'anthropic') {
     const endpoint = 'https://api.anthropic.com/v1/messages';
+    const claudeContent = [{ type: 'text', text: promptText }];
+    if (hasUpper) {
+      claudeContent.push({ type: 'text', text: '[IMAGE 1: UPPER_BODY - Chest / Torso / Face]' });
+      claudeContent.push({ type: 'image', source: { type: 'base64', media_type: upperObj.mimeType, data: upperObj.data } });
+    }
+    if (hasLower) {
+      claudeContent.push({ type: 'text', text: `[IMAGE ${hasUpper ? '2' : '1'}: LOWER_BODY - Jeans & Shoes]` });
+      claudeContent.push({ type: 'image', source: { type: 'base64', media_type: lowerObj.mimeType, data: lowerObj.data } });
+    }
+
     const payload = {
       model,
       max_tokens: 2000,
       temperature: 0.1,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: promptText },
-            { type: 'text', text: '[IMAGE 1: UPPER_BODY - Chest / Torso / Face]' },
-            { type: 'image', source: { type: 'base64', media_type: upperObj.mimeType, data: upperObj.data } },
-            { type: 'text', text: '[IMAGE 2: LOWER_BODY - Jeans & Shoes]' },
-            { type: 'image', source: { type: 'base64', media_type: lowerObj.mimeType, data: lowerObj.data } }
-          ]
-        }
-      ]
+      messages: [{ role: 'user', content: claudeContent }]
     };
 
     const res = await fetchWithTimeout(endpoint, {
@@ -479,46 +588,89 @@ export async function evaluateGroomingWithAi({
     throw new Error('AI returned unreadable response for grooming check.');
   }
 
-  // Normalize verdicts defensively
-  const upperCrit = parsed.upperBody?.criteria || {};
-  const lowerCrit = parsed.lowerBody?.criteria || {};
+  // Normalize verdicts defensively (PASS | WARNING | FATAL)
+  const upperCrit = hasUpper ? (parsed.upperBody?.criteria || {}) : {};
+  const lowerCrit = hasLower ? (parsed.lowerBody?.criteria || {}) : {};
 
-  const upperFailed = Object.values(upperCrit).some(c => c?.status === 'FAIL');
-  const lowerFailed = Object.values(lowerCrit).some(c => c?.status === 'FAIL');
-  const isSpoof = Boolean(parsed.spoofDetected);
-  const isFatal = parsed.overallVerdict === 'FATAL' || upperFailed || lowerFailed || isSpoof || parsed.timestampVerified === false;
+  const normCrit = (c) => {
+    const st = String(c?.status || 'PASS').toUpperCase();
+    const safeSt = ['PASS', 'WARNING', 'FAIL', 'SKIPPED'].includes(st) ? st : 'PASS';
+    return { status: safeSt, note: c?.note || 'Checked' };
+  };
+
+  const normalizedUpper = hasUpper
+    ? {
+        uniform: normCrit(upperCrit.uniform),
+        idCard: normCrit(upperCrit.idCard),
+        hairGrooming: normCrit(upperCrit.hairGrooming),
+        facialHair: normCrit(upperCrit.facialHair)
+      }
+    : {
+        uniform: { status: 'SKIPPED', note: 'Not in lower-only test' },
+        idCard: { status: 'SKIPPED', note: 'Not in lower-only test' },
+        hairGrooming: { status: 'SKIPPED', note: 'Not in lower-only test' },
+        facialHair: { status: 'SKIPPED', note: 'Not in lower-only test' }
+      };
+
+  const normalizedLower = hasLower
+    ? {
+        jeans: normCrit(lowerCrit.jeans),
+        shoes: normCrit(lowerCrit.shoes)
+      }
+    : {
+        jeans: { status: 'SKIPPED', note: 'Not in upper-only test' },
+        shoes: { status: 'SKIPPED', note: 'Not in upper-only test' }
+      };
+
+  const upperFailed = hasUpper && Object.values(normalizedUpper).some(c => c.status === 'FAIL');
+  const lowerFailed = hasLower && Object.values(normalizedLower).some(c => c.status === 'FAIL');
+  const upperWarned = hasUpper && Object.values(normalizedUpper).some(c => c.status === 'WARNING');
+  const lowerWarned = hasLower && Object.values(normalizedLower).some(c => c.status === 'WARNING');
+
+  const isSpoof = !skipTimestampCheck && Boolean(parsed.spoofDetected);
+  const timestampOk = skipTimestampCheck ? true : (parsed.timestampVerified !== false);
+  const isFatal = parsed.overallVerdict === 'FATAL' || upperFailed || lowerFailed || isSpoof || !timestampOk;
+  const isWarning = !isFatal && (parsed.overallVerdict === 'WARNING' || upperWarned || lowerWarned);
 
   const compiledFailures = Array.isArray(parsed.failedReasons) ? [...parsed.failedReasons] : [];
   if (isSpoof && !compiledFailures.some(r => r.toLowerCase().includes('spoof') || r.toLowerCase().includes('screen'))) {
     compiledFailures.unshift('Suspected photo-of-screen or spoofed capture detected');
   }
-  if (parsed.timestampVerified === false && !compiledFailures.some(r => r.toLowerCase().includes('timestamp'))) {
+  if (!timestampOk && !compiledFailures.some(r => r.toLowerCase().includes('timestamp'))) {
     compiledFailures.unshift('Watermark timestamp verification failed or mismatched date');
   }
 
-  return {
-    overallVerdict: isFatal ? 'FATAL' : 'PASS',
-    overallScore: typeof parsed.overallScore === 'number' ? parsed.overallScore : (isFatal ? 40 : 100),
-    timestampVerified: parsed.timestampVerified !== false,
-    timestampNotes: parsed.timestampNotes || 'Live timestamp watermark confirmed for today.',
-    spoofDetected: isSpoof,
-    summary: parsed.summary || (isFatal ? 'Grooming or attire non-compliance detected.' : 'All daily uniform, grooming, and footwear checks passed.'),
-    upperBody: {
-      status: upperFailed || isSpoof ? 'FAIL' : (parsed.upperBody?.status === 'FAIL' ? 'FAIL' : 'PASS'),
-      criteria: {
-        uniform: upperCrit.uniform || { status: 'PASS', note: 'Checked' },
-        idCard: upperCrit.idCard || { status: 'PASS', note: 'Checked' },
-        hairGrooming: upperCrit.hairGrooming || { status: 'PASS', note: 'Checked' },
-        facialHair: upperCrit.facialHair || { status: 'PASS', note: 'Checked' }
+  const compiledWarnings = Array.isArray(parsed.warnings) ? [...parsed.warnings] : [];
+  if (isWarning && compiledWarnings.length === 0) {
+    [...Object.entries(normalizedUpper), ...Object.entries(normalizedLower)].forEach(([k, v]) => {
+      if (v.status === 'WARNING') {
+        compiledWarnings.push(`${k}: ${v.note}`);
       }
+    });
+  }
+
+  return {
+    overallVerdict: isFatal ? 'FATAL' : (isWarning ? 'WARNING' : 'PASS'),
+    overallScore: typeof parsed.overallScore === 'number' ? parsed.overallScore : (isFatal ? 40 : (isWarning ? 78 : 100)),
+    timestampVerified: timestampOk,
+    timestampNotes: skipTimestampCheck
+      ? 'Sandbox QA accuracy mode (watermark check bypassed).'
+      : (parsed.timestampNotes || 'Live timestamp watermark confirmed for today.'),
+    spoofDetected: isSpoof,
+    summary: parsed.summary || (isFatal
+      ? 'Grooming or attire non-compliance detected.'
+      : isWarning
+      ? 'Minor grooming/attire correction needed — warning issued.'
+      : 'All daily uniform, grooming, dark jeans, and plain black shoes checks passed.'),
+    upperBody: {
+      status: !hasUpper ? 'SKIPPED' : (upperFailed || isSpoof ? 'FAIL' : (upperWarned ? 'WARNING' : 'PASS')),
+      criteria: normalizedUpper
     },
     lowerBody: {
-      status: lowerFailed || isSpoof ? 'FAIL' : (parsed.lowerBody?.status === 'FAIL' ? 'FAIL' : 'PASS'),
-      criteria: {
-        jeans: lowerCrit.jeans || { status: 'PASS', note: 'Checked' },
-        shoes: lowerCrit.shoes || { status: 'PASS', note: 'Checked' }
-      }
+      status: !hasLower ? 'SKIPPED' : (lowerFailed || isSpoof ? 'FAIL' : (lowerWarned ? 'WARNING' : 'PASS')),
+      criteria: normalizedLower
     },
+    warnings: compiledWarnings,
     failedReasons: compiledFailures,
     providerUsed: providerId,
     modelUsed: model,

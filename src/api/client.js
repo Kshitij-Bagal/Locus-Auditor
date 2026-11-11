@@ -2594,6 +2594,7 @@ function normalizeGroomingRow(row) {
     overallScore: row.overall_score ?? row.overallScore ?? 0,
     aiSummary: row.ai_summary || row.aiSummary || '',
     aiCriteria: row.ai_criteria || row.aiCriteria || {},
+    warnings: Array.isArray(row.warnings || row.ai_criteria?._warnings || row.aiCriteria?._warnings) ? (row.warnings || row.ai_criteria?._warnings || row.aiCriteria?._warnings) : [],
     failedReasons: Array.isArray(row.failed_reasons || row.failedReasons) ? (row.failed_reasons || row.failedReasons) : [],
     timestampVerified: row.timestamp_verified ?? row.timestampVerified ?? true,
     spoofDetected: Boolean(row.spoof_detected ?? row.spoofDetected ?? false),
@@ -2625,7 +2626,10 @@ function toDbGroomingPayload(record) {
     status: record.status || 'PENDING_AI',
     overall_score: Number(record.overallScore || 0),
     ai_summary: record.aiSummary || '',
-    ai_criteria: record.aiCriteria || {},
+    ai_criteria: {
+      ...(record.aiCriteria || {}),
+      _warnings: Array.isArray(record.warnings) ? record.warnings : (record.aiCriteria?._warnings || [])
+    },
     failed_reasons: Array.isArray(record.failedReasons) ? record.failedReasons : [],
     timestamp_verified: Boolean(record.timestampVerified ?? true),
     spoof_detected: Boolean(record.spoofDetected ?? false),

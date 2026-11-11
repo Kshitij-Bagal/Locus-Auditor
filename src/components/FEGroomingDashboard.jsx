@@ -16,7 +16,8 @@ import {
   Loader2,
   MapPin,
   Calendar,
-  CheckCheck
+  CheckCheck,
+  FlaskConical
 } from 'lucide-react';
 import { groomingApi, settingsApi } from '../api/client.js';
 import {
@@ -24,18 +25,26 @@ import {
   evaluateGroomingWithAi,
   resolveGroomingAiCredentials
 } from '../utils/groomingAiHelper.js';
+import { parseRoles, normalizeRoleName } from '../utils/accessHelper.js';
+import FEGroomingTestBench from './FEGroomingTestBench.jsx';
 
 const CRITERIA_LABELS = {
-  uniform: 'Uniform Polo',
+  uniform: 'Solid Polo',
   idCard: 'ID Card & Lanyard',
   hairGrooming: 'Hair Grooming',
   facialHair: 'Facial Hair',
-  jeans: 'Clean Jeans',
-  shoes: 'Closed Shoes'
+  jeans: 'Dark Blue Jeans Only (Unfaded)',
+  shoes: 'Black Shoes + Black Laces'
 };
 
 export default function FEGroomingDashboard({ currentUser }) {
   const todayDate = getTodayYMD();
+  const userRoles = parseRoles(currentUser?.roles || [currentUser?.role]);
+  const isSuperAdmin =
+    userRoles.some(r => normalizeRoleName(r) === 'SuperAdmin') ||
+    normalizeRoleName(currentUser?.role) === 'SuperAdmin';
+
+  const [activeSubTab, setActiveSubTab] = useState('LOGS'); // 'LOGS' | 'TEST_BENCH'
   const [checks, setChecks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState(todayDate);
@@ -47,6 +56,7 @@ export default function FEGroomingDashboard({ currentUser }) {
   const [runningAiId, setRunningAiId] = useState(null);
   const [batchRunning, setBatchRunning] = useState(false);
   const [sharedAiSynced, setSharedAiSynced] = useState(false);
+  const [sharedAiConfig, setSharedAiConfig] = useState(null);
   const [sharedConfigPresent, setSharedConfigPresent] = useState(false);
   const [toastMsg, setToastMsg] = useState(null);
 
@@ -63,6 +73,7 @@ export default function FEGroomingDashboard({ currentUser }) {
         settingsApi.getGroomingAiConfig().catch(() => null)
       ]);
       setChecks(Array.isArray(list) ? list : []);
+      setSharedAiConfig(sharedCfg || null);
       setSharedConfigPresent(Boolean(sharedCfg?.apiKey));
     } catch (err) {
       showToast(`Failed to load grooming checks: ${err.message}`, 'error');
@@ -104,11 +115,12 @@ export default function FEGroomingDashboard({ currentUser }) {
   const stats = useMemo(() => {
     const total = dateScopedChecks.length;
     const passed = dateScopedChecks.filter(c => c.status === 'PASS').length;
+    const warned = dateScopedChecks.filter(c => c.status === 'WARNING').length;
     const fatal = dateScopedChecks.filter(c => c.status === 'FATAL').length;
     const pending = dateScopedChecks.filter(c => c.status === 'PENDING_AI').length;
     const recapture = dateScopedChecks.filter(c => c.status === 'RECAPTURE_REQUESTED').length;
     const passRate = total > 0 ? Math.round((passed / total) * 100) : 100;
-    return { total, passed, fatal, pending, recapture, passRate };
+    return { total, passed, warned, fatal, pending, recapture, passRate };
   }, [dateScopedChecks]);
 
   const filteredChecks = useMemo(() => {
@@ -173,7 +185,13 @@ export default function FEGroomingDashboard({ currentUser }) {
         status: aiResult.overallVerdict,
         overallScore: aiResult.overallScore,
         aiSummary: aiResult.summary,
-        aiCriteria: { upperBody: aiResult.upperBody, lowerBody: aiResult.lowerBody, timestampNotes: aiResult.timestampNotes },
+        aiCriteria: {
+          upperBody: aiResult.upperBody,
+          lowerBody: aiResult.lowerBody,
+          timestampNotes: aiResult.timestampNotes,
+          _warnings: aiResult.warnings || []
+        },
+        warnings: aiResult.warnings || [],
         failedReasons: aiResult.failedReasons,
         timestampVerified: aiResult.timestampVerified,
         spoofDetected: aiResult.spoofDetected,
@@ -213,8 +231,11 @@ export default function FEGroomingDashboard({ currentUser }) {
     if (targetStatus === 'FATAL') {
       notes = prompt(`Enter grooming violation reason for ${check.feName}:`, check.failedReasons?.[0] || 'Uniform / Grooming non-compliance observed');
       if (!notes) return;
+    } else if (targetStatus === 'WARNING') {
+      notes = prompt(`Enter minor warning note for ${check.feName}:`, check.warnings?.[0] || 'Minor grooming correction needed by next shift (e.g., polish black shoes / solid dark jeans)');
+      if (!notes) return;
     } else if (targetStatus === 'RECAPTURE_REQUESTED') {
-      notes = prompt(`Message to ${check.feName} for live recapture:`, 'Please retake clear live photos showing ID badge, hair & shoes');
+      notes = prompt(`Message to ${check.feName} for live recapture:`, 'Please retake clear live photos showing ID badge, hair & plain black shoes');
       if (!notes) return;
     } else {
       notes = 'Manually verified compliant by supervisor';
@@ -226,7 +247,8 @@ export default function FEGroomingDashboard({ currentUser }) {
       humanOverrideStatus: targetStatus,
       humanOverrideBy: currentUser?.full_name || currentUser?.email || 'Supervisor',
       humanOverrideNotes: notes,
-      failedReasons: targetStatus === 'FATAL' ? [notes] : (targetStatus === 'PASS' ? [] : check.failedReasons),
+      warnings: targetStatus === 'WARNING' ? [notes] : (targetStatus === 'PASS' ? [] : (check.warnings || [])),
+      failedReasons: targetStatus === 'FATAL' ? [notes] : (targetStatus === 'PASS' || targetStatus === 'WARNING' ? [] : check.failedReasons),
       aiSummary: notes
     };
 
@@ -312,8 +334,43 @@ export default function FEGroomingDashboard({ currentUser }) {
         </div>
       )}
 
-      {/* KPI Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      {/* SuperAdmin Mode Switcher: DB Logs vs Zero-DB AI Accuracy Sandbox */}
+      {isSuperAdmin && (
+        <div className="flex flex-wrap items-center gap-2 bg-slate-900 border border-slate-800 rounded-2xl p-2">
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('LOGS')}
+            className={`px-4 py-2 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer ${
+              activeSubTab === 'LOGS'
+                ? 'bg-sky-600 text-white shadow-lg shadow-sky-950/50'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4" />
+            <span>Daily FE Grooming Logs ({dateScopedChecks.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('TEST_BENCH')}
+            className={`px-4 py-2 rounded-xl text-xs font-black flex items-center gap-2 transition-all cursor-pointer ${
+              activeSubTab === 'TEST_BENCH'
+                ? 'bg-violet-600 text-white shadow-lg shadow-violet-950/50'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800 border border-violet-500/30'
+            }`}
+          >
+            <FlaskConical className="w-4 h-4" />
+            <span>SuperAdmin AI Combo Test Bench (No DB Save)</span>
+          </button>
+        </div>
+      )}
+
+      {activeSubTab === 'TEST_BENCH' && isSuperAdmin ? (
+        <FEGroomingTestBench currentUser={currentUser} sharedAiConfig={sharedAiConfig} />
+      ) : (
+        <>
+          {/* KPI Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <div onClick={() => setStatusFilter('ALL')} className="bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-xl p-3.5 cursor-pointer">
           <span className="text-[11px] font-bold text-slate-400 uppercase">Checked-In</span>
           <div className="text-2xl font-black text-white mt-1">{stats.total}</div>
@@ -324,6 +381,12 @@ export default function FEGroomingDashboard({ currentUser }) {
           <span className="text-[11px] font-bold text-emerald-400 uppercase">Compliant (Pass)</span>
           <div className="text-2xl font-black text-emerald-400 mt-1">{stats.passed}</div>
           <span className="text-[11px] text-emerald-300/80">{stats.passRate}% Pass Rate</span>
+        </div>
+
+        <div onClick={() => setStatusFilter('WARNING')} className="bg-slate-900 border border-amber-500/40 hover:border-amber-500/70 rounded-xl p-3.5 cursor-pointer">
+          <span className="text-[11px] font-bold text-amber-300 uppercase">Minor Warnings</span>
+          <div className="text-2xl font-black text-amber-300 mt-1">{stats.warned}</div>
+          <span className="text-[11px] text-amber-200/80">Minor corrections</span>
         </div>
 
         <div onClick={() => setStatusFilter('FATAL')} className="bg-slate-900 border border-red-500/30 hover:border-red-500/60 rounded-xl p-3.5 cursor-pointer">
@@ -396,6 +459,7 @@ export default function FEGroomingDashboard({ currentUser }) {
           >
             <option value="ALL" className="bg-slate-900">All Statuses</option>
             <option value="PASS" className="bg-slate-900">✅ Passed Only</option>
+            <option value="WARNING" className="bg-slate-900">⚠️ Warnings (Minor)</option>
             <option value="FATAL" className="bg-slate-900">❌ Violations (Fatal)</option>
             <option value="PENDING_AI" className="bg-slate-900">⏳ Pending AI</option>
             <option value="RECAPTURE_REQUESTED" className="bg-slate-900">📷 Recapture Requested</option>
@@ -522,21 +586,28 @@ export default function FEGroomingDashboard({ currentUser }) {
                         className={`px-2 py-1 rounded-lg text-[10px] font-bold border flex items-center gap-1 ${
                           st === 'FAIL'
                             ? 'bg-red-950/40 text-red-300 border-red-500/40'
+                            : st === 'WARNING'
+                            ? 'bg-amber-950/40 text-amber-200 border-amber-500/50'
                             : st === 'PASS'
                             ? 'bg-emerald-950/30 text-emerald-300 border-emerald-500/30'
                             : 'bg-slate-800 text-slate-400 border-slate-700'
                         }`}
                       >
-                        <span>{st === 'FAIL' ? '❌' : st === 'PASS' ? '✅' : '⏳'}</span>
+                        <span>{st === 'FAIL' ? '❌' : st === 'WARNING' ? '⚠️' : st === 'PASS' ? '✅' : '⏳'}</span>
                         <span>{CRITERIA_LABELS[id]}</span>
                       </span>
                     );
                   })}
                 </div>
 
-                {/* AI Summary / Failed Reasons */}
+                {/* AI Summary / Warnings / Failed Reasons */}
                 <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
                   <div className="text-slate-300">{chk.aiSummary}</div>
+                  {chk.warnings?.length > 0 && (
+                    <div className="text-[11px] text-amber-300 font-semibold pt-1">
+                      Warnings: {chk.warnings.join(' • ')}
+                    </div>
+                  )}
                   {chk.failedReasons?.length > 0 && (
                     <div className="text-[11px] text-red-300 font-semibold pt-1">
                       Violations: {chk.failedReasons.join(' • ')}
@@ -563,10 +634,16 @@ export default function FEGroomingDashboard({ currentUser }) {
                       <CheckCheck className="w-3.5 h-3.5" /> Approve
                     </button>
                     <button
+                      onClick={() => handleSupervisorAction(chk, 'WARNING')}
+                      className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" /> Issue Warning
+                    </button>
+                    <button
                       onClick={() => handleSupervisorAction(chk, 'FATAL')}
                       className="px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/40 text-xs font-bold flex items-center gap-1 cursor-pointer"
                     >
-                      <AlertTriangle className="w-3.5 h-3.5" /> Flag Violation
+                      <ShieldAlert className="w-3.5 h-3.5" /> Flag Violation
                     </button>
                     <button
                       onClick={() => handleSupervisorAction(chk, 'RECAPTURE_REQUESTED')}
@@ -604,6 +681,8 @@ export default function FEGroomingDashboard({ currentUser }) {
             onClick={(e) => e.stopPropagation()}
           />
         </div>
+      )}
+        </>
       )}
     </div>
   );

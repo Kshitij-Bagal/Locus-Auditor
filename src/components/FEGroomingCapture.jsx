@@ -28,12 +28,12 @@ import {
 import { groomingApi, settingsApi } from '../api/client.js';
 
 const CRITERIA_LABELS = {
-  uniform: { label: 'Lenskart Polo Uniform', group: 'upper' },
+  uniform: { label: 'Solid Lenskart Polo', group: 'upper' },
   idCard: { label: 'Lanyard & Photo ID Card', group: 'upper' },
   hairGrooming: { label: 'Hair Grooming', group: 'upper' },
   facialHair: { label: 'Facial Hair Grooming', group: 'upper' },
-  jeans: { label: 'Clean Dark/Formal Jeans', group: 'lower' },
-  shoes: { label: 'Closed-Toe Shoes', group: 'lower' }
+  jeans: { label: 'Dark Blue Jeans Only (Unfaded)', group: 'lower' },
+  shoes: { label: 'Plain Black Shoes + Black Laces', group: 'lower' }
 };
 
 export default function FEGroomingCapture({
@@ -311,7 +311,15 @@ export default function FEGroomingCapture({
         status,
         overallScore: aiResult?.overallScore ?? 0,
         aiSummary: aiResult?.summary || 'Live timestamped photos captured. Awaiting AI/Supervisor validation.',
-        aiCriteria: aiResult ? { upperBody: aiResult.upperBody, lowerBody: aiResult.lowerBody, timestampNotes: aiResult.timestampNotes } : {},
+        aiCriteria: aiResult
+          ? {
+              upperBody: aiResult.upperBody,
+              lowerBody: aiResult.lowerBody,
+              timestampNotes: aiResult.timestampNotes,
+              _warnings: aiResult.warnings || []
+            }
+          : {},
+        warnings: aiResult?.warnings || [],
         failedReasons: aiResult?.failedReasons || [],
         timestampVerified: aiResult ? aiResult.timestampVerified : true,
         spoofDetected: aiResult ? aiResult.spoofDetected : false,
@@ -355,6 +363,7 @@ export default function FEGroomingCapture({
           const meta = CRITERIA_LABELS[key];
           const st = data?.status || (check.status === 'PENDING_AI' ? 'PENDING' : 'PASS');
           const isPass = st === 'PASS';
+          const isWarn = st === 'WARNING';
           const isFail = st === 'FAIL';
           return (
             <div
@@ -362,6 +371,8 @@ export default function FEGroomingCapture({
               className={`p-2.5 rounded-xl border text-xs flex items-start justify-between gap-2 ${
                 isFail
                   ? 'bg-red-950/35 border-red-500/40 text-red-200'
+                  : isWarn
+                  ? 'bg-amber-950/35 border-amber-500/45 text-amber-200'
                   : isPass
                   ? 'bg-emerald-950/25 border-emerald-500/30 text-emerald-200'
                   : 'bg-slate-900 border-slate-800 text-slate-300'
@@ -379,9 +390,11 @@ export default function FEGroomingCapture({
                 className={`px-2 py-0.5 rounded text-[10px] font-black uppercase shrink-0 ${
                   isFail
                     ? 'bg-red-500/30 text-red-300 border border-red-500/40'
+                    : isWarn
+                    ? 'bg-amber-500/30 text-amber-200 border border-amber-500/50'
                     : isPass
                     ? 'bg-emerald-500/25 text-emerald-300 border border-emerald-500/40'
-                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : 'bg-slate-800 text-slate-300 border border-slate-700'
                 }`}
               >
                 {st}
@@ -442,6 +455,8 @@ export default function FEGroomingCapture({
                 <CheckCircle2 className="w-8 h-8 text-emerald-400 shrink-0" />
               ) : todaysCheck.status === 'FATAL' || todaysCheck.status === 'RECAPTURE_REQUESTED' ? (
                 <ShieldAlert className="w-8 h-8 text-red-400 shrink-0 animate-pulse" />
+              ) : todaysCheck.status === 'WARNING' ? (
+                <AlertTriangle className="w-8 h-8 text-amber-400 shrink-0" />
               ) : (
                 <Clock className="w-8 h-8 text-amber-400 shrink-0" />
               )}
@@ -456,6 +471,8 @@ export default function FEGroomingCapture({
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                         : todaysCheck.status === 'FATAL'
                         ? 'bg-red-500/25 text-red-300 border border-red-500/50'
+                        : todaysCheck.status === 'WARNING'
+                        ? 'bg-amber-500/25 text-amber-200 border border-amber-500/50'
                         : todaysCheck.status === 'RECAPTURE_REQUESTED'
                         ? 'bg-amber-500/25 text-amber-300 border border-amber-500/50'
                         : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
@@ -463,6 +480,8 @@ export default function FEGroomingCapture({
                   >
                     {todaysCheck.status === 'PASS'
                       ? '✅ APPROVED / COMPLIANT'
+                      : todaysCheck.status === 'WARNING'
+                      ? '⚠️ GROOMING WARNING (MINOR ISSUE)'
                       : todaysCheck.status === 'FATAL'
                       ? '❌ GROOMING VIOLATION DETECTED'
                       : todaysCheck.status === 'RECAPTURE_REQUESTED'
@@ -479,7 +498,7 @@ export default function FEGroomingCapture({
               </div>
             </div>
 
-            {(todaysCheck.status === 'FATAL' || todaysCheck.status === 'RECAPTURE_REQUESTED' || todaysCheck.status === 'PENDING_AI') && (
+            {(todaysCheck.status === 'FATAL' || todaysCheck.status === 'WARNING' || todaysCheck.status === 'RECAPTURE_REQUESTED' || todaysCheck.status === 'PENDING_AI') && (
               <button
                 onClick={() => {
                   setRetakeMode(true);
@@ -501,6 +520,21 @@ export default function FEGroomingCapture({
                 <div key={i} className="flex items-start gap-1.5">
                   <span className="text-red-400 font-bold">❌</span>
                   <span>{r}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {todaysCheck.warnings?.length > 0 && (
+            <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/50 text-xs text-amber-100 space-y-1">
+              <div className="font-bold text-amber-300 uppercase text-[11px] flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                <span>Minor Grooming Warning — Please Correct Immediately / By Next Shift:</span>
+              </div>
+              {todaysCheck.warnings.map((w, i) => (
+                <div key={i} className="flex items-start gap-1.5">
+                  <span className="text-amber-400 font-bold">⚠️</span>
+                  <span>{w}</span>
                 </div>
               ))}
             </div>
@@ -584,9 +618,9 @@ export default function FEGroomingCapture({
                 </div>
 
                 <ul className="text-[11px] text-slate-300 space-y-1 bg-slate-900/70 p-2.5 rounded-xl border border-slate-800/80 mb-3">
-                  <li>✓ Official Lenskart Navy Polo T-Shirt clearly worn</li>
-                  <li>✓ Employee Photo ID Card & Lanyard visible on chest</li>
-                  <li>✓ Hair neatly combed & facial hair cleanly groomed</li>
+                  <li>✓ Official <strong>solid Navy/Black Lenskart Polo</strong> (no patterned/button-down shirts)</li>
+                  <li>✓ Employee Photo ID Card &amp; Lanyard clearly hanging on chest</li>
+                  <li>✓ Face &amp; full upper torso inside camera guide outline</li>
                 </ul>
 
                 {upperCapture ? (
@@ -647,9 +681,9 @@ export default function FEGroomingCapture({
                 </div>
 
                 <ul className="text-[11px] text-slate-300 space-y-1 bg-slate-900/70 p-2.5 rounded-xl border border-slate-800/80 mb-3">
-                  <li>✓ Clean, full-length dark/blue/black jeans or trousers (no ripped/shorts)</li>
-                  <li>✓ Closed-toe formal shoes or clean sneakers (NO slippers/chappals)</li>
-                  <li>💡 Tip: Use 3s self-timer or rear camera in front of a mirror</li>
+                  <li>✓ <strong>Dark Blue / Dark Indigo Jeans ONLY</strong> (even color, NO fading in bottom half, no black/grey)</li>
+                  <li>✓ <strong>Plain All-Black Shoes with BLACK Laces</strong> (no grey/beige soles or white laces)</li>
+                  <li>💡 Use 3s self-timer + fit knees, calves &amp; both shoes inside guide outline</li>
                 </ul>
 
                 {lowerCapture ? (
@@ -816,16 +850,165 @@ export default function FEGroomingCapture({
                     className={`w-full h-full max-h-[65vh] object-contain ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`}
                   />
 
-                  {/* Alignment Guide Frame */}
-                  <div className="absolute inset-4 border-2 border-dashed border-sky-400/50 rounded-2xl pointer-events-none flex flex-col justify-between p-3">
-                    <span className="self-center px-2.5 py-0.5 rounded-full bg-black/65 text-[10px] font-bold text-sky-300 border border-sky-400/30">
-                      {activeStation === 'upper'
-                        ? 'Align Head, Shoulders, Lenskart Polo & ID Card Inside Frame'
-                        : 'Show Full Jeans & Both Shoes Clearly Inside Frame'}
-                    </span>
-                    <span className="self-center px-2.5 py-0.5 rounded bg-black/65 text-[10px] font-mono text-emerald-300">
-                      LIVE WATERMARK WILL STAMP: {todayDate} • {resolvedFeCode}
-                    </span>
+                  {/* Live Canvas Silhouette Alignment Guide Overlay (HUD only — not baked into saved photo) */}
+                  <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-2 sm:p-3">
+                    <div className="flex items-center justify-center">
+                      <span className="px-3 py-1 rounded-full bg-black/75 text-[10px] sm:text-[11px] font-bold text-sky-300 border border-sky-400/40 shadow">
+                        {activeStation === 'upper'
+                          ? 'Align Face Inside Oval + Full Chest, Solid Polo & ID Card Inside Box'
+                          : 'Frame Full Dark Blue Jeans (No Bottom Fade) + Both Plain Black Shoes'}
+                      </span>
+                    </div>
+
+                    {activeStation === 'upper' ? (
+                      <svg
+                        viewBox="0 0 400 300"
+                        preserveAspectRatio="xMidYMid meet"
+                        className="w-full h-full max-h-[54vh] opacity-90"
+                      >
+                        {/* Face Oval */}
+                        <ellipse
+                          cx="200"
+                          cy="92"
+                          rx="46"
+                          ry="60"
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth="2.5"
+                          strokeDasharray="7 5"
+                        />
+                        <text
+                          x="200"
+                          y="100"
+                          textAnchor="middle"
+                          fill="#bae6fd"
+                          fontSize="10"
+                          fontWeight="700"
+                        >
+                          FACE • HAIR • BEARD
+                        </text>
+
+                        {/* Shoulders & Full Chest Silhouette */}
+                        <path
+                          d="M 80 285 L 92 202 Q 112 168 158 162 L 242 162 Q 288 168 308 202 L 320 285"
+                          fill="rgba(14, 165, 233, 0.06)"
+                          stroke="#38bdf8"
+                          strokeWidth="2.5"
+                          strokeDasharray="8 5"
+                        />
+
+                        {/* Chest ID Badge & Lanyard Target Zone */}
+                        <rect
+                          x="166"
+                          y="188"
+                          width="68"
+                          height="56"
+                          rx="8"
+                          fill="rgba(251, 191, 36, 0.10)"
+                          stroke="#fbbf24"
+                          strokeWidth="2"
+                          strokeDasharray="5 4"
+                        />
+                        <text
+                          x="200"
+                          y="214"
+                          textAnchor="middle"
+                          fill="#fde68a"
+                          fontSize="9"
+                          fontWeight="800"
+                        >
+                          ID CARD &amp;
+                        </text>
+                        <text
+                          x="200"
+                          y="227"
+                          textAnchor="middle"
+                          fill="#fde68a"
+                          fontSize="9"
+                          fontWeight="800"
+                        >
+                          LANYARD HERE
+                        </text>
+                        <text
+                          x="200"
+                          y="270"
+                          textAnchor="middle"
+                          fill="#38bdf8"
+                          fontSize="9.5"
+                          fontWeight="700"
+                        >
+                          STEP BACK SLIGHTLY SO FULL CHEST IS VISIBLE
+                        </text>
+                      </svg>
+                    ) : (
+                      <svg
+                        viewBox="0 0 400 300"
+                        preserveAspectRatio="xMidYMid meet"
+                        className="w-full h-full max-h-[54vh] opacity-90"
+                      >
+                        {/* Legs / Dark Jeans Zone */}
+                        <path
+                          d="M 122 18 L 278 18 L 268 175 L 214 175 L 200 95 L 186 175 L 132 175 Z"
+                          fill="rgba(99, 102, 241, 0.08)"
+                          stroke="#818cf8"
+                          strokeWidth="2.5"
+                          strokeDasharray="8 5"
+                        />
+                        <text
+                          x="200"
+                          y="56"
+                          textAnchor="middle"
+                          fill="#c7d2fe"
+                          fontSize="10"
+                          fontWeight="800"
+                        >
+                          DARK BLUE JEANS ONLY (UNFADED)
+                        </text>
+
+                        {/* Left & Right Plain Black Shoes Target Zones */}
+                        <rect
+                          x="105"
+                          y="186"
+                          width="84"
+                          height="86"
+                          rx="16"
+                          fill="rgba(16, 185, 129, 0.08)"
+                          stroke="#34d399"
+                          strokeWidth="2.5"
+                          strokeDasharray="6 4"
+                        />
+                        <text x="147" y="226" textAnchor="middle" fill="#a7f3d0" fontSize="9.5" fontWeight="800">
+                          LEFT SHOE
+                        </text>
+                        <text x="147" y="241" textAnchor="middle" fill="#6ee7b7" fontSize="8.5" fontWeight="700">
+                          BLACK + BLACK LACE
+                        </text>
+
+                        <rect
+                          x="211"
+                          y="186"
+                          width="84"
+                          height="86"
+                          rx="16"
+                          fill="rgba(16, 185, 129, 0.08)"
+                          stroke="#34d399"
+                          strokeWidth="2.5"
+                          strokeDasharray="6 4"
+                        />
+                        <text x="253" y="226" textAnchor="middle" fill="#a7f3d0" fontSize="9.5" fontWeight="800">
+                          RIGHT SHOE
+                        </text>
+                        <text x="253" y="241" textAnchor="middle" fill="#6ee7b7" fontSize="8.5" fontWeight="700">
+                          BLACK + BLACK LACE
+                        </text>
+                      </svg>
+                    )}
+
+                    <div className="flex items-center justify-center">
+                      <span className="px-2.5 py-0.5 rounded bg-black/75 text-[10px] font-mono text-emerald-300 border border-emerald-500/30">
+                        LIVE WATERMARK WILL STAMP: {todayDate} • {resolvedFeCode}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Countdown Overlay */}
