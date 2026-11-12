@@ -29,6 +29,15 @@ import { exportAuditReport } from './utils/excelParser.js';
 import { getTaskSLAStatus, filterDPlusOneOverdueTasks } from './utils/slaHelper.js';
 import { getTaskBatchDateYMD } from './utils/dailyDigestHelper.js';
 import { 
+  matchesAiFilter, 
+  matchesHumanFilter, 
+  matchesCrossFilter, 
+  calculateCrossVerificationStats, 
+  getTaskCrossVerification,
+  isTaskPendingHumanReview,
+  isAiAuditorName
+} from './utils/crossVerificationHelper.js';
+import { 
   runAutoAllocationAlgorithm,
   isAiAuditedTask,
   isAwaitingHumanVerification,
@@ -153,6 +162,9 @@ export default function App() {
   const [selectedZone, setSelectedZone] = useState('ALL');
   const [selectedStatus, setSelectedStatus] = useState('ALL');
   const [selectedAuditStatus, setSelectedAuditStatus] = useState('PENDING'); // Default to PENDING queue so auditors are not demotivated by past completed tasks
+  const [selectedAiFilter, setSelectedAiFilter] = useState('ALL');
+  const [selectedHumanFilter, setSelectedHumanFilter] = useState('ALL');
+  const [selectedCrossFilter, setSelectedCrossFilter] = useState('ALL');
   const [selectedBatchDate, setSelectedBatchDate] = useState('ALL');
   const [selectedAuditorFilter, setSelectedAuditorFilter] = useState('ALL');
   const [onlyWithImages, setOnlyWithImages] = useState(false);
@@ -228,11 +240,10 @@ export default function App() {
       }
     });
 
-    // 2. Also ensure any auditor name that appears on existing tasks is included, plus AI models
-    let hasAiAuditedTasks = false;
+    // 2. Also ensure any human City Admin / auditor name that appears on existing tasks is included (STRICTLY NO AI models)
     (tasks || []).forEach(t => {
       const name = (t.assignedAuditorName || '').trim();
-      if (name) {
+      if (name && !isAiAuditorName(name)) {
         const key = name.toLowerCase();
         if (!seen.has(key)) {
           seen.add(key);
@@ -245,48 +256,21 @@ export default function App() {
         }
       }
 
-      // Check if task was audited by AI
+      // Check human auditor from auditedBy
       const auditedBy = (t.auditedBy || t.audited_by_name || '').trim();
-      const remarks = (t.remarks || t.auditor_remarks || '').toLowerCase();
-      const isAi = auditedBy.toLowerCase().includes('gemini') || 
-                   auditedBy.toLowerCase().includes('ai') || 
-                   auditedBy.toLowerCase().includes('gpt') || 
-                   auditedBy.toLowerCase().includes('claude') || 
-                   auditedBy.toLowerCase().includes('llama') || 
-                   auditedBy.toLowerCase().includes('groq') || 
-                   auditedBy.toLowerCase().includes('openrouter') || 
-                   remarks.includes('ai passed') || 
-                   remarks.includes('ai fatal') || 
-                   remarks.includes('(score:');
-
-      if (isAi) {
-        hasAiAuditedTasks = true;
-        const modelName = auditedBy || 'gemini-3.8-flash';
-        const modelKey = `ai_${modelName.toLowerCase()}`;
-        if (!seen.has(modelKey)) {
-          seen.add(modelKey);
+      if (auditedBy && !isAiAuditorName(auditedBy)) {
+        const key = auditedBy.toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
           list.push({
-            id: modelName,
-            full_name: `🤖 ${modelName} (AI)`,
-            name: modelName,
-            role: 'AI Model',
-            isAi: true
+            id: `aud_${auditedBy}`,
+            full_name: auditedBy,
+            name: auditedBy,
+            role: 'City Admin'
           });
         }
       }
     });
-
-    // Add general AI Filter option if any AI audited visits exist
-    if (hasAiAuditedTasks && !seen.has('all_ai')) {
-      seen.add('all_ai');
-      list.unshift({
-        id: 'ALL_AI',
-        full_name: '🤖 All AI Audits',
-        name: 'ALL_AI',
-        role: 'AI Filter',
-        isAi: true
-      });
-    }
 
     return list;
   }, [users, tasks]);
@@ -1287,22 +1271,23 @@ export default function App() {
   // Each auditor strictly only sees tasks allocated to them!
   // SuperAdmin and Central Ops oversee all tasks, with optional filter by specific auditor
   const visibleTasks = useMemo(() => {
-    // 1. Auditor mode: filter strictly by assigned auditor ID, email, person_id, or full name
+    // 1. Auditor mode: filter by assigned auditor ID, email, person_id, or full name
+    // Plus City Admin facility/city fallback so City Admins see audits for their city
     if (isAuditorOnly) {
       const myId = String(currentUser?.id || '').toLowerCase();
       const myAuthId = String(currentUser?.auth_user_id || '').toLowerCase();
       const myName = String(currentUser?.full_name || '').toLowerCase().trim();
       const myEmail = String(currentUser?.email || '').toLowerCase().trim();
       const myPersonId = String(currentUser?.person_id || currentUser?.employee_code || '').toLowerCase().trim();
+      const myHub = String(currentUser?.facility_code || currentUser?.city || currentUser?.hub || '').toLowerCase().trim();
+      const isCityAdmin = userRoles.includes('City Admin') || userRoles.includes('Admin');
 
       return tasks.filter(task => {
         const assignedId = String(task.assignedAuditorId || '').toLowerCase();
         const assignedName = String(task.assignedAuditorName || '').toLowerCase().trim();
         const assignedEmail = String(task.assignedAuditorEmail || '').toLowerCase().trim();
 
-        // Must be assigned to someone
-        if (!assignedId && !assignedName && !assignedEmail) return false;
-
+        // Direct assignment match
         const matchId = assignedId && (
           assignedId === myId || 
           assignedId === myAuthId || 
@@ -1315,7 +1300,21 @@ export default function App() {
           assignedName.includes(myName)
         );
 
-        return Boolean(matchId || matchEmail || matchName);
+        if (matchId || matchEmail || matchName) return true;
+
+        // City Admin facility / hub / city / zone scoping fallback
+        if (isCityAdmin && myHub) {
+          const taskHub = String(task.facilityCode || task.facility_code || task.city || task.teamName || '').toLowerCase().trim();
+          const taskZone = String(task.zone || '').toLowerCase().trim();
+          if (taskHub && (taskHub === myHub || taskHub.includes(myHub) || myHub.includes(taskHub))) {
+            return true;
+          }
+          if (taskZone && (taskZone === myHub || taskZone.includes(myHub) || myHub.includes(taskZone))) {
+            return true;
+          }
+        }
+
+        return false;
       });
     }
 
@@ -1323,13 +1322,6 @@ export default function App() {
     if (selectedAuditorFilter !== 'ALL') {
       if (selectedAuditorFilter === 'UNASSIGNED') {
         return tasks.filter(t => !t.assignedAuditorId && !t.assignedAuditorName);
-      }
-      if (selectedAuditorFilter === 'ALL_AI') {
-        return tasks.filter(t => {
-          const by = String(t.auditedBy || t.audited_by_name || '').toLowerCase();
-          const rem = String(t.remarks || t.auditor_remarks || '').toLowerCase();
-          return by.includes('gemini') || by.includes('ai') || by.includes('gpt') || by.includes('claude') || by.includes('llama') || by.includes('groq') || by.includes('openrouter') || rem.includes('ai passed') || rem.includes('ai fatal') || rem.includes('(score:');
-        });
       }
       return tasks.filter(t => {
         const tAudName = String(t.assignedAuditorName || '').toLowerCase();
@@ -1341,7 +1333,7 @@ export default function App() {
     }
 
     return tasks;
-  }, [tasks, isAuditorOnly, currentUser, selectedAuditorFilter]);
+  }, [tasks, isAuditorOnly, currentUser, selectedAuditorFilter, userRoles]);
 
   // KPI Calculations (derived from visible tasks)
   const stats = useMemo(() => {
@@ -1349,8 +1341,15 @@ export default function App() {
     const completed = visibleTasks.filter(t => t.status === 'COMPLETED').length;
     const cancelled = visibleTasks.filter(t => t.status === 'CANCELLED').length;
     const withImages = visibleTasks.filter(t => t.hasImages).length;
-    const passed = visibleTasks.filter(t => t.auditStatus === 'PASSED').length;
-    const fatal = visibleTasks.filter(t => t.auditStatus === 'FATAL').length;
+
+    // Pending: Any task pending human verification / manual audit
+    const pending = visibleTasks.filter(t => isTaskPendingHumanReview(t)).length;
+
+    // Completed Passed audits by auditor
+    const passed = visibleTasks.filter(t => !isTaskPendingHumanReview(t) && t.auditStatus === 'PASSED').length;
+
+    // Completed Fatal strikes by auditor
+    const fatal = visibleTasks.filter(t => !isTaskPendingHumanReview(t) && t.auditStatus === 'FATAL').length;
 
     // AI & Human Verification Metrics
     const aiAuditedCount = visibleTasks.filter(t => isAiAuditedTask(t)).length;
@@ -1358,8 +1357,6 @@ export default function App() {
     const humanVerifiedCount = visibleTasks.filter(t => isAiAuditedTask(t) && getHumanVerificationStatus(t) === 'VERIFIED').length;
     const humanOverturnedCount = visibleTasks.filter(t => isAiAuditedTask(t) && getHumanVerificationStatus(t) === 'OVERTURNED').length;
 
-    // Pending: Either AI audit awaiting human verification, or un-audited raw task with photos
-    const pending = visibleTasks.filter(t => isAwaitingHumanVerification(t) || (t.hasImages && (!t.auditStatus || t.auditStatus === 'PENDING'))).length;
     const auditedCount = passed + fatal;
     const fatalRate = auditedCount > 0 ? Math.round((fatal / auditedCount) * 100) : 0;
 
@@ -1455,6 +1452,11 @@ export default function App() {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [visibleTasks]);
 
+  // SuperAdmin Cross-Verification & Compliance Statistics (AI vs Auditor)
+  const crossStats = useMemo(() => {
+    return calculateCrossVerificationStats(visibleTasks);
+  }, [visibleTasks]);
+
   // Filtered Tasks for Auditing (derived from visibleTasks)
   const filteredTasks = useMemo(() => {
     return visibleTasks.filter(task => {
@@ -1486,20 +1488,42 @@ export default function App() {
         if (taskStatus !== selectedStatus.trim().toUpperCase()) return false;
       }
 
-      // 4. Audit & Verification Status Filter (PENDING / AWAITING_VERIFICATION vs PASSED vs FATAL vs VERIFIED)
+      // 4. City Auditor / Human Audit Status Filter (PENDING vs PASSED vs FATAL)
       if (selectedAuditStatus !== 'ALL') {
         const taskAuditStatus = String(task.auditStatus || task.audit_status || 'PENDING').trim().toUpperCase();
         if (selectedAuditStatus === 'PENDING' || selectedAuditStatus === 'AWAITING_VERIFICATION') {
-          // Show tasks that need action: AI audits awaiting human review, or pending raw tasks
-          const needsAction = isAwaitingHumanVerification(task) || (!task.auditStatus || task.auditStatus === 'PENDING');
-          if (!needsAction) return false;
+          // Show tasks that are pending human verification / manual audit
+          if (!isTaskPendingHumanReview(task)) return false;
         } else if (selectedAuditStatus === 'HUMAN_VERIFIED' || selectedAuditStatus === 'VERIFIED') {
           if (getHumanVerificationStatus(task) !== 'VERIFIED') return false;
         } else if (selectedAuditStatus === 'OVERTURNED') {
           if (getHumanVerificationStatus(task) !== 'OVERTURNED') return false;
+        } else if (selectedAuditStatus === 'FATAL') {
+          // Completed Fatal strikes: must not be in pending human review queue
+          if (isTaskPendingHumanReview(task)) return false;
+          if (taskAuditStatus !== 'FATAL') return false;
+        } else if (selectedAuditStatus === 'PASSED') {
+          // Completed Passed audits: must not be in pending human review queue
+          if (isTaskPendingHumanReview(task)) return false;
+          if (taskAuditStatus !== 'PASSED') return false;
         } else if (taskAuditStatus !== selectedAuditStatus.trim().toUpperCase()) {
           return false;
         }
+      }
+
+      // 4b. SuperAdmin Explicit Human Auditor Filter
+      if (canViewAiDetails && selectedHumanFilter && selectedHumanFilter !== 'ALL') {
+        if (!matchesHumanFilter(task, selectedHumanFilter)) return false;
+      }
+
+      // 4c. SuperAdmin AI Audit Status Filter
+      if (canViewAiDetails && selectedAiFilter && selectedAiFilter !== 'ALL') {
+        if (!matchesAiFilter(task, selectedAiFilter)) return false;
+      }
+
+      // 4d. SuperAdmin Cross-Verification Compliance Filter
+      if (canViewAiDetails && selectedCrossFilter && selectedCrossFilter !== 'ALL') {
+        if (!matchesCrossFilter(task, selectedCrossFilter)) return false;
       }
 
       // 5. Upload Batch Date Filter
@@ -1516,7 +1540,7 @@ export default function App() {
 
       return true;
     });
-  }, [visibleTasks, searchQuery, selectedZone, selectedStatus, selectedAuditStatus, selectedBatchDate, onlyWithImages, onlyDPlusOneOverdue]);
+  }, [visibleTasks, searchQuery, selectedZone, selectedStatus, selectedAuditStatus, selectedAiFilter, selectedHumanFilter, selectedCrossFilter, selectedBatchDate, onlyWithImages, onlyDPlusOneOverdue, canViewAiDetails]);
 
   // If user is not logged in, show dedicated Login Page
   if (!currentUser) {
@@ -1661,6 +1685,14 @@ export default function App() {
               setSelectedStatus={setSelectedStatus}
               selectedAuditStatus={selectedAuditStatus}
               setSelectedAuditStatus={setSelectedAuditStatus}
+              selectedAiFilter={selectedAiFilter}
+              setSelectedAiFilter={setSelectedAiFilter}
+              selectedHumanFilter={selectedHumanFilter}
+              setSelectedHumanFilter={setSelectedHumanFilter}
+              selectedCrossFilter={selectedCrossFilter}
+              setSelectedCrossFilter={setSelectedCrossFilter}
+              crossStats={crossStats}
+              canViewAiDetails={canViewAiDetails}
               selectedBatchDate={selectedBatchDate}
               setSelectedBatchDate={setSelectedBatchDate}
               availableBatchDates={availableBatchDates}
@@ -1690,6 +1722,9 @@ export default function App() {
                 setSelectedZone('ALL');
                 setSelectedStatus('ALL');
                 setSelectedAuditStatus('PENDING');
+                setSelectedAiFilter('ALL');
+                setSelectedHumanFilter('ALL');
+                setSelectedCrossFilter('ALL');
                 setSelectedBatchDate('ALL');
                 setSelectedAuditorFilter('ALL');
                 setOnlyWithImages(false);
@@ -1700,6 +1735,9 @@ export default function App() {
                 selectedZone !== 'ALL' || 
                 selectedStatus !== 'ALL' || 
                 selectedAuditStatus !== 'PENDING' || 
+                (canViewAiDetails && selectedAiFilter !== 'ALL') ||
+                (canViewAiDetails && selectedHumanFilter !== 'ALL') ||
+                (canViewAiDetails && selectedCrossFilter !== 'ALL') ||
                 selectedBatchDate !== 'ALL' ||
                 selectedAuditorFilter !== 'ALL' || 
                 onlyWithImages ||

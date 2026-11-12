@@ -1,10 +1,6 @@
 import React from 'react';
 import { getTaskSLAStatus } from '../utils/slaHelper.js';
-import { 
-  isAiAuditedTask, 
-  getHumanVerificationStatus, 
-  isAwaitingHumanVerification 
-} from '../lib/supabase.js';
+import { getTaskCrossVerification } from '../utils/crossVerificationHelper.js';
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -18,8 +14,7 @@ import {
   UserCheck,
   ShieldAlert,
   Sparkles,
-  CheckCheck,
-  RotateCcw
+  ArrowRightLeft
 } from 'lucide-react';
 
 // Fast normalize Locus URLs to CDN to eliminate 302 redirects
@@ -48,12 +43,9 @@ export default function TaskCardGrid({
   onQuickPass, 
   onQuickFatal, 
   onOpenEmail,
-  onConfirmAiVerdict,
-  onOverturnAiVerdict,
   canViewAiDetails = false
 }) {
   const handleAudit = onAuditTask || onInspect || (() => {});
-  const handleEmail = onOpenEmail || onInspect || onAuditTask || (() => {});
   const handlePass = onQuickPass || (() => {});
   const handleFatal = onQuickFatal || onInspect || onAuditTask || (() => {});
 
@@ -72,12 +64,10 @@ export default function TaskCardGrid({
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
       {tasks.map((task, idx) => {
-        const isFatal = task.auditStatus === 'FATAL';
-        const isPassed = task.auditStatus === 'PASSED';
-        const isPending = task.auditStatus === 'PENDING' || !task.auditStatus;
-        const isAi = Boolean(canViewAiDetails && (isAiAuditedTask(task) || Boolean(task.aiAuditStatus)));
-        const humanStatus = canViewAiDetails ? getHumanVerificationStatus(task) : null;
-        const needsVerification = Boolean(canViewAiDetails && isAwaitingHumanVerification(task));
+        const cross = getTaskCrossVerification(task);
+        const isFatal = cross.isHumanAudited && cross.humanStatus === 'FATAL';
+        const isPassed = cross.isHumanAudited && cross.humanStatus === 'PASSED';
+        const isPending = !cross.isHumanAudited || cross.humanStatus === 'PENDING';
         const hasImages = task.hasImages;
         const sla = getTaskSLAStatus(task);
         const isOverdue = sla.isOverdue;
@@ -110,39 +100,50 @@ export default function TaskCardGrid({
 
                 {/* Audit & Verification Status Badges */}
                 <div className="flex flex-col items-end gap-1">
-                  {isAi ? (
-                    <>
-                      {isPassed && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                          <Sparkles className="w-3.5 h-3.5" />
-                          🤖 AI PASS
-                        </span>
-                      )}
-                      {isFatal && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">
-                          <Sparkles className="w-3.5 h-3.5" />
-                          🤖 AI FATAL
+                  {canViewAiDetails ? (
+                    /* SuperAdmin: Shows both Auditor & AI verdicts */
+                    <div className="flex flex-col items-end gap-1">
+                      {/* Auditor Status Badge */}
+                      {cross.isHumanAudited ? (
+                        cross.humanStatus === 'PASSED' ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            <span>👤 PASSED</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40">
+                            <AlertTriangle className="w-3 h-3 text-red-400" />
+                            <span>👤 FATAL</span>
+                          </span>
+                        )
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                          <Clock className="w-2.5 h-2.5 text-amber-400" />
+                          <span>👤 Pending Auditor</span>
                         </span>
                       )}
 
-                      {humanStatus === 'VERIFIED' ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-500/30">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                          ✓ Verified
-                        </span>
-                      ) : humanStatus === 'OVERTURNED' ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-500/30">
-                          <RotateCcw className="w-3 h-3 text-amber-400" />
-                          ↺ Overruled
-                        </span>
+                      {/* AI Status Badge */}
+                      {cross.isAiAudited ? (
+                        cross.aiStatus === 'PASSED' ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-purple-300 border border-purple-500/30">
+                            <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                            <span>🤖 AI PASS</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-red-300 border border-purple-500/30">
+                            <Sparkles className="w-2.5 h-2.5 text-red-400" />
+                            <span>🤖 AI FATAL</span>
+                          </span>
+                        )
                       ) : (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
-                          <Clock className="w-3 h-3 text-amber-400" />
-                          Awaiting Review
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-slate-400 bg-slate-800 border border-slate-700">
+                          <span>🤖 Pending AI</span>
                         </span>
                       )}
-                    </>
+                    </div>
                   ) : (
+                    /* City Admin View: Blind to AI Details */
                     <>
                       {isPassed && (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
@@ -202,6 +203,61 @@ export default function TaskCardGrid({
                 </div>
               </div>
             </div>
+
+            {/* Cross-Verification Compliance Banner (SuperAdmin Only) */}
+            {canViewAiDetails && (
+              <div className="px-3 py-1.5 border-b border-slate-700/60 bg-slate-900/90 text-xs">
+                {cross.isDualAudited ? (
+                  cross.agreementStatus === 'AGREEMENT' ? (
+                    <div className="flex items-center justify-between text-emerald-300 font-bold">
+                      <span className="flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>🎯 100% Agreement Match</span>
+                      </span>
+                      <span className="font-mono text-[10px] bg-emerald-500/20 px-1.5 py-0.2 rounded text-emerald-200">
+                        {cross.matchingStations || 5}/5 Stations
+                      </span>
+                    </div>
+                  ) : cross.agreementStatus === 'AI_FP' ? (
+                    <div className="flex items-center justify-between text-amber-300 font-bold">
+                      <span className="flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                        <span>⚠️ AI False Positive: Missed Fatal</span>
+                      </span>
+                      <span className="font-mono text-[10px] bg-amber-500/20 px-1.5 py-0.2 rounded text-amber-200">
+                        {cross.complianceScore}% Match
+                      </span>
+                    </div>
+                  ) : cross.agreementStatus === 'AI_FN' ? (
+                    <div className="flex items-center justify-between text-rose-300 font-bold">
+                      <span className="flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                        <span>⚠️ AI False Negative: Over-flagged</span>
+                      </span>
+                      <span className="font-mono text-[10px] bg-rose-500/20 px-1.5 py-0.2 rounded text-rose-200">
+                        {cross.complianceScore}% Match
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between text-slate-300 font-bold">
+                      <span>Discrepancy</span>
+                      <span className="font-mono text-[10px] bg-slate-800 px-1.5 py-0.2 rounded">
+                        {cross.complianceScore}% Match
+                      </span>
+                    </div>
+                  )
+                ) : (
+                  <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                    <span>
+                      {cross.isHumanAudited ? '⏳ Dual Audit: Awaiting AI' : cross.isAiAudited ? '⏳ Dual Audit: Awaiting Auditor' : '⏳ Dual Audit: Unaudited'}
+                    </span>
+                    <span className="font-mono text-[10px] bg-slate-800 px-1.5 py-0.2 rounded text-slate-400">
+                      {cross.isHumanAudited || cross.isAiAudited ? '1/2 Done' : '0/2 Done'}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Media Preview Gallery */}
             <div className="p-4 bg-slate-900/60 flex-1">
@@ -352,37 +408,15 @@ export default function TaskCardGrid({
                   </div>
                 )}
                 <div className="flex items-center justify-between pt-1 border-t border-slate-800/60 mt-1">
-                  <span className="text-slate-500">Auditor:</span>
-                  {(() => {
-                    const auditedBy = task.auditedBy || task.audited_by_name || '';
-                    const remarks = (task.remarks || task.auditor_remarks || '').toLowerCase();
-                    const isAi = auditedBy.toLowerCase().includes('gemini') || 
-                                 auditedBy.toLowerCase().includes('ai') || 
-                                 remarks.includes('ai passed') || 
-                                 remarks.includes('ai fatal') || 
-                                 remarks.includes('(score:');
-
-                    if (isAi) {
-                      const modelDisplay = auditedBy || 'gemini-3.8-flash';
-                      return (
-                        <span className="font-bold text-sky-300 flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-sky-950/80 border border-sky-500/40 shadow-sm" title={`Audited autonomously by AI Model: ${modelDisplay}`}>
-                          <Sparkles className="w-3 h-3 text-sky-400 shrink-0" />
-                          <span>{modelDisplay}</span>
-                        </span>
-                      );
-                    }
-
-                    if (task.assignedAuditorName) {
-                      return (
-                        <span className="font-semibold text-sky-400 flex items-center gap-1 text-[10px]">
-                          <UserCheck className="w-3 h-3" />
-                          {task.assignedAuditorName}
-                        </span>
-                      );
-                    }
-
-                    return <span className="text-slate-500 italic text-[10px]">Unassigned</span>;
-                  })()}
+                  <span className="text-slate-500">Reviewer:</span>
+                  {task.assignedAuditorName ? (
+                    <span className="font-semibold text-sky-400 flex items-center gap-1 text-[10px]">
+                      <UserCheck className="w-3 h-3" />
+                      {task.assignedAuditorName}
+                    </span>
+                  ) : (
+                    <span className="text-slate-500 italic text-[10px]">Unassigned</span>
+                  )}
                 </div>
                 {isFatal && task.failedReasons.length > 0 && (
                   <div className="mt-2 p-2 rounded bg-red-950/40 border border-red-500/30 text-[10px] text-red-300">
@@ -400,39 +434,18 @@ export default function TaskCardGrid({
                 className="flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
               >
                 <Eye className="w-3.5 h-3.5" />
-                <span>{(isAi && !isPending && needsVerification) ? 'Verify AI Verdict' : 'Audit Images'}</span>
+                <span>Audit Images</span>
               </button>
 
-              {isAi && needsVerification ? (
-                <div className="flex items-center space-x-1.5">
-                  <button
-                    onClick={() => onConfirmAiVerdict?.(task.id)}
-                    className="p-1.5 rounded-lg text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 border border-slate-700 bg-slate-900 transition-colors cursor-pointer"
-                    title="Confirm AI Verdict (1-Click Verification)"
-                  >
-                    <CheckCheck className="w-4 h-4 text-emerald-400" />
-                  </button>
-                  <button
-                    onClick={() => {
-                      const targetV = isFatal ? 'PASS' : 'FATAL';
-                      const reason = prompt(`Enter reason to overturn AI ${isFatal ? 'FATAL to PASS' : 'PASS to FATAL'}:`, 'Overturned upon visual inspection by reviewer');
-                      if (reason) onOverturnAiVerdict?.(task.id, targetV, reason);
-                    }}
-                    className="p-1.5 rounded-lg text-slate-300 hover:text-amber-400 hover:bg-amber-500/10 border border-slate-700 bg-slate-900 transition-colors cursor-pointer"
-                    title={isFatal ? "Overturn AI Fatal to PASS" : "Overturn AI Pass to FATAL"}
-                  >
-                    <RotateCcw className="w-4 h-4 text-amber-400" />
-                  </button>
-                </div>
-              ) : isFatal ? (
+              {isFatal ? (
                 <span
                   className="py-1.5 px-3 rounded-lg text-xs font-semibold bg-red-500/10 text-red-400 border border-red-500/20 flex items-center gap-1 select-none"
-                  title="Fatal strike recorded. Email notices dispatched strictly via Mail Dispatch."
+                  title="Fatal strike recorded"
                 >
                   <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
                   Fatal
                 </span>
-              ) : (
+              ) : !isPassed ? (
                 <div className="flex items-center space-x-1">
                   <button
                     onClick={() => handlePass(task)}
@@ -449,7 +462,7 @@ export default function TaskCardGrid({
                     <AlertTriangle className="w-4 h-4" />
                   </button>
                 </div>
-              )}
+              ) : null}
             </div>
 
           </div>

@@ -517,8 +517,14 @@ export function runAutoAllocationAlgorithm({
   } else if (targetMode === 'ALL_PENDING') {
     actionablePool = rawPendingPool;
   } else {
-    // Default AI_VERIFICATION: Prioritize AI-audited verification queue, fallback to raw if none
-    actionablePool = aiAwaitingPool.length > 0 ? aiAwaitingPool : rawPendingPool;
+    // Default: Combine both AI-audited tasks awaiting human verification and raw pending tasks
+    const combined = [...aiAwaitingPool];
+    rawPendingPool.forEach(rp => {
+      if (!combined.some(t => t.id === rp.id)) {
+        combined.push(rp);
+      }
+    });
+    actionablePool = combined;
   }
 
   // 3. Filter available auditors who are not on leave
@@ -600,11 +606,23 @@ export function runAutoAllocationAlgorithm({
       });
 
       const nextAuditorId = sortedAuditorIds[0];
-      const taskToAssign = unassignedQueue.shift();
+      const nextAuditor = auditorWorkloads[nextAuditorId].auditor;
+      const targetHub = String(nextAuditor.facility_code || nextAuditor.city || nextAuditor.hub || '').toLowerCase().trim();
 
-      taskToAssign.assignedAuditorId = auditorWorkloads[nextAuditorId].auditor.id;
-      taskToAssign.assignedAuditorName = auditorWorkloads[nextAuditorId].auditor.full_name || auditorWorkloads[nextAuditorId].auditor.name;
-      taskToAssign.assignedAuditorEmail = auditorWorkloads[nextAuditorId].auditor.email || null;
+      // City Admin Prioritization: Match tasks by city / hub first
+      let taskIndex = -1;
+      if (targetHub) {
+        taskIndex = unassignedQueue.findIndex(t => {
+          const tHub = String(t.facilityCode || t.facility_code || t.city || t.teamName || t.zone || '').toLowerCase().trim();
+          return tHub && (tHub === targetHub || tHub.includes(targetHub) || targetHub.includes(tHub));
+        });
+      }
+
+      const taskToAssign = taskIndex >= 0 ? unassignedQueue.splice(taskIndex, 1)[0] : unassignedQueue.shift();
+
+      taskToAssign.assignedAuditorId = nextAuditor.id;
+      taskToAssign.assignedAuditorName = nextAuditor.full_name || nextAuditor.name;
+      taskToAssign.assignedAuditorEmail = nextAuditor.email || null;
       taskToAssign.allocatedAt = new Date().toISOString();
       taskToAssign.allocationBatchId = batchId;
 

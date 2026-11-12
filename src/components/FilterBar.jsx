@@ -9,7 +9,14 @@ import {
   MapPin,
   Calendar,
   UserCheck,
-  AlertTriangle
+  AlertTriangle,
+  Sparkles,
+  ShieldAlert,
+  ShieldCheck,
+  CheckCircle2,
+  Clock,
+  ArrowRightLeft,
+  SlidersHorizontal
 } from 'lucide-react';
 
 export default function FilterBar({
@@ -21,6 +28,14 @@ export default function FilterBar({
   setSelectedStatus,
   selectedAuditStatus,
   setSelectedAuditStatus,
+  selectedAiFilter = 'ALL',
+  setSelectedAiFilter,
+  selectedHumanFilter = 'ALL',
+  setSelectedHumanFilter,
+  selectedCrossFilter = 'ALL',
+  setSelectedCrossFilter,
+  crossStats,
+  canViewAiDetails = false,
   selectedBatchDate = 'ALL',
   setSelectedBatchDate,
   availableBatchDates = [],
@@ -54,46 +69,35 @@ export default function FilterBar({
       {/* Top Row: Quick Queue Switcher (Auditor Focus: Pending Review vs Completed History) */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-700/60">
         <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Queue:</span>
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">
+            {canViewAiDetails ? 'Auditor Queue:' : 'Queue:'}
+          </span>
           
+          {/* Pending Manual Audit */}
           <button
-            onClick={() => setSelectedAuditStatus('PENDING')}
+            onClick={() => {
+              setSelectedAuditStatus('PENDING');
+              if (setSelectedHumanFilter) setSelectedHumanFilter('ALL');
+            }}
             className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              selectedAuditStatus === 'PENDING' || selectedAuditStatus === 'AWAITING_VERIFICATION'
+              selectedAuditStatus === 'PENDING'
                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm ring-1 ring-amber-500/30'
                 : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-amber-300 hover:border-slate-600'
             }`}
-            title="Focus strictly on AI-audited tasks awaiting Human Verification"
+            title="Focus on tasks awaiting manual audit by City Auditor"
           >
-            <span>⚡ Awaiting Review</span>
+            <Clock className="w-3.5 h-3.5 text-amber-400" />
+            <span>⚡ Pending Audit</span>
             {pendingCount > 0 && (
               <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
-                selectedAuditStatus === 'PENDING' || selectedAuditStatus === 'AWAITING_VERIFICATION' ? 'bg-amber-400/20 text-amber-200' : 'bg-slate-800 text-slate-300'
+                selectedAuditStatus === 'PENDING' ? 'bg-amber-400/20 text-amber-200' : 'bg-slate-800 text-slate-300'
               }`}>
                 {pendingCount}
               </span>
             )}
           </button>
 
-          <button
-            onClick={() => setSelectedAuditStatus('VERIFIED')}
-            className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-              selectedAuditStatus === 'VERIFIED' || selectedAuditStatus === 'HUMAN_VERIFIED'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm ring-1 ring-emerald-500/30'
-                : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-emerald-300 hover:border-slate-600'
-            }`}
-            title="View tasks confirmed by human verification"
-          >
-            <span>✓ Human Verified</span>
-            {verifiedCount > 0 && (
-              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
-                selectedAuditStatus === 'VERIFIED' ? 'bg-emerald-400/20 text-emerald-200' : 'bg-slate-800 text-slate-300'
-              }`}>
-                {verifiedCount}
-              </span>
-            )}
-          </button>
-
+          {/* All Tasks */}
           <button
             onClick={() => setSelectedAuditStatus('ALL')}
             className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
@@ -111,16 +115,21 @@ export default function FilterBar({
             </span>
           </button>
 
+          {/* Auditor Fatal Strikes */}
           <button
-            onClick={() => setSelectedAuditStatus('FATAL')}
+            onClick={() => {
+              setSelectedAuditStatus('FATAL');
+              if (setSelectedHumanFilter) setSelectedHumanFilter('ALL');
+            }}
             className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
               selectedAuditStatus === 'FATAL'
                 ? 'bg-red-500/20 text-red-300 border border-red-500/50 shadow-sm ring-1 ring-red-500/30'
                 : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-red-300 hover:border-slate-600'
             }`}
-            title="View only FATAL strikes"
+            title="View tasks failed by Auditor (FATAL strikes)"
           >
-            <span>❌ Fatal Strikes</span>
+            <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+            <span>❌ Auditor Fatal</span>
             {fatalCount > 0 && (
               <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
                 selectedAuditStatus === 'FATAL' ? 'bg-red-400/20 text-red-200' : 'bg-slate-800 text-slate-300'
@@ -130,16 +139,21 @@ export default function FilterBar({
             )}
           </button>
 
+          {/* Auditor Passed */}
           <button
-            onClick={() => setSelectedAuditStatus('PASSED')}
+            onClick={() => {
+              setSelectedAuditStatus('PASSED');
+              if (setSelectedHumanFilter) setSelectedHumanFilter('ALL');
+            }}
             className={`px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
               selectedAuditStatus === 'PASSED'
                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-sm ring-1 ring-emerald-500/30'
                 : 'bg-slate-900/80 text-slate-400 border border-slate-700/80 hover:text-emerald-300 hover:border-slate-600'
             }`}
-            title="View passed audits"
+            title="View tasks passed by Auditor"
           >
-            <span>✅ Passed</span>
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span>✅ Auditor Passed</span>
             {passedCount > 0 && (
               <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
                 selectedAuditStatus === 'PASSED' ? 'bg-emerald-400/20 text-emerald-200' : 'bg-slate-800 text-slate-300'
@@ -151,7 +165,7 @@ export default function FilterBar({
         </div>
 
         {/* Auditor Queue Tag */}
-        {isAuditorOnly && (
+        {isAuditorOnly ? (
           <div 
             className="flex items-center bg-blue-500/10 border border-blue-500/30 rounded-lg px-2.5 py-1 text-xs font-bold text-sky-300"
             title="City Admins strictly see tasks allocated to their personal queue"
@@ -159,8 +173,167 @@ export default function FilterBar({
             <UserCheck className="w-3.5 h-3.5 text-sky-400 mr-1.5" />
             <span>My Allocated Queue Only{currentUserName ? ` (${currentUserName})` : ''}</span>
           </div>
-        )}
+        ) : canViewAiDetails && crossStats ? (
+          /* SuperAdmin Dual-Audit KPI Indicator */
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 bg-purple-950/40 border border-purple-500/30 rounded-lg px-2.5 py-1 text-xs text-purple-200" title="AI vs Auditor Cross-Verification Calibration">
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              <span className="font-semibold">AI Audited:</span>
+              <span className="font-mono font-bold text-purple-300">{crossStats.aiAuditedCount}</span>
+              <span className="text-slate-400 text-[10px]">({crossStats.aiPassedCount} P • {crossStats.aiFatalCount} F)</span>
+            </div>
+
+            <div className="flex items-center gap-1.5 bg-sky-950/40 border border-sky-500/30 rounded-lg px-2.5 py-1 text-xs text-sky-200" title="Cross-Verification Agreement on Dual-Audited Tasks">
+              <ArrowRightLeft className="w-3.5 h-3.5 text-sky-400" />
+              <span className="font-semibold">Dual Audited:</span>
+              <span className="font-mono font-bold text-sky-300">{crossStats.dualAuditedCount}</span>
+              {crossStats.dualAuditedCount > 0 && (
+                <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded font-mono ${
+                  crossStats.agreementRate >= 90 ? 'bg-emerald-500/20 text-emerald-300' :
+                  crossStats.agreementRate >= 75 ? 'bg-amber-500/20 text-amber-300' : 'bg-red-500/20 text-red-300'
+                }`}>
+                  {crossStats.agreementRate}% Agreement ({crossStats.dualAgreedCount} Match)
+                </span>
+              )}
+            </div>
+          </div>
+        ) : null}
       </div>
+
+      {/* SuperAdmin AI & Cross-Verification Command Strip (Hidden from City Admins) */}
+      {canViewAiDetails && (
+        <div className="flex flex-wrap items-center gap-2 p-2 bg-slate-900/90 border border-purple-500/30 rounded-lg text-xs shadow-inner">
+          <div className="flex items-center gap-1 text-[11px] font-bold text-purple-300 uppercase tracking-wider mr-1">
+            <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+            <span>SuperAdmin Audit Controls:</span>
+          </div>
+
+          {/* 1. AI Audit Filter */}
+          <div className="flex items-center bg-slate-800 border border-purple-500/40 hover:border-purple-400 rounded-lg px-2 py-1 shadow-sm">
+            <span className="text-[11px] text-purple-300 font-semibold mr-1.5 shrink-0 flex items-center gap-1">
+              🤖 AI Audit:
+            </span>
+            <select
+              value={selectedAiFilter}
+              onChange={(e) => setSelectedAiFilter && setSelectedAiFilter(e.target.value)}
+              className="bg-transparent text-xs text-purple-100 font-medium focus:outline-none cursor-pointer pr-1"
+              title="Filter tasks by AI audit status & verdict"
+            >
+              <option value="ALL" className="bg-slate-900 text-white font-bold">All AI Status ({crossStats?.total || 0})</option>
+              <option value="AI_AUDITED" className="bg-slate-900 text-purple-300 font-semibold">
+                Audited by AI ({crossStats?.aiAuditedCount || 0})
+              </option>
+              <option value="AI_PENDING" className="bg-slate-900 text-amber-300">
+                Pending AI ({crossStats?.aiPendingCount || 0})
+              </option>
+              <option value="AI_PASSED" className="bg-slate-900 text-emerald-300">
+                AI PASSED ({crossStats?.aiPassedCount || 0})
+              </option>
+              <option value="AI_FATAL" className="bg-slate-900 text-red-300">
+                AI FATAL ({crossStats?.aiFatalCount || 0})
+              </option>
+            </select>
+          </div>
+
+          {/* 2. Human Auditor Audit Filter */}
+          <div className="flex items-center bg-slate-800 border border-sky-500/40 hover:border-sky-400 rounded-lg px-2 py-1 shadow-sm">
+            <span className="text-[11px] text-sky-300 font-semibold mr-1.5 shrink-0 flex items-center gap-1">
+              👤 Auditor Status:
+            </span>
+            <select
+              value={selectedHumanFilter}
+              onChange={(e) => setSelectedHumanFilter && setSelectedHumanFilter(e.target.value)}
+              className="bg-transparent text-xs text-sky-100 font-medium focus:outline-none cursor-pointer pr-1"
+              title="Filter by City Auditor verdict (Distinguished from AI verdict)"
+            >
+              <option value="ALL" className="bg-slate-900 text-white font-bold">All Auditor Status</option>
+              <option value="HUMAN_AUDITED" className="bg-slate-900 text-sky-300 font-semibold">
+                Audited by Auditor ({crossStats?.humanAuditedCount || 0})
+              </option>
+              <option value="HUMAN_PENDING" className="bg-slate-900 text-amber-300">
+                Pending Auditor ({crossStats?.humanPendingCount || 0})
+              </option>
+              <option value="HUMAN_PASSED" className="bg-slate-900 text-emerald-300">
+                Auditor PASSED ({crossStats?.humanPassedCount || 0})
+              </option>
+              <option value="HUMAN_FATAL" className="bg-slate-900 text-red-300">
+                Auditor FATAL ({crossStats?.humanFatalCount || 0})
+              </option>
+            </select>
+          </div>
+
+          {/* 3. Cross-Verification Compliance Filter */}
+          <div className="flex items-center bg-slate-800 border border-emerald-500/40 hover:border-emerald-400 rounded-lg px-2 py-1 shadow-sm">
+            <span className="text-[11px] text-emerald-300 font-semibold mr-1.5 shrink-0 flex items-center gap-1">
+              🎯 Cross-Verification:
+            </span>
+            <select
+              value={selectedCrossFilter}
+              onChange={(e) => setSelectedCrossFilter && setSelectedCrossFilter(e.target.value)}
+              className="bg-transparent text-xs text-emerald-100 font-medium focus:outline-none cursor-pointer pr-1"
+              title="Filter tasks by compliance agreement between Auditor and AI verdicts"
+            >
+              <option value="ALL" className="bg-slate-900 text-white font-bold">All Cross-Check Status</option>
+              <option value="DUAL_AUDITED" className="bg-slate-900 text-sky-300 font-semibold">
+                Both Audited ({crossStats?.dualAuditedCount || 0})
+              </option>
+              <option value="AGREEMENT" className="bg-slate-900 text-emerald-300 font-bold">
+                🎯 100% Agreement / Match ({crossStats?.dualAgreedCount || 0})
+              </option>
+              <option value="DISCREPANCY" className="bg-slate-900 text-rose-300 font-bold">
+                ⚠️ Discrepancy Mismatch ({crossStats?.dualDiscrepancyCount || 0})
+              </option>
+              <option value="AI_FP" className="bg-slate-900 text-amber-300">
+                ⚠️ AI False Positive: Missed Fatal ({crossStats?.aiFpCount || 0})
+              </option>
+              <option value="AI_FN" className="bg-slate-900 text-red-300">
+                ⚠️ AI False Negative: Over-flagged ({crossStats?.aiFnCount || 0})
+              </option>
+              <option value="HIGH_COMPLIANCE" className="bg-slate-900 text-emerald-300">
+                High Station Compliance (≥80%)
+              </option>
+              <option value="LOW_COMPLIANCE" className="bg-slate-900 text-rose-300">
+                Low Station Compliance (&lt;80%)
+              </option>
+              <option value="PENDING_DUAL" className="bg-slate-900 text-slate-400">
+                Pending Dual Audit (1/2 or 0/2)
+              </option>
+            </select>
+          </div>
+
+          {/* Quick Discrepancy Alert Badges */}
+          {crossStats?.dualDiscrepancyCount > 0 && (
+            <div className="flex items-center gap-1.5 ml-auto">
+              {crossStats.aiFpCount > 0 && (
+                <button
+                  onClick={() => setSelectedCrossFilter && setSelectedCrossFilter('AI_FP')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold border transition-all cursor-pointer ${
+                    selectedCrossFilter === 'AI_FP'
+                      ? 'bg-amber-500/30 text-amber-200 border-amber-400'
+                      : 'bg-amber-950/40 text-amber-300 border-amber-500/30 hover:bg-amber-900/40'
+                  }`}
+                  title="Filter to AI False Positives (City Auditor found Fatal, but AI Passed)"
+                >
+                  FP (Missed): {crossStats.aiFpCount}
+                </button>
+              )}
+              {crossStats.aiFnCount > 0 && (
+                <button
+                  onClick={() => setSelectedCrossFilter && setSelectedCrossFilter('AI_FN')}
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold border transition-all cursor-pointer ${
+                    selectedCrossFilter === 'AI_FN'
+                      ? 'bg-rose-500/30 text-rose-200 border-rose-400'
+                      : 'bg-rose-950/40 text-rose-300 border-rose-500/30 hover:bg-rose-900/40'
+                  }`}
+                  title="Filter to AI False Negatives (City Auditor Passed, but AI flagged Fatal)"
+                >
+                  FN (Over-flagged): {crossStats.aiFnCount}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Main Filter Controls Row */}
       <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">

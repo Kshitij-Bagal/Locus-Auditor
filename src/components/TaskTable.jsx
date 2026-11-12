@@ -1,10 +1,6 @@
 import React from 'react';
 import { getTaskSLAStatus } from '../utils/slaHelper.js';
-import { 
-  isAiAuditedTask, 
-  getHumanVerificationStatus, 
-  isAwaitingHumanVerification 
-} from '../lib/supabase.js';
+import { getTaskCrossVerification } from '../utils/crossVerificationHelper.js';
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -12,17 +8,15 @@ import {
   Eye, 
   Mail, 
   Copy, 
-  ExternalLink,
-  Clock,
-  MapPin,
-  Check,
-  CheckCheck,
-  RotateCcw,
-  XCircle,
-  HelpCircle,
-  UserCheck,
-  ShieldAlert,
-  Sparkles
+  Check, 
+  CheckCheck, 
+  RotateCcw, 
+  Clock, 
+  MapPin, 
+  UserCheck, 
+  ShieldAlert, 
+  Sparkles,
+  ArrowRightLeft
 } from 'lucide-react';
 
 export default function TaskTable({ 
@@ -40,7 +34,6 @@ export default function TaskTable({
   const [copiedId, setCopiedId] = React.useState(null);
 
   const handleAudit = onAuditTask || onInspect || (() => {});
-  const handleEmail = onOpenEmail || onInspect || onAuditTask || (() => {});
   const handlePass = onQuickPass || (() => {});
   const handleFatal = onQuickFatal || onInspect || onAuditTask || (() => {});
 
@@ -76,7 +69,19 @@ export default function TaskTable({
               <th className="py-3 px-4">Task Status</th>
               <th className="py-3 px-4">Audit Images</th>
               <th className="py-3 px-4">Assigned Reviewer</th>
-              <th className="py-3 px-4">AI Audit & Verification</th>
+
+              {/* SuperAdmin View: Separate Auditor Verdict, AI Verdict & Cross-Verification */}
+              {canViewAiDetails ? (
+                <>
+                  <th className="py-3 px-4">👤 Auditor Verdict</th>
+                  <th className="py-3 px-4">🤖 AI Verdict</th>
+                  <th className="py-3 px-4">🎯 Cross-Verification</th>
+                </>
+              ) : (
+                /* City Admin View: Blind to AI Details */
+                <th className="py-3 px-4">Audit Status</th>
+              )}
+
               <th className="py-3 px-4 text-right">Actions</th>
             </tr>
           </thead>
@@ -84,12 +89,11 @@ export default function TaskTable({
             {tasks.map((task, idx) => {
               const isSelected = selectedTaskId === task.id;
               const hasImages = task.hasImages;
-              const isFatal = task.auditStatus === 'FATAL';
-              const isPassed = task.auditStatus === 'PASSED';
-              const isPending = task.auditStatus === 'PENDING' || !task.auditStatus;
-              const isAi = Boolean(canViewAiDetails && (isAiAuditedTask(task) || Boolean(task.aiAuditStatus)));
-              const humanStatus = canViewAiDetails ? getHumanVerificationStatus(task) : null;
-              const needsVerification = Boolean(canViewAiDetails && isAwaitingHumanVerification(task));
+              const cross = getTaskCrossVerification(task);
+              const isFatal = cross.isHumanAudited && cross.humanStatus === 'FATAL';
+              const isPassed = cross.isHumanAudited && cross.humanStatus === 'PASSED';
+              const isPending = !cross.isHumanAudited || cross.humanStatus === 'PENDING';
+              
               const sla = getTaskSLAStatus(task);
               const isOverdue = sla.isOverdue;
 
@@ -238,165 +242,199 @@ export default function TaskTable({
                     )}
                   </td>
 
-                  {/* 7. Assigned Reviewer & AI Auditor */}
+                  {/* 7. Assigned Reviewer */}
                   <td className="py-3.5 px-4 whitespace-nowrap">
-                    <div className="flex flex-col gap-1">
-                      {task.assignedAuditorName ? (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-sky-500/10 text-sky-300 border border-sky-500/20 w-fit">
-                          <UserCheck className="w-3 h-3 text-sky-400" />
-                          <span>{task.assignedAuditorName}</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700 w-fit">
-                          Unassigned Reviewer
-                        </span>
-                      )}
-
-                      {canViewAiDetails && (
-                        task.aiAuditStatus ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-950/60 border border-purple-500/30 px-1.5 py-0.2 rounded w-fit" title={`Audited by AI: ${task.aiAuditorName || 'AI'}`}>
-                            <Sparkles className="w-2.5 h-2.5 text-purple-400" />
-                            <span>AI: {task.aiAuditStatus}</span>
-                          </span>
-                        ) : isAi ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-950/60 border border-purple-500/30 px-1.5 py-0.2 rounded w-fit" title={`Audited by AI Model: ${task.auditedBy || 'AI'}`}>
-                            <Sparkles className="w-2.5 h-2.5 text-purple-400" />
-                            <span>AI: {task.auditedBy || 'gemini-3.8-flash'}</span>
-                          </span>
-                        ) : null
-                      )}
-                    </div>
+                    {task.assignedAuditorName ? (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-sky-500/10 text-sky-300 border border-sky-500/20 w-fit">
+                        <UserCheck className="w-3 h-3 text-sky-400" />
+                        <span>{task.assignedAuditorName}</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700 w-fit">
+                        Unassigned Reviewer
+                      </span>
+                    )}
                   </td>
 
-                  {/* 8. AI Audit & Verification Status */}
-                  <td className="py-3.5 px-4 whitespace-nowrap">
-                    {isAi ? (
-                      <div className="space-y-1">
-                        {/* Initial AI Verdict */}
-                        <div className="flex items-center gap-1.5">
-                          {isPassed && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                              <Sparkles className="w-3 h-3 text-emerald-400" />
-                              🤖 AI PASS
-                            </span>
-                          )}
-                          {isFatal && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-red-500/20 text-red-300 border border-red-500/40">
-                              <Sparkles className="w-3 h-3 text-red-400" />
-                              🤖 AI FATAL
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Human Verification Badge */}
-                        <div>
-                          {humanStatus === 'VERIFIED' ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/30">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                              ✓ Human Verified
-                            </span>
-                          ) : humanStatus === 'OVERTURNED' ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500/30">
-                              <RotateCcw className="w-3 h-3 text-amber-400" />
-                              ↺ Overturned
-                            </span>
-                          ) : humanStatus === 'REAUDIT' ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950/80 text-rose-300 border border-rose-500/30">
-                              <AlertTriangle className="w-3 h-3 text-rose-400" />
-                              ⚠️ Needs Re-Audit
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 animate-pulse">
-                              <Clock className="w-3 h-3 text-amber-400" />
-                              ⏳ Awaiting Verification
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      /* Non-AI Task Audit Status */
-                      <div>
-                        {isPassed && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            PASSED
-                          </span>
-                        )}
-                        {isFatal && (
-                          <div>
-                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">
-                              <AlertTriangle className="w-3.5 h-3.5" />
-                              FATAL
-                            </span>
-                            {task.emailSent && (
-                              <div className="text-[10px] text-red-300 flex items-center gap-1 mt-0.5 font-medium">
-                                <Mail className="w-3 h-3 text-red-400" />
-                                Notice Sent
+                  {/* SuperAdmin Detailed View */}
+                  {canViewAiDetails ? (
+                    <>
+                      {/* 8. City Auditor Verdict */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {cross.isHumanAudited ? (
+                          <div className="space-y-0.5">
+                            {cross.humanStatus === 'PASSED' ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>PASSED</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40">
+                                <AlertTriangle className="w-3 h-3 text-red-400" />
+                                <span>FATAL</span>
+                              </span>
+                            )}
+                            {cross.humanAuditorName && (
+                              <div className="text-[10px] text-slate-400 truncate max-w-[120px]" title={cross.humanAuditorName}>
+                                by {cross.humanAuditorName}
                               </div>
                             )}
                           </div>
-                        )}
-                        {isPending && (
+                        ) : (
                           <div>
                             {isOverdue ? (
-                              <div className="space-y-1">
-                                <span 
-                                  title={`SLA Breached (+${sla.hoursOverdue}h): Escalated to Business Head (BH) & General Manager (GM)`}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse"
-                                >
-                                  <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
-                                  <span>{sla.slaLabel}</span>
-                                </span>
-                                <div className="text-[10px] text-red-400 font-semibold flex items-center gap-1">
-                                  <span>⚠️ Escalated: BH & GM</span>
-                                </div>
-                              </div>
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse">
+                                <AlertTriangle className="w-3 h-3 text-red-400" />
+                                <span>{sla.slaLabel}</span>
+                              </span>
                             ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                                <Clock className="w-3.5 h-3.5" />
-                                {hasImages ? 'Needs Audit' : 'Pending'}
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                                <Clock className="w-3 h-3 text-amber-400" />
+                                <span>Pending Auditor</span>
                               </span>
                             )}
                           </div>
                         )}
-                      </div>
-                    )}
-                  </td>
+                      </td>
 
-                  {/* 9. Actions */}
+                      {/* 9. AI Verdict */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {cross.isAiAudited ? (
+                          <div className="space-y-0.5">
+                            {cross.aiStatus === 'PASSED' ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                <Sparkles className="w-3 h-3 text-emerald-400" />
+                                <span>AI PASS</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black bg-red-500/20 text-red-300 border border-red-500/40">
+                                <Sparkles className="w-3 h-3 text-red-400" />
+                                <span>AI FATAL</span>
+                              </span>
+                            )}
+                            {cross.aiConfidenceScore !== null && (
+                              <div className="text-[10px] font-mono text-purple-300">
+                                {cross.aiConfidenceScore}% Conf
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-800 text-slate-400 border border-slate-700">
+                            <Sparkles className="w-3 h-3 text-slate-500" />
+                            <span>Pending AI</span>
+                          </span>
+                        )}
+                      </td>
+
+                      {/* 10. Cross-Verification Compliance Score */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {cross.isDualAudited ? (
+                          <div className="space-y-1">
+                            {cross.agreementStatus === 'AGREEMENT' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-500/40">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>100% Match ({cross.matchingStations || 5}/5)</span>
+                              </span>
+                            ) : cross.agreementStatus === 'AI_FP' ? (
+                              <div className="space-y-0.5">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-500/40" title="Auditor marked FATAL, but AI passed (AI Missed Fatal Violation)">
+                                  <AlertTriangle className="w-3 h-3 text-amber-400" />
+                                  <span>AI FP: Missed Fatal</span>
+                                </span>
+                                {cross.complianceScore !== null && (
+                                  <div className="text-[10px] font-mono text-amber-300 font-semibold">
+                                    {cross.complianceScore}% Stations Match
+                                  </div>
+                                )}
+                              </div>
+                            ) : cross.agreementStatus === 'AI_FN' ? (
+                              <div className="space-y-0.5">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-500/40" title="Auditor marked PASSED, but AI marked FATAL (AI Over-flagged)">
+                                  <AlertTriangle className="w-3 h-3 text-rose-400" />
+                                  <span>AI FN: Over-flagged</span>
+                                </span>
+                                {cross.complianceScore !== null && (
+                                  <div className="text-[10px] font-mono text-rose-300 font-semibold">
+                                    {cross.complianceScore}% Stations Match
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                                <span>{cross.complianceScore}% Match</span>
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-slate-400 bg-slate-900 border border-slate-800">
+                            <span>{cross.isHumanAudited ? '⏳ Awaiting AI' : cross.isAiAudited ? '⏳ Awaiting Auditor' : '⏳ Unaudited'}</span>
+                          </span>
+                        )}
+                      </td>
+                    </>
+                  ) : (
+                    /* Standard City Admin View (Zero AI Details) */
+                    <td className="py-3.5 px-4 whitespace-nowrap">
+                      {isPassed && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          PASSED
+                        </span>
+                      )}
+                      {isFatal && (
+                        <div>
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse">
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                            FATAL
+                          </span>
+                          {task.emailSent && (
+                            <div className="text-[10px] text-red-300 flex items-center gap-1 mt-0.5 font-medium">
+                              <Mail className="w-3 h-3 text-red-400" />
+                              Notice Sent
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {isPending && (
+                        <div>
+                          {isOverdue ? (
+                            <div className="space-y-1">
+                              <span 
+                                title={`SLA Breached (+${sla.hoursOverdue}h): Escalated to Business Head (BH) & General Manager (GM)`}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-black bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse"
+                              >
+                                <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                                <span>{sla.slaLabel}</span>
+                              </span>
+                              <div className="text-[10px] text-red-400 font-semibold flex items-center gap-1">
+                                <span>⚠️ Escalated: BH & GM</span>
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                              <Clock className="w-3.5 h-3.5" />
+                              {hasImages ? 'Needs Audit' : 'Pending'}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  )}
+
+                  {/* Actions Column */}
                   <td className="py-3.5 px-4 whitespace-nowrap text-right">
                     <div className="flex items-center justify-end space-x-1.5" onClick={(e) => e.stopPropagation()}>
                       <button
                         onClick={() => handleAudit(task)}
                         className="px-2.5 py-1 rounded-md text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white shadow-sm flex items-center gap-1 transition-colors cursor-pointer"
-                        title={isAi ? "Open AI audit verification console" : "Inspect photos and audit"}
+                        title="Inspect photos and conduct audit"
                       >
                         <Eye className="w-3 h-3" />
-                        <span>{(isAi && !isPending && needsVerification) ? 'Verify' : 'Inspect'}</span>
+                        <span>Inspect</span>
                       </button>
 
-                      {isAi && needsVerification ? (
-                        <>
-                          <button
-                            onClick={() => onConfirmAiVerdict?.(task.id)}
-                            className="p-1 rounded-md text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer"
-                            title="Confirm AI Verdict (1-Click Human Verification)"
-                          >
-                            <CheckCheck className="w-4 h-4 text-emerald-400" />
-                          </button>
-                          <button
-                            onClick={() => {
-                              const targetV = isFatal ? 'PASS' : 'FATAL';
-                              const reason = prompt(`Enter reason to overturn AI ${isFatal ? 'FATAL to PASS' : 'PASS to FATAL'}:`, 'Overturned upon visual inspection by reviewer');
-                              if (reason) onOverturnAiVerdict?.(task.id, targetV, reason);
-                            }}
-                            className="p-1 rounded-md text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors cursor-pointer"
-                            title={isFatal ? "Overturn AI Fatal to PASS" : "Overturn AI Pass to FATAL"}
-                          >
-                            <RotateCcw className="w-4 h-4 text-amber-400" />
-                          </button>
-                        </>
-                      ) : !isAi && !isFatal ? (
+                      {/* Quick Pass & Fatal (for City Admin / manual auditor when pending) */}
+                      {!isPassed && !isFatal && (
                         <>
                           <button
                             onClick={() => handlePass(task)}
@@ -413,7 +451,7 @@ export default function TaskTable({
                             <AlertTriangle className="w-4 h-4" />
                           </button>
                         </>
-                      ) : null}
+                      )}
                     </div>
                   </td>
 

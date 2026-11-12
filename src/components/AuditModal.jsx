@@ -124,7 +124,7 @@ export default function AuditModal({
       // Blind Manual Audit Guarantee:
       // Always start with a 100% clean, blank task slate with 0 pre-filled item verdicts or failure selections.
       // City Admins and Auditors must evaluate each station blindly from scratch without anchoring bias.
-      const shouldPreload = isReAudit && !task?.isAiReAudit && Boolean(task?.human_verified || task?.human_overturned);
+      const shouldPreload = Boolean(canViewAiDetails && isReAudit && !task?.isAiReAudit && (task?.human_verified || task?.human_overturned));
 
       setCriteriaStatus(shouldPreload ? (task.criteriaStatus || {}) : {});
       setSelectedViolations(shouldPreload ? (task.failedReasons || []) : []);
