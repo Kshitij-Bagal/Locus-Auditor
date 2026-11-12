@@ -3,6 +3,36 @@
  * Supports cross-system variations (e.g. Vishal vs Vishal Vishal, Sachin Chaudhary vs Sachin Choudhary)
  */
 
+/**
+ * Detect whether a name string is a generic role placeholder rather than a genuine human manager's name
+ */
+export function isGenericManagerName(name) {
+  if (!name || typeof name !== 'string') return true;
+  const n = name.trim().toLowerCase();
+  return (
+    n === '' ||
+    n === 'area manager' ||
+    n === 'area managers' ||
+    n === 'area operations' ||
+    n === 'regional manager' ||
+    n === 'regional managers' ||
+    n === 'regional operations' ||
+    n === 'central operations' ||
+    n === 'central operations zone' ||
+    n === 'unassigned am' ||
+    n === 'unassigned rm' ||
+    n === 'unassigned' ||
+    n === 'unknown' ||
+    n === 'unknown zone' ||
+    n === 'n/a' ||
+    n === 'none' ||
+    n === 'null' ||
+    n === 'undefined' ||
+    n === 'staff' ||
+    n === 'operations'
+  );
+}
+
 export function normalizeManagerName(name) {
   if (!name) return '';
   return String(name)

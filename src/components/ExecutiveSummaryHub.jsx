@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parseRoles } from '../utils/accessHelper.js';
-import { normalizeManagerName, matchManagerName } from '../utils/managerHelper.js';
+import { normalizeManagerName, matchManagerName, isGenericManagerName } from '../utils/managerHelper.js';
 
 export default function ExecutiveSummaryHub({
   tasks = [],
@@ -80,11 +80,36 @@ export default function ExecutiveSummaryHub({
       }
     });
 
+    // Discover operational AMs mentioned in FE profiles
+    const seenAmNames = new Set(ams.map(a => normalizeManagerName(a.full_name || a.name)));
+    (users || []).forEach(u => {
+      const amName = u.reporting_manager_name;
+      if (amName && !isGenericManagerName(amName)) {
+        const norm = normalizeManagerName(amName);
+        if (norm && !seenAmNames.has(norm)) {
+          seenAmNames.add(norm);
+          const dynamicAm = {
+            id: u.reporting_manager_id || `am_${norm}`,
+            full_name: amName,
+            email: u.reporting_manager_email || '',
+            facility_code: u.facility_code || '',
+            city: u.city || u.facility_code || '',
+            regional_manager_name: u.regional_manager_name || '',
+            regional_manager_email: u.regional_manager_email || '',
+            regional_manager_id: u.regional_manager_id || ''
+          };
+          ams.push(dynamicAm);
+          amMap.set(norm, dynamicAm);
+          if (dynamicAm.email) amMap.set(dynamicAm.email.toLowerCase().trim(), dynamicAm);
+        }
+      }
+    });
+
     // Discover operational RMs mentioned in FE profiles
     const seenRmNames = new Set(rms.map(r => normalizeManagerName(r.full_name || r.name)));
     (users || []).forEach(u => {
       const rmName = u.regional_manager_name;
-      if (rmName && rmName !== 'Regional Manager') {
+      if (rmName && !isGenericManagerName(rmName)) {
         const norm = normalizeManagerName(rmName);
         if (norm && !seenRmNames.has(norm)) {
           seenRmNames.add(norm);
@@ -96,6 +121,7 @@ export default function ExecutiveSummaryHub({
           };
           rms.push(dynamicRm);
           rmMap.set(norm, dynamicRm);
+          if (dynamicRm.email) rmMap.set(dynamicRm.email.toLowerCase().trim(), dynamicRm);
         }
       }
     });
@@ -117,6 +143,7 @@ export default function ExecutiveSummaryHub({
 
       // City / Facility extraction
       const city = t.facilityCode || t.city || t.teamName || 'Unknown City';
+      const zone = t.zone || t.Zone || 'Central Zone';
 
       // Photo and Blank status
       const hasUploadedImages = Boolean(t.hasImages) && (Number(t.imageCount) > 0 || (t.images && Object.values(t.images).some(Boolean)));
@@ -130,68 +157,154 @@ export default function ExecutiveSummaryHub({
       const isNoImagesUploaded = !hasUploadedImages;
 
       // Reporting hierarchy resolution
-      let amName = t.amName || '';
+      let amName = !isGenericManagerName(t.amName) ? String(t.amName).trim() : '';
       let amEmail = t.amEmail || '';
-      let rmName = t.rmName || '';
+      let rmName = !isGenericManagerName(t.rmName) ? String(t.rmName).trim() : '';
       let rmEmail = t.rmEmail || '';
 
-      const feCode = String(t.feCode || t.feId || '').trim().toLowerCase();
+      // Multi-attribute FE lookup from users table
+      const tId = String(t.feId || '').trim().toLowerCase();
+      const tCode = String(t.feCode || '').trim().toLowerCase();
+      const tName = String(t.feName || '').trim().toLowerCase();
+      const tEmail = String(t.feEmail || '').trim().toLowerCase();
+
       const feUser = (users || []).find(u => {
-        const uCode = String(u.employee_code || u.person_id || u.email || '').trim().toLowerCase();
-        return uCode && uCode === feCode;
+        if (!u) return false;
+        const uPersonId = String(u.person_id || '').trim().toLowerCase();
+        const uCode = String(u.employee_code || '').trim().toLowerCase();
+        const uEmail = String(u.email || '').trim().toLowerCase();
+        const uName = String(u.full_name || u.name || '').trim().toLowerCase();
+
+        if (tCode && (uCode === tCode || uPersonId === tCode || uEmail.includes(tCode))) return true;
+        if (tId && (uCode === tId || uPersonId === tId || uEmail.includes(tId))) return true;
+        if (tEmail && uEmail && tEmail === uEmail) return true;
+        if (tName && tName.length >= 3 && (uName === tName || uName.includes(tName) || tName.includes(uName))) return true;
+        return false;
       });
 
       if (feUser) {
-        if (!amName) {
-          amName = feUser.reporting_manager_name || '';
-          amEmail = feUser.reporting_manager_email || '';
-          if (feUser.reporting_manager_id && amUserMap.has(String(feUser.reporting_manager_id))) {
-            const amObj = amUserMap.get(String(feUser.reporting_manager_id));
-            amName = amObj.full_name || amName;
-            amEmail = amObj.email || amEmail;
+        if (!amName || isGenericManagerName(amName)) {
+          if (!isGenericManagerName(feUser.reporting_manager_name)) {
+            amName = feUser.reporting_manager_name.trim();
+          }
+          if (feUser.reporting_manager_email) {
+            amEmail = feUser.reporting_manager_email.trim().toLowerCase();
+          }
+          if (feUser.reporting_manager_id) {
+            const amObj = amUserMap.get(String(feUser.reporting_manager_id)) || (users || []).find(u => String(u.id) === String(feUser.reporting_manager_id));
+            if (amObj) {
+              amName = amObj.full_name || amObj.name || amName;
+              amEmail = amObj.email || amEmail;
+            }
           }
         }
 
-        if (!rmName) {
-          rmName = feUser.regional_manager_name || '';
-          rmEmail = feUser.regional_manager_email || '';
-          if (feUser.regional_manager_id && rmUserMap.has(String(feUser.regional_manager_id))) {
-            const rmObj = rmUserMap.get(String(feUser.regional_manager_id));
-            rmName = rmObj.full_name || rmName;
-            rmEmail = rmObj.email || rmEmail;
+        if (!rmName || isGenericManagerName(rmName)) {
+          if (!isGenericManagerName(feUser.regional_manager_name)) {
+            rmName = feUser.regional_manager_name.trim();
+          }
+          if (feUser.regional_manager_email) {
+            rmEmail = feUser.regional_manager_email.trim().toLowerCase();
+          }
+          if (feUser.regional_manager_id) {
+            const rmObj = rmUserMap.get(String(feUser.regional_manager_id)) || (users || []).find(u => String(u.id) === String(feUser.regional_manager_id));
+            if (rmObj) {
+              rmName = rmObj.full_name || rmObj.name || rmName;
+              rmEmail = rmObj.email || rmEmail;
+            }
+          }
+        }
+      }
+
+      // If still missing AM, look up by hub / facility code in allAreaManagers or CITY_ADMIN
+      const hubTarget = String(city || feUser?.facility_code || feUser?.city || '').trim().toLowerCase();
+      if ((!amName || isGenericManagerName(amName)) && hubTarget) {
+        const amMatch = allAreaManagers.find(am => {
+          const amHub = String(am.facility_code || am.city || '').toLowerCase();
+          return amHub && (amHub === hubTarget || amHub.includes(hubTarget) || hubTarget.includes(amHub));
+        });
+        if (amMatch) {
+          amName = amMatch.full_name || amMatch.name;
+          amEmail = amMatch.email || amEmail;
+          if (!rmName || isGenericManagerName(rmName)) {
+            if (!isGenericManagerName(amMatch.regional_manager_name)) rmName = amMatch.regional_manager_name;
+            if (amMatch.regional_manager_email) rmEmail = amMatch.regional_manager_email;
+          }
+        } else {
+          // Check for CITY_ADMIN in users for this hub
+          const cityAdmin = (users || []).find(u => {
+            const roles = parseRoles(u.roles || [u.role]);
+            const uCity = String(u.facility_code || u.city || '').toLowerCase();
+            return roles.includes('CITY_ADMIN') && uCity && (uCity === hubTarget || uCity.includes(hubTarget) || hubTarget.includes(uCity));
+          });
+          if (cityAdmin) {
+            amName = cityAdmin.full_name || cityAdmin.name;
+            amEmail = cityAdmin.email || amEmail;
           }
         }
       }
 
       // If still missing RM, check if direct AM is linked to an RM
-      if ((!rmName || rmName === 'Regional Manager') && amName) {
+      if ((!rmName || isGenericManagerName(rmName)) && amName && !isGenericManagerName(amName)) {
         const amObj = (users || []).find(m => matchManagerName(m.full_name || m.name, amName));
         if (amObj) {
-          rmName = amObj.regional_manager_name || rmName;
-          rmEmail = amObj.regional_manager_email || rmEmail;
+          if (!isGenericManagerName(amObj.regional_manager_name)) rmName = amObj.regional_manager_name;
+          if (amObj.regional_manager_email) rmEmail = amObj.regional_manager_email;
+        }
+      }
+
+      // If still missing RM, check zone or city in allRegionalManagers
+      if (!rmName || isGenericManagerName(rmName)) {
+        const zoneTarget = String(zone || feUser?.zone || '').trim().toLowerCase();
+        const rmMatch = allRegionalManagers.find(rm => {
+          const rmZone = String(rm.zone || '').toLowerCase();
+          const rmHub = String(rm.facility_code || rm.city || '').toLowerCase();
+          return (zoneTarget && rmZone && (rmZone === zoneTarget || rmZone.includes(zoneTarget) || zoneTarget.includes(rmZone))) ||
+                 (hubTarget && rmHub && (rmHub === hubTarget || rmHub.includes(hubTarget) || hubTarget.includes(rmHub)));
+        });
+        if (rmMatch) {
+          rmName = rmMatch.full_name || rmMatch.name;
+          rmEmail = rmMatch.email || rmEmail;
         }
       }
 
       // Canonicalize RM name
-      if (rmName && rmName !== 'Regional Manager') {
+      if (rmName && !isGenericManagerName(rmName)) {
         const canonical = allRegionalManagers.find(r => matchManagerName(r.full_name, rmName));
-        if (canonical) rmName = canonical.full_name;
+        if (canonical) {
+          rmName = canonical.full_name;
+          if (!rmEmail) rmEmail = canonical.email || '';
+        }
       }
+
+      // Canonicalize AM name
+      if (amName && !isGenericManagerName(amName)) {
+        const canonicalAm = allAreaManagers.find(a => matchManagerName(a.full_name || a.name, amName));
+        if (canonicalAm) {
+          amName = canonicalAm.full_name;
+          if (!amEmail) amEmail = canonicalAm.email || '';
+        }
+      }
+
+      // Final fallbacks: NEVER output generic "Area Managers" or "Regional Managers"
+      const finalAm = (!isGenericManagerName(amName) && amName) ? amName : `${city} AM (Unassigned)`;
+      const finalRm = (!isGenericManagerName(rmName) && rmName) ? rmName : `${zone} RM (Unassigned)`;
 
       return {
         ...t,
         cleanDate,
         city,
+        zone,
         hasUploadedImages,
         isBlankOrFraudulent,
         isNoImagesUploaded,
-        amName: amName || 'Area Operations',
+        amName: finalAm,
         amEmail: amEmail || '',
-        rmName: rmName || 'Regional Operations',
+        rmName: finalRm,
         rmEmail: rmEmail || ''
       };
     });
-  }, [tasks, users, allRegionalManagers, amUserMap, rmUserMap]);
+  }, [tasks, users, allRegionalManagers, allAreaManagers, amUserMap, rmUserMap]);
 
   // 3. Unique Filter Options Lists
   const availableDates = useMemo(() => {
@@ -398,10 +511,11 @@ export default function ExecutiveSummaryHub({
     const map = new Map();
 
     filteredTasks.forEach(t => {
-      const c = t.city;
+      const c = t.city || 'Unknown City';
       if (!map.has(c)) {
         map.set(c, {
           city: c,
+          zoneSet: new Set(),
           total: 0,
           withImages: 0,
           noImages: 0,
@@ -409,17 +523,22 @@ export default function ExecutiveSummaryHub({
           audited: 0,
           passed: 0,
           fatal: 0,
+          replacements: 0,
           feSet: new Set(),
-          amSet: new Set()
+          amSet: new Set(),
+          rmSet: new Set()
         });
       }
       const entry = map.get(c);
       entry.total++;
+      if (t.zone) entry.zoneSet.add(t.zone);
       if (t.hasUploadedImages) entry.withImages++;
       if (t.isNoImagesUploaded) entry.noImages++;
       if (t.isBlankOrFraudulent) entry.blankImages++;
       if (t.feName || t.feCode) entry.feSet.add(t.feName || t.feCode);
-      if (t.amName) entry.amSet.add(t.amName);
+      if (t.amName && !isGenericManagerName(t.amName)) entry.amSet.add(t.amName);
+      if (t.rmName && !isGenericManagerName(t.rmName)) entry.rmSet.add(t.rmName);
+      if (Array.isArray(t.replacements)) entry.replacements += t.replacements.length;
 
       if (t.auditStatus === 'PASSED') {
         entry.audited++;
@@ -433,13 +552,154 @@ export default function ExecutiveSummaryHub({
     return Array.from(map.values())
       .map(item => ({
         ...item,
+        zone: Array.from(item.zoneSet).join(', ') || 'Central Zone',
+        amList: Array.from(item.amSet).join(', ') || 'Unassigned AM',
+        rmList: Array.from(item.rmSet).join(', ') || 'Central RM',
         uploadRate: item.total > 0 ? ((item.withImages / item.total) * 100).toFixed(1) : '0.0',
         passRate: item.audited > 0 ? ((item.passed / item.audited) * 100).toFixed(1) : '0.0',
         fatalRate: item.audited > 0 ? ((item.fatal / item.audited) * 100).toFixed(1) : '0.0',
         strikesPerVisit: item.total > 0 ? (item.fatal / item.total).toFixed(2) : '0.00',
         feCount: item.feSet.size,
-        amCount: item.amSet.size
+        amCount: item.amSet.size,
+        rmCount: item.rmSet.size
       }))
+      .sort((a, b) => b.total - a.total);
+  }, [filteredTasks]);
+
+  // Dedicated AM Level Performance Rollup
+  const amLevelData = useMemo(() => {
+    const map = new Map();
+
+    filteredTasks.forEach(t => {
+      const amKey = (t.amName || 'Unassigned AM').trim();
+      if (!map.has(amKey)) {
+        map.set(amKey, {
+          amName: amKey,
+          amEmail: t.amEmail || '',
+          citySet: new Set(),
+          zoneSet: new Set(),
+          rmSet: new Set(),
+          feSet: new Set(),
+          total: 0,
+          withImages: 0,
+          noImages: 0,
+          blankImages: 0,
+          audited: 0,
+          passed: 0,
+          fatal: 0,
+          replacements: 0
+        });
+      }
+      const entry = map.get(amKey);
+      entry.total++;
+      if (t.city) entry.citySet.add(t.city);
+      if (t.zone) entry.zoneSet.add(t.zone);
+      if (t.rmName && !isGenericManagerName(t.rmName)) entry.rmSet.add(t.rmName);
+      if (t.feName || t.feCode) entry.feSet.add(t.feName || t.feCode);
+      if (t.hasUploadedImages) entry.withImages++;
+      if (t.isNoImagesUploaded) entry.noImages++;
+      if (t.isBlankOrFraudulent) entry.blankImages++;
+      if (Array.isArray(t.replacements)) entry.replacements += t.replacements.length;
+
+      if (t.auditStatus === 'PASSED') {
+        entry.audited++;
+        entry.passed++;
+      } else if (t.auditStatus === 'FATAL') {
+        entry.audited++;
+        entry.fatal++;
+      }
+    });
+
+    return Array.from(map.values())
+      .map(item => {
+        const uploadRate = item.total > 0 ? ((item.withImages / item.total) * 100).toFixed(1) : '0.0';
+        const passRate = item.audited > 0 ? ((item.passed / item.audited) * 100).toFixed(1) : '0.0';
+        const fatalRate = item.audited > 0 ? ((item.fatal / item.audited) * 100).toFixed(1) : '0.0';
+        const strikesPerVisit = item.total > 0 ? (item.fatal / item.total).toFixed(2) : '0.00';
+        const fatalNum = Number(fatalRate);
+
+        return {
+          ...item,
+          cityList: Array.from(item.citySet).join(', ') || 'N/A',
+          zoneList: Array.from(item.zoneSet).join(', ') || 'Central Zone',
+          rmName: Array.from(item.rmSet).join(', ') || 'Central Operations RM',
+          feCount: item.feSet.size,
+          uploadRate,
+          passRate,
+          fatalRate,
+          strikesPerVisit,
+          status: fatalNum <= 10 ? 'EXCELLENT (Pass Rate ≥ 90%)' : fatalNum <= 25 ? 'STABLE (Pass Rate 75-89%)' : 'HIGH FATAL ESCALATION (>25% Fatal)'
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+  }, [filteredTasks]);
+
+  // Dedicated RM Level Governance Rollup
+  const rmLevelData = useMemo(() => {
+    const map = new Map();
+
+    filteredTasks.forEach(t => {
+      const rmKey = (t.rmName || 'Unassigned RM').trim();
+      if (!map.has(rmKey)) {
+        map.set(rmKey, {
+          rmName: rmKey,
+          rmEmail: t.rmEmail || '',
+          zoneSet: new Set(),
+          citySet: new Set(),
+          amSet: new Set(),
+          feSet: new Set(),
+          total: 0,
+          withImages: 0,
+          noImages: 0,
+          blankImages: 0,
+          audited: 0,
+          passed: 0,
+          fatal: 0,
+          replacements: 0
+        });
+      }
+      const entry = map.get(rmKey);
+      entry.total++;
+      if (t.zone) entry.zoneSet.add(t.zone);
+      if (t.city) entry.citySet.add(t.city);
+      if (t.amName && !isGenericManagerName(t.amName)) entry.amSet.add(t.amName);
+      if (t.feName || t.feCode) entry.feSet.add(t.feName || t.feCode);
+      if (t.hasUploadedImages) entry.withImages++;
+      if (t.isNoImagesUploaded) entry.noImages++;
+      if (t.isBlankOrFraudulent) entry.blankImages++;
+      if (Array.isArray(t.replacements)) entry.replacements += t.replacements.length;
+
+      if (t.auditStatus === 'PASSED') {
+        entry.audited++;
+        entry.passed++;
+      } else if (t.auditStatus === 'FATAL') {
+        entry.audited++;
+        entry.fatal++;
+      }
+    });
+
+    return Array.from(map.values())
+      .map(item => {
+        const uploadRate = item.total > 0 ? ((item.withImages / item.total) * 100).toFixed(1) : '0.0';
+        const passRate = item.audited > 0 ? ((item.passed / item.audited) * 100).toFixed(1) : '0.0';
+        const fatalRate = item.audited > 0 ? ((item.fatal / item.audited) * 100).toFixed(1) : '0.0';
+        const strikesPerVisit = item.total > 0 ? (item.fatal / item.total).toFixed(2) : '0.00';
+        const fatalNum = Number(fatalRate);
+
+        return {
+          ...item,
+          zoneList: Array.from(item.zoneSet).join(', ') || 'Central Zone',
+          cityList: Array.from(item.citySet).join(', ') || 'N/A',
+          amList: Array.from(item.amSet).join(', ') || 'N/A',
+          amCount: item.amSet.size,
+          feCount: item.feSet.size,
+          uploadRate,
+          passRate,
+          fatalRate,
+          strikesPerVisit,
+          governanceStatus: fatalNum <= 15 ? 'STRONG COMPLIANCE (≥85% Pass)' : fatalNum <= 30 ? 'MODERATE GOVERNANCE (70-84% Pass)' : 'CRITICAL REGIONAL REVIEW'
+        };
+      })
       .sort((a, b) => b.total - a.total);
   }, [filteredTasks]);
 
@@ -450,7 +710,7 @@ export default function ExecutiveSummaryHub({
     filteredTasks.forEach(t => {
       const rmKey = t.rmName || 'Unassigned RM';
       if (!rmMap.has(rmKey)) {
-        rmMap.set(rmKey, {
+        map.set(rmKey, {
           rmName: rmKey,
           total: 0,
           withImages: 0,
@@ -543,8 +803,11 @@ export default function ExecutiveSummaryHub({
           name: t.feName || 'Field Executive',
           code: t.feCode || t.feId || 'N/A',
           city: t.city,
+          zone: t.zone || 'Central Zone',
           amName: t.amName,
+          amEmail: t.amEmail || '',
           rmName: t.rmName,
+          rmEmail: t.rmEmail || '',
           total: 0,
           withImages: 0,
           noImages: 0,
@@ -552,6 +815,7 @@ export default function ExecutiveSummaryHub({
           audited: 0,
           passed: 0,
           fatal: 0,
+          replacements: 0,
           dates: new Set()
         });
       }
@@ -561,6 +825,7 @@ export default function ExecutiveSummaryHub({
       if (t.hasUploadedImages) entry.withImages++;
       if (t.isNoImagesUploaded) entry.noImages++;
       if (t.isBlankOrFraudulent) entry.blankImages++;
+      if (Array.isArray(t.replacements)) entry.replacements += t.replacements.length;
 
       if (t.auditStatus === 'PASSED') {
         entry.audited++;
@@ -575,6 +840,7 @@ export default function ExecutiveSummaryHub({
       .map(item => ({
         ...item,
         uploadRate: item.total > 0 ? ((item.withImages / item.total) * 100).toFixed(1) : '0.0',
+        passRate: item.audited > 0 ? Math.round((item.passed / item.audited) * 100) : 100,
         fatalRate: item.audited > 0 ? Math.round((item.fatal / item.audited) * 100) : 0,
         strikesPerVisit: item.total > 0 ? (item.fatal / item.total).toFixed(2) : '0.00',
         dateCount: item.dates.size
@@ -582,7 +848,7 @@ export default function ExecutiveSummaryHub({
       .sort((a, b) => b.fatal - a.fatal || b.blankImages - a.blankImages || b.total - a.total);
   }, [filteredTasks]);
 
-  // 10. Multi-Sheet Excel Export
+  // 10. Multi-Sheet Executive Excel Export
   const handleExportExecutiveWorkbook = () => {
     const wb = XLSX.utils.book_new();
 
@@ -597,6 +863,7 @@ export default function ExecutiveSummaryHub({
       'QA AUDITED VISITS': d.audited,
       'PASSED AUDITS': d.passed,
       'FATAL STRIKES': d.fatal,
+      'QA PASS RATE %': `${(100 - Number(d.fatalRate)).toFixed(1)}%`,
       'QA FATAL STRIKE RATE %': `${d.fatalRate}%`,
       'STRIKES PER VISIT AVG': d.strikesPerVisit,
       'ACTIVE FES': d.feCount
@@ -604,55 +871,120 @@ export default function ExecutiveSummaryHub({
     const wsDates = XLSX.utils.json_to_sheet(sheetDateData);
     XLSX.utils.book_append_sheet(wb, wsDates, 'Date_Wise_Summary');
 
-    // Sheet 2: City Matrix
+    // Sheet 2: City / Facility Hub Level Scorecard
     const sheetCityData = cityMatrixData.map(c => ({
       'CITY / FACILITY HUB': c.city,
-      'TOTAL VISITS': c.total,
+      'ZONE': c.zone,
+      'REPORTING AREA MANAGERS': c.amList,
+      'SUPERVISING REGIONAL MANAGERS': c.rmList,
+      'TOTAL CUSTOMER VISITS': c.total,
       'PHOTOS UPLOADED': c.withImages,
       'PHOTO COMPLIANCE %': `${c.uploadRate}%`,
-      'NO PHOTOS UPLOADED': c.noImages,
+      'ZERO PHOTOS UPLOADED': c.noImages,
       'BLANK / BLACK PHOTOS': c.blankImages,
       'QA AUDITED VISITS': c.audited,
-      'PASSED': c.passed,
+      'PASSED AUDITS': c.passed,
       'FATAL STRIKES': c.fatal,
+      'QA PASS RATE %': `${c.passRate}%`,
       'QA FATAL RATE %': `${c.fatalRate}%`,
       'STRIKES PER VISIT AVG': c.strikesPerVisit,
-      'FIELD EXECUTIVES': c.feCount,
-      'AREA MANAGERS': c.amCount
+      'ACTIVE FIELD EXECUTIVES': c.feCount,
+      'EQUIPMENT REPLACEMENTS ORDERED': c.replacements || 0,
+      'CITY COMPLIANCE STATUS': Number(c.fatalRate) <= 15 ? 'HEALTHY' : Number(c.fatalRate) <= 30 ? 'ELEVATED RISK' : 'CRITICAL ACTION REQUIRED'
     }));
     const wsCity = XLSX.utils.json_to_sheet(sheetCityData);
-    XLSX.utils.book_append_sheet(wb, wsCity, 'City_Matrix');
+    XLSX.utils.book_append_sheet(wb, wsCity, 'City_Level_Summary');
 
-    // Sheet 3: FE Compliance Ledger
+    // Sheet 3: Area Manager (AM) Level Scorecard
+    const sheetAMData = amLevelData.map(a => ({
+      'AREA MANAGER (AM)': a.amName,
+      'AM CORPORATE EMAIL': a.amEmail,
+      'HUBS & CITIES MANAGED': a.cityList,
+      'PRIMARY ZONE': a.zoneList,
+      'SUPERVISING REGIONAL MANAGER': a.rmName,
+      'SUPERVISED FES COUNT': a.feCount,
+      'TOTAL CUSTOMER VISITS': a.total,
+      'VISITS WITH PHOTOS': a.withImages,
+      'PHOTO UPLOAD COMPLIANCE %': `${a.uploadRate}%`,
+      'ZERO PHOTO VISITS': a.noImages,
+      'BLANK / FRAUDULENT PHOTOS': a.blankImages,
+      'QA AUDITED VISITS': a.audited,
+      'PASSED AUDITS': a.passed,
+      'FATAL STRIKES': a.fatal,
+      'QA PASS RATE %': `${a.passRate}%`,
+      'FATAL STRIKE RATE %': `${a.fatalRate}%`,
+      'STRIKES PER VISIT AVG': a.strikesPerVisit,
+      'EQUIPMENT REPLACEMENTS ORDERED': a.replacements || 0,
+      'AM PERFORMANCE TIER': a.status
+    }));
+    const wsAM = XLSX.utils.json_to_sheet(sheetAMData);
+    XLSX.utils.book_append_sheet(wb, wsAM, 'AM_Level_Summary');
+
+    // Sheet 4: Regional Manager (RM) Level Scorecard
+    const sheetRMData = rmLevelData.map(r => ({
+      'REGIONAL MANAGER (RM)': r.rmName,
+      'RM CORPORATE EMAIL': r.rmEmail,
+      'OPERATIONAL REGION / ZONE': r.zoneList,
+      'COVERED HUBS & CITIES': r.cityList,
+      'SUBORDINATE AREA MANAGERS': r.amList,
+      'AREA MANAGERS COUNT': r.amCount,
+      'TOTAL FIELD EXECUTIVES': r.feCount,
+      'TOTAL REGIONAL VISITS': r.total,
+      'VISITS WITH PHOTOS': r.withImages,
+      'REGIONAL PHOTO UPLOAD %': `${r.uploadRate}%`,
+      'ZERO PHOTO VISITS': r.noImages,
+      'BLANK / BLACK PHOTO VISITS': r.blankImages,
+      'QA AUDITED VISITS': r.audited,
+      'PASSED AUDITS': r.passed,
+      'FATAL STRIKES': r.fatal,
+      'REGIONAL QA PASS RATE %': `${r.passRate}%`,
+      'REGIONAL FATAL RATE %': `${r.fatalRate}%`,
+      'STRIKES PER VISIT AVG': r.strikesPerVisit,
+      'REGIONAL REPLACEMENTS ORDERED': r.replacements || 0,
+      'REGIONAL GOVERNANCE STATUS': r.governanceStatus
+    }));
+    const wsRM = XLSX.utils.json_to_sheet(sheetRMData);
+    XLSX.utils.book_append_sheet(wb, wsRM, 'RM_Level_Summary');
+
+    // Sheet 5: FE Compliance Ledger
     const sheetFEData = feLedgerData.map(f => ({
       'FE NAME': f.name,
       'RIDER CODE': f.code,
-      'CITY': f.city,
+      'CITY / HUB': f.city,
+      'ZONE': f.zone,
       'REPORTING AM': f.amName,
+      'AM EMAIL': f.amEmail,
       'REGIONAL RM': f.rmName,
+      'RM EMAIL': f.rmEmail,
       'TOTAL VISITS': f.total,
       'PHOTOS UPLOADED': f.withImages,
       'PHOTO UPLOAD %': `${f.uploadRate}%`,
-      'NO PHOTOS UPLOADED': f.noImages,
+      'ZERO PHOTOS UPLOADED': f.noImages,
       'BLANK / BLACK PHOTOS': f.blankImages,
       'AUDITED BY QA': f.audited,
       'PASSED AUDITS': f.passed,
       'FATAL STRIKES': f.fatal,
+      'QA PASS RATE %': `${f.passRate}%`,
       'QA FATAL RATE %': `${f.fatalRate}%`,
-      'STRIKES PER VISIT AVG': f.strikesPerVisit
+      'STRIKES PER VISIT AVG': f.strikesPerVisit,
+      'TOOL REPLACEMENTS ORDERED': f.replacements || 0,
+      'COMPLIANCE STATUS': f.fatal === 0 ? 'CLEAN (0 Strikes)' : f.fatal === 1 ? 'WARNING (1 Strike)' : 'ACTION REQUIRED (2+ Strikes)'
     }));
     const wsFE = XLSX.utils.json_to_sheet(sheetFEData);
-    XLSX.utils.book_append_sheet(wb, wsFE, 'FE_Ledger');
+    XLSX.utils.book_append_sheet(wb, wsFE, 'FE_Compliance_Ledger');
 
-    // Sheet 4: Filtered Raw Tasks
+    // Sheet 6: Filtered Raw Tasks
     const sheetTaskData = filteredTasks.slice(0, 10000).map(t => ({
       'TASK ID': t.taskId || t.id,
       'DISPATCH DATE': t.cleanDate,
-      'CITY': t.city,
+      'CITY / HUB': t.city,
+      'ZONE': t.zone,
       'FE NAME': t.feName,
       'FE CODE': t.feCode,
       'REPORTING AM': t.amName,
+      'AM EMAIL': t.amEmail,
       'REGIONAL RM': t.rmName,
+      'RM EMAIL': t.rmEmail,
       'DISPATCH STATUS': t.status,
       'AUDIT STATUS': t.auditStatus || 'PENDING',
       'PHOTOS ATTACHED': t.hasUploadedImages ? 'YES' : 'NO',
@@ -660,7 +992,8 @@ export default function ExecutiveSummaryHub({
       'IMAGE COUNT': t.imageCount || 0,
       'FAILED REASONS': Array.isArray(t.failedReasons) ? t.failedReasons.join('; ') : (t.failedReasons || ''),
       'AUDITOR REMARKS': t.remarks || t.auditorRemarks || '',
-      'AUDITED BY': t.auditedBy || ''
+      'AUDITED BY': t.auditedBy || '',
+      'REPLACEMENTS ORDERED': (t.replacements || []).map(r => r.name || r.itemName).filter(Boolean).join('; ')
     }));
     const wsTasks = XLSX.utils.json_to_sheet(sheetTaskData);
     XLSX.utils.book_append_sheet(wb, wsTasks, 'Task_Inspector');
@@ -710,7 +1043,7 @@ export default function ExecutiveSummaryHub({
             <button
               onClick={handleExportExecutiveWorkbook}
               className="px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20 border border-indigo-400/30 flex items-center gap-2 transition-all cursor-pointer"
-              title="Download 5-sheet Executive Excel breakdown"
+              title="Download 6-sheet Executive Excel breakdown (Date, City, AM, RM, FE Ledger & Tasks)"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Export Executive Excel</span>
