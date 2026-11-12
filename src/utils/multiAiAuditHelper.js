@@ -20,6 +20,7 @@ import {
   saveStoredGeminiModel,
   listAvailableGeminiModels
 } from './geminiAuditHelper.js';
+import { recordAiApiCall } from './aiUsageTracker.js';
 
 export const AI_ACTIVE_PROVIDER_KEY = 'locus_ai_active_provider';
 export const AI_AUTO_FAILOVER_KEY = 'locus_ai_enable_provider_failover';
@@ -358,6 +359,13 @@ export async function testAnyProviderApiKey(providerId, apiKey, targetModel = nu
       const err = await res.text();
       throw new Error(`Google Gemini Error ${res.status}: ${err}`);
     }
+    recordAiApiCall({
+      feature: 'Provider Connection Test',
+      model: modelToUse,
+      tokens: 30,
+      status: 'SUCCESS',
+      details: 'Google Gemini Ping'
+    });
     return { success: true, provider: 'gemini', activeModel: modelToUse, availableModels: available };
   }
 
@@ -381,6 +389,13 @@ export async function testAnyProviderApiKey(providerId, apiKey, targetModel = nu
       const err = await res.text();
       throw new Error(`OpenAI Error ${res.status}: ${err}`);
     }
+    recordAiApiCall({
+      feature: 'Provider Connection Test',
+      model: modelToUse,
+      tokens: 30,
+      status: 'SUCCESS',
+      details: 'OpenAI Ping'
+    });
     return { success: true, provider: 'openai', activeModel: modelToUse };
   }
 
@@ -405,6 +420,13 @@ export async function testAnyProviderApiKey(providerId, apiKey, targetModel = nu
       const err = await res.text();
       throw new Error(`Anthropic Claude Error ${res.status}: ${err}`);
     }
+    recordAiApiCall({
+      feature: 'Provider Connection Test',
+      model: modelToUse,
+      tokens: 30,
+      status: 'SUCCESS',
+      details: 'Anthropic Ping'
+    });
     return { success: true, provider: 'anthropic', activeModel: modelToUse };
   }
 
@@ -429,6 +451,13 @@ export async function testAnyProviderApiKey(providerId, apiKey, targetModel = nu
       const err = await res.text();
       throw new Error(`OpenRouter Error ${res.status}: ${err}`);
     }
+    recordAiApiCall({
+      feature: 'Provider Connection Test',
+      model: modelToUse,
+      tokens: 30,
+      status: 'SUCCESS',
+      details: 'OpenRouter Ping'
+    });
     return { success: true, provider: 'openrouter', activeModel: modelToUse };
   }
 
@@ -451,6 +480,13 @@ export async function testAnyProviderApiKey(providerId, apiKey, targetModel = nu
       const err = await res.text();
       throw new Error(`Groq Error ${res.status}: ${err}`);
     }
+    recordAiApiCall({
+      feature: 'Provider Connection Test',
+      model: modelToUse,
+      tokens: 30,
+      status: 'SUCCESS',
+      details: 'Groq Ping'
+    });
     return { success: true, provider: 'groq', activeModel: modelToUse };
   }
 
@@ -729,6 +765,14 @@ function downloadPhotosForOpenAI(downloadedPhotos, userContent) {
 function finalizeOutcome(outcome, downloadedPhotos) {
   const { parsed, tokens, provider, model, raw } = outcome;
   const isFatal = parsed.verdict === 'FATAL' || (parsed.criteriaEvaluation || []).some(c => c.status === 'FAIL');
+
+  recordAiApiCall({
+    feature: 'Multi-AI Clinical Audit',
+    model: model || 'gemini-3.8-flash',
+    tokens: tokens || 1800,
+    status: 'SUCCESS',
+    details: `${(provider || 'AI').toUpperCase()} (${model || 'model'})`
+  });
 
   return {
     verdict: isFatal ? 'FATAL' : 'PASS',

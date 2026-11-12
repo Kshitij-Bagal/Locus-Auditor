@@ -4,6 +4,7 @@
  */
 
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
+import { recordAiApiCall } from './aiUsageTracker.js';
 
 // Local storage key for Gemini API Key & Selected Model
 export const GEMINI_API_KEY_STORAGE_KEY = 'locus_gemini_api_key';
@@ -621,6 +622,12 @@ export async function testGeminiApiKey(apiKey, targetModelId = null) {
       if (response.ok) {
         const data = await response.json();
         saveStoredGeminiModel(candidate.id);
+        recordAiApiCall({
+          feature: 'Model Discovery / Key Check',
+          model: candidate.id,
+          tokens: 50,
+          status: 'SUCCESS'
+        });
         return {
           success: true,
           activeModel: candidate.id,
@@ -907,6 +914,15 @@ export async function auditTaskWithGemini({
   const promptTokens = usage.promptTokenCount || 1650;
   const responseTokens = usage.candidatesTokenCount || 350;
   const totalTokens = usage.totalTokenCount || (promptTokens + responseTokens);
+
+  // Record Unified Daily AI API Request (RPD)
+  recordAiApiCall({
+    feature: 'Task Clinical Audit',
+    model: activeModel,
+    tokens: totalTokens,
+    status: 'SUCCESS',
+    details: `Task #${task?.taskId || task?.id || 'Visit'}`
+  });
 
   // Ensure robust formatting
   const verdict = structuredResult.verdict === 'PASS' ? 'PASS' : 'FATAL';

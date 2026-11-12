@@ -23,6 +23,7 @@ import {
   UserCheck
 } from 'lucide-react';
 import { hasPageAccess, parseRoles, displayRoleName } from '../utils/accessHelper.js';
+import RpdCounterBadge from './RpdCounterBadge.jsx';
 
 export default function Navbar({
   currentUser,
@@ -43,6 +44,7 @@ export default function Navbar({
 
   // Multi-Role Support: Extract and normalize all roles assigned to this user
   const userRoles = parseRoles(currentUser?.roles || [currentUser?.role || 'Auditor']);
+  const isSuperAdmin = userRoles.includes('SuperAdmin');
 
   // Role & Permission Based Page Definitions
   const allNavItems = [
@@ -237,8 +239,15 @@ export default function Navbar({
             })}
           </div>
 
+          {/* SuperAdmin Unified Daily AI RPD Counter (Desktop) */}
+          {isSuperAdmin && (
+            <div className="hidden sm:flex items-center shrink-0 ml-auto mr-3">
+              <RpdCounterBadge currentUser={currentUser} onNavigate={onNavigate} />
+            </div>
+          )}
+
           {/* User Profile & Logout (Desktop: Anchored on the right, never pushed off-screen) */}
-          <div className="hidden sm:flex items-center space-x-2.5 shrink-0 ml-auto pl-3 border-l border-slate-800">
+          <div className={`hidden sm:flex items-center space-x-2.5 shrink-0 ${!isSuperAdmin ? 'ml-auto' : ''} pl-3 border-l border-slate-800`}>
             <div className="text-right">
               <div className="text-xs font-bold text-white flex items-center justify-end gap-1">
                 <span className="truncate max-w-[130px]">
@@ -260,8 +269,13 @@ export default function Navbar({
             </button>
           </div>
 
-          {/* Mobile Hamburger Button */}
+          {/* Mobile Hamburger Button + Mobile SuperAdmin RPD Pill */}
           <div className="flex lg:hidden items-center space-x-2">
+            {isSuperAdmin && (
+              <div className="sm:hidden">
+                <RpdCounterBadge currentUser={currentUser} onNavigate={onNavigate} />
+              </div>
+            )}
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               className="p-2 rounded-lg bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 border border-slate-700 transition-colors"
@@ -327,6 +341,22 @@ export default function Navbar({
               Logout
             </button>
           </div>
+
+          {/* SuperAdmin Unified Daily AI RPD Widget (Mobile Dropdown) */}
+          {isSuperAdmin && (
+            <div className="p-3 bg-purple-950/40 rounded-xl border border-purple-500/30 flex items-center justify-between mb-2">
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                  <span>Daily AI API (RPD)</span>
+                </div>
+                <div className="text-[10px] text-purple-300/80 font-mono">
+                  Usage across all roles
+                </div>
+              </div>
+              <RpdCounterBadge currentUser={currentUser} onNavigate={onNavigate} />
+            </div>
+          )}
 
           <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-1">
             Menu Navigation:

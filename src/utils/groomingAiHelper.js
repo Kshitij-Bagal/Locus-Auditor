@@ -22,6 +22,7 @@ import {
   getProviderApiKey,
   getProviderModel
 } from './multiAiAuditHelper.js';
+import { recordAiApiCall } from './aiUsageTracker.js';
 
 export function getTodayYMD() {
   const now = new Date();
@@ -592,6 +593,15 @@ export async function evaluateGroomingWithAi({
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('AI returned unreadable response for grooming check.');
   }
+
+  // Record Unified Daily AI API Request (RPD)
+  recordAiApiCall({
+    feature: 'FE Daily Grooming',
+    model: model || 'gemini-3.8-flash',
+    tokens: tokensUsed,
+    status: 'SUCCESS',
+    details: `${feName || 'FE'} (${feCode || ''})`
+  });
 
   // Normalize verdicts defensively (PASS | WARNING | FATAL)
   const upperCrit = hasUpper ? (parsed.upperBody?.criteria || {}) : {};

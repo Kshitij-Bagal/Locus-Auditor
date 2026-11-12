@@ -515,6 +515,23 @@ export default function AIAuditsConsole({
     return () => { isMounted = false; };
   }, [tasks]);
 
+  // Synchronize with unified AI RPD tracker events
+  useEffect(() => {
+    const handleRpdUpdate = (e) => {
+      const data = e?.detail;
+      if (data && data.date === getTodayDateString()) {
+        setDailyAiUsage(prev => ({
+          date: data.date,
+          requests: Math.max(prev.requests || 0, data.totalRequests || 0),
+          totalTokens: Math.max(prev.totalTokens || 0, data.totalTokens || 0),
+          lastUpdated: data.lastUpdated || new Date().toISOString()
+        }));
+      }
+    };
+    window.addEventListener('locus_ai_rpd_updated', handleRpdUpdate);
+    return () => window.removeEventListener('locus_ai_rpd_updated', handleRpdUpdate);
+  }, []);
+
   // 2. 00:00 Midnight Auto-Reset Timer: automatically resets count to 0 at midnight every day
   useEffect(() => {
     const checkMidnight = () => {
