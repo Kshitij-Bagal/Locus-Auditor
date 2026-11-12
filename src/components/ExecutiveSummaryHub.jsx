@@ -717,7 +717,7 @@ export default function ExecutiveSummaryHub({
     filteredTasks.forEach(t => {
       const rmKey = t.rmName || 'Unassigned RM';
       if (!rmMap.has(rmKey)) {
-        map.set(rmKey, {
+        rmMap.set(rmKey, {
           rmName: rmKey,
           total: 0,
           withImages: 0,
