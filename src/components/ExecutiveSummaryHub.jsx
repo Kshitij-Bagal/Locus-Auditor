@@ -150,11 +150,18 @@ export default function ExecutiveSummaryHub({
       
       const rem = (t.remarks || t.auditorRemarks || '').toLowerCase();
       const reasons = (Array.isArray(t.failedReasons) ? t.failedReasons.join(' ') : String(t.failedReasons || '')).toLowerCase();
-      const isBlankOrFraudulent = rem.includes('blank') || rem.includes('black') || rem.includes('covered') || 
-                                 reasons.includes('blank') || reasons.includes('black') || reasons.includes('covered') || 
-                                 reasons.includes('wrong/blank image');
-
+      
+      // Strict Mutual Exclusivity:
+      // A photo defect (blank/black/covered camera) can ONLY apply if photos were actually uploaded!
+      // If zero images were uploaded, it is strictly categorized as "NO_IMAGES_UPLOADED".
       const isNoImagesUploaded = !hasUploadedImages;
+      const isBlankOrFraudulent = Boolean(
+        hasUploadedImages && (
+          rem.includes('blank') || rem.includes('black') || rem.includes('covered') || 
+          reasons.includes('blank') || reasons.includes('black') || reasons.includes('covered') || 
+          reasons.includes('wrong/blank image') || reasons.includes('pitch black')
+        )
+      );
 
       // Reporting hierarchy resolution
       let amName = !isGenericManagerName(t.amName) ? String(t.amName).trim() : '';
@@ -974,27 +981,48 @@ export default function ExecutiveSummaryHub({
     XLSX.utils.book_append_sheet(wb, wsFE, 'FE_Compliance_Ledger');
 
     // Sheet 6: Filtered Raw Tasks
-    const sheetTaskData = filteredTasks.slice(0, 10000).map(t => ({
-      'TASK ID': t.taskId || t.id,
-      'DISPATCH DATE': t.cleanDate,
-      'CITY / HUB': t.city,
-      'ZONE': t.zone,
-      'FE NAME': t.feName,
-      'FE CODE': t.feCode,
-      'REPORTING AM': t.amName,
-      'AM EMAIL': t.amEmail,
-      'REGIONAL RM': t.rmName,
-      'RM EMAIL': t.rmEmail,
-      'DISPATCH STATUS': t.status,
-      'AUDIT STATUS': t.auditStatus || 'PENDING',
-      'PHOTOS ATTACHED': t.hasUploadedImages ? 'YES' : 'NO',
-      'BLANK / BLACK PHOTO': t.isBlankOrFraudulent ? 'YES' : 'NO',
-      'IMAGE COUNT': t.imageCount || 0,
-      'FAILED REASONS': Array.isArray(t.failedReasons) ? t.failedReasons.join('; ') : (t.failedReasons || ''),
-      'AUDITOR REMARKS': t.remarks || t.auditorRemarks || '',
-      'AUDITED BY': t.auditedBy || '',
-      'REPLACEMENTS ORDERED': (t.replacements || []).map(r => r.name || r.itemName).filter(Boolean).join('; ')
-    }));
+    const sheetTaskData = filteredTasks.slice(0, 10000).map(t => {
+      // Clear, non-contradictory photo evidence classification
+      let photoEvidenceStatus = 'VALID PHOTOS UPLOADED';
+      let photoIntegrityDetail = 'Valid SOP inspection evidence uploaded';
+
+      if (t.isNoImagesUploaded || !t.hasUploadedImages) {
+        photoEvidenceStatus = 'NO PHOTOS UPLOADED';
+        photoIntegrityDetail = 'Zero photo links attached by FE during dispatch closure';
+      } else if (t.isBlankOrFraudulent) {
+        photoEvidenceStatus = 'BLANK / BLACK SCREEN';
+        photoIntegrityDetail = 'Uploaded photo was pitch black, covered camera lens, or blank dummy screen';
+      } else {
+        photoEvidenceStatus = `VALID PHOTOS (${t.imageCount || 5} Attached)`;
+        photoIntegrityDetail = 'Genuine optical equipment & selfie visual evidence';
+      }
+
+      return {
+        'TASK ID': t.taskId || t.id,
+        'DISPATCH DATE': t.cleanDate,
+        'CITY / HUB': t.city,
+        'ZONE': t.zone,
+        'FE NAME': t.feName,
+        'FE CODE': t.feCode,
+        'REPORTING AM': t.amName,
+        'AM EMAIL': t.amEmail,
+        'REGIONAL RM': t.rmName,
+        'RM EMAIL': t.rmEmail,
+        'DISPATCH STATUS': t.status,
+        'AUDIT STATUS': t.auditStatus || 'PENDING',
+        'PHOTO EVIDENCE STATUS': photoEvidenceStatus,
+        'PHOTOS ATTACHED': t.hasUploadedImages ? (t.isBlankOrFraudulent ? 'YES (Defective: Black/Covered)' : 'YES') : 'NO',
+        'BLANK / BLACK PHOTO': t.hasUploadedImages
+          ? (t.isBlankOrFraudulent ? 'YES: Covered Camera / Dark Screen' : 'NO: Valid Visuals')
+          : 'N/A: Zero Photos Uploaded',
+        'PHOTO INTEGRITY CONTEXT': photoIntegrityDetail,
+        'IMAGE COUNT': t.imageCount || 0,
+        'FAILED REASONS': Array.isArray(t.failedReasons) ? t.failedReasons.join('; ') : (t.failedReasons || ''),
+        'AUDITOR REMARKS': t.remarks || t.auditorRemarks || '',
+        'AUDITED BY': t.auditedBy || '',
+        'REPLACEMENTS ORDERED': (t.replacements || []).map(r => r.name || r.itemName).filter(Boolean).join('; ')
+      };
+    });
     const wsTasks = XLSX.utils.json_to_sheet(sheetTaskData);
     XLSX.utils.book_append_sheet(wb, wsTasks, 'Task_Inspector');
 
