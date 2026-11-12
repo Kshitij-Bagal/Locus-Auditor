@@ -48,6 +48,7 @@ import {
 } from '../utils/geminiAuditHelper.js';
 import { extractAiStationEvaluation } from './VerificationModal.jsx';
 import { scanTasksForAiExclusion } from '../utils/imageForensics.js';
+import { parseFailedStationsFromText, isAiAuditorName } from '../utils/crossVerificationHelper.js';
 import {
   SUPPORTED_PROVIDERS,
   getActiveAiProvider,
@@ -1389,16 +1390,20 @@ export default function AIAuditsConsole({
       const notesClean = humanNotesInput.trim();
       const updatedRemarks = `[Human Verified by ${reviewerName}${notesClean ? `: ${notesClean}` : ''}] ${originalRemarks}`.trim();
 
-      const modelAuditorName = targetTask.auditedBy || targetTask.audited_by_name || activeAuditResult?.result?.modelUsed || 'gemini-3.8-flash';
+      const candidateAi = activeAuditResult?.result?.modelUsed || targetTask.aiAuditorName || targetTask.auditorModel;
+      const resolvedAiModel = (candidateAi && isAiAuditorName(candidateAi)) ? candidateAi : 'gemini-3.8-flash';
       const taskTokens = targetTask.totalTokens || targetTask.total_tokens || activeAuditResult?.result?.totalTokens || 0;
 
       if (isPassVerdict) {
         await tasksApi.passAudit({
           taskId,
-          auditorName: modelAuditorName,
+          auditorName: reviewerName,
           auditorLocation: targetTask.facilityCode || 'Central QA',
           remarks: updatedRemarks,
           criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
+          aiCriteriaStatus: targetTask.aiCriteriaStatus || targetTask.criteriaStatus || targetTask.criteria_status || {},
+          aiAuditStatus: 'PASSED',
+          aiAuditorName: resolvedAiModel,
           replacements: [],
           taskData: targetTask,
           totalTokens: taskTokens
@@ -1410,8 +1415,11 @@ export default function AIAuditsConsole({
           failedReasons: targetTask.failedReasons || targetTask.failed_reasons || ['AI Fatal Strike Confirmed by Human Reviewer'],
           remarks: updatedRemarks,
           criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
+          aiCriteriaStatus: targetTask.aiCriteriaStatus || targetTask.criteriaStatus || targetTask.criteria_status || {},
+          aiAuditStatus: 'FATAL',
+          aiAuditorName: resolvedAiModel,
           replacements: [],
-          auditorName: modelAuditorName,
+          auditorName: reviewerName,
           auditorLocation: targetTask.facilityCode || 'Central QA',
           immediateEmail: false,
           totalTokens: taskTokens
@@ -1437,7 +1445,7 @@ export default function AIAuditsConsole({
           auditor_remarks: updatedRemarks,
           human_verified: true,
           humanStatus: 'VERIFIED',
-          auditedBy: modelAuditorName
+          auditedBy: reviewerName
         });
       }
 
@@ -1478,12 +1486,20 @@ export default function AIAuditsConsole({
 
       if (overrideActionType === 'PASS') {
         const updatedRemarks = `[Human Overturned FATAL to PASS by ${reviewerName}: ${cleanReason}] Original AI: ${originalRemarks}`.trim();
+        const updatedCriteria = { selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS' };
+        const aiCriteriaToPreserve = targetTask.aiCriteriaStatus || targetTask.criteriaStatus || targetTask.criteria_status || {
+          selfie: 'PASS', torches: 'FAIL', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS'
+        };
+
         await tasksApi.passAudit({
           taskId,
           auditorName: reviewerName,
           auditorLocation: targetTask.facilityCode || 'Central QA',
           remarks: updatedRemarks,
-          criteriaStatus: { selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS' },
+          criteriaStatus: updatedCriteria,
+          aiCriteriaStatus: aiCriteriaToPreserve,
+          aiAuditStatus: 'FATAL',
+          aiAuditorName: targetTask.aiAuditorName || 'gemini-3.8-flash',
           replacements: [],
           taskData: targetTask,
           totalTokens: taskTokens
@@ -1496,6 +1512,10 @@ export default function AIAuditsConsole({
             remarks: updatedRemarks,
             auditor_remarks: updatedRemarks,
             auditStatus: 'PASSED',
+            criteriaStatus: updatedCriteria,
+            criteria_status: updatedCriteria,
+            aiCriteriaStatus: aiCriteriaToPreserve,
+            ai_criteria_status: aiCriteriaToPreserve,
             human_overturned: true
           }
         }));
@@ -1504,6 +1524,10 @@ export default function AIAuditsConsole({
           onTaskAudited(taskId, 'PASSED', {
             remarks: updatedRemarks,
             auditor_remarks: updatedRemarks,
+            criteriaStatus: updatedCriteria,
+            criteria_status: updatedCriteria,
+            aiCriteriaStatus: aiCriteriaToPreserve,
+            ai_criteria_status: aiCriteriaToPreserve,
             human_overturned: true,
             humanStatus: 'OVERTURNED',
             auditedBy: reviewerName
@@ -1511,12 +1535,36 @@ export default function AIAuditsConsole({
         }
       } else {
         const updatedRemarks = `[Human Overturned PASS to FATAL by ${reviewerName}: ${cleanReason}] Original AI: ${originalRemarks}`.trim();
+        const failedStations = parseFailedStationsFromText(cleanReason);
+        const updatedCriteria = {
+          selfie: failedStations.includes('selfie') ? 'FAIL' : 'PASS',
+          torches: failedStations.includes('torches') ? 'FAIL' : 'PASS',
+          visionChart: failedStations.includes('visionChart') ? 'FAIL' : 'PASS',
+          toolkit: failedStations.includes('toolkit') ? 'FAIL' : 'PASS',
+          frameDisplay: failedStations.includes('frameDisplay') ? 'FAIL' : 'PASS'
+        };
+        // If no specific station keyword was found, mark all stations as failed
+        if (failedStations.length === 0) {
+          updatedCriteria.selfie = 'FAIL';
+          updatedCriteria.torches = 'FAIL';
+          updatedCriteria.visionChart = 'FAIL';
+          updatedCriteria.toolkit = 'FAIL';
+          updatedCriteria.frameDisplay = 'FAIL';
+        }
+
+        const aiCriteriaToPreserve = targetTask.aiCriteriaStatus || {
+          selfie: 'PASS', torches: 'PASS', visionChart: 'PASS', toolkit: 'PASS', frameDisplay: 'PASS'
+        };
+
         await tasksApi.failAudit({
           taskId,
           taskData: targetTask,
           failedReasons: [cleanReason],
           remarks: updatedRemarks,
-          criteriaStatus: targetTask.criteriaStatus || targetTask.criteria_status || {},
+          criteriaStatus: updatedCriteria,
+          aiCriteriaStatus: aiCriteriaToPreserve,
+          aiAuditStatus: 'PASSED',
+          aiAuditorName: targetTask.aiAuditorName || 'gemini-3.8-flash',
           replacements: [],
           auditorName: reviewerName,
           auditorLocation: targetTask.facilityCode || 'Central QA',
@@ -1531,6 +1579,10 @@ export default function AIAuditsConsole({
             remarks: updatedRemarks,
             auditor_remarks: updatedRemarks,
             auditStatus: 'FATAL',
+            criteriaStatus: updatedCriteria,
+            criteria_status: updatedCriteria,
+            aiCriteriaStatus: aiCriteriaToPreserve,
+            ai_criteria_status: aiCriteriaToPreserve,
             human_overturned: true
           }
         }));
@@ -1539,6 +1591,10 @@ export default function AIAuditsConsole({
           onTaskAudited(taskId, 'FATAL', {
             remarks: updatedRemarks,
             auditor_remarks: updatedRemarks,
+            criteriaStatus: updatedCriteria,
+            criteria_status: updatedCriteria,
+            aiCriteriaStatus: aiCriteriaToPreserve,
+            ai_criteria_status: aiCriteriaToPreserve,
             human_overturned: true,
             humanStatus: 'OVERTURNED',
             auditedBy: reviewerName

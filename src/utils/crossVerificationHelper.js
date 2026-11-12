@@ -21,6 +21,98 @@ export const AUDIT_STATIONS = [
 ];
 
 /**
+ * Robust Keyword Parser: Maps remarks, failed reasons, or dispute notes to specific audit station IDs.
+ */
+export function parseFailedStationsFromText(text = '') {
+  if (!text || typeof text !== 'string') return [];
+  const s = text.toLowerCase();
+  const matched = new Set();
+
+  // 1. Selfie & ID Card
+  if (
+    s.includes('selfie') || 
+    s.includes('t-shirt') || 
+    s.includes('tshirt') || 
+    s.includes('polo') || 
+    s.includes('id card') || 
+    s.includes('id badge') || 
+    s.includes('id_card') || 
+    s.includes('lanyard') || 
+    s.includes('uniform')
+  ) {
+    matched.add('selfie');
+  }
+
+  // 2. Blue & Yellow Torches
+  if (
+    s.includes('torch') || 
+    s.includes('penlight') || 
+    s.includes('blue') || 
+    s.includes('yellow') || 
+    s.includes('batteries') || 
+    s.includes('battery') || 
+    s.includes('light beam') ||
+    s.includes('switched off') ||
+    s.includes('dead')
+  ) {
+    matched.add('torches');
+  }
+
+  // 3. Vision Chart & Standee
+  if (
+    s.includes('vision chart') || 
+    s.includes('standee') || 
+    s.includes('snellen') || 
+    s.includes('logmar') || 
+    s.includes('telescop') || 
+    s.includes('chart setup') ||
+    s.includes('vision_chart') ||
+    s.includes('eye level') ||
+    (s.includes('chart') && !s.includes('toolkit'))
+  ) {
+    matched.add('visionChart');
+  }
+
+  // 4. Complete Refraction Toolkit
+  if (
+    s.includes('toolkit') || 
+    s.includes('refraction') || 
+    s.includes('trial frame') || 
+    s.includes('trial_frame') || 
+    s.includes('jcc') || 
+    s.includes('cross cylinder') || 
+    s.includes('mirror') || 
+    s.includes('hand mirror') || 
+    s.includes('sanitizer') || 
+    s.includes('pd tape') || 
+    s.includes('near vision') || 
+    s.includes('reading test') ||
+    s.includes('handheld')
+  ) {
+    matched.add('toolkit');
+  }
+
+  // 5. Frame Display Tray
+  if (
+    s.includes('frame display') || 
+    s.includes('frame_display') || 
+    s.includes('tray') || 
+    s.includes('showcase') || 
+    s.includes('unpacked') || 
+    s.includes('carry bag') || 
+    s.includes('sample frame') || 
+    s.includes('optical frame') ||
+    s.includes('living room') ||
+    (s.includes('display') && !s.includes('vision')) ||
+    (s.includes('frame') && !s.includes('trial frame'))
+  ) {
+    matched.add('frameDisplay');
+  }
+
+  return Array.from(matched);
+}
+
+/**
  * Normalize station pass/fail status
  */
 export function normalizeStationStatus(val) {
@@ -199,7 +291,16 @@ export function getTaskCrossVerification(task) {
       // Confirmed verification: AI verdict matches rawAuditStatus
       aiStatus = (rawAuditStatus === 'FATAL' ? 'FATAL' : 'PASSED');
     }
-    aiAuditorName = task.aiAuditorName || task.auditorModel || (isAuditedByAi ? auditedBy : 'gemini-3.8-flash');
+    const candidateAi = task.aiAuditStatus ? (task.aiAuditorName || task.ai_auditor_name) : null;
+    if (candidateAi && isAiAuditorName(candidateAi)) {
+      aiAuditorName = candidateAi;
+    } else if (task.auditorModel && isAiAuditorName(task.auditorModel)) {
+      aiAuditorName = task.auditorModel;
+    } else if (isAuditedByAi) {
+      aiAuditorName = auditedBy;
+    } else {
+      aiAuditorName = 'gemini-3.8-flash';
+    }
   } else if (isLegacyAiAudit) {
     isAiAudited = true;
     if (rawAuditStatus === 'PASSED' || rawAuditStatus === 'FATAL') {
@@ -212,11 +313,21 @@ export function getTaskCrossVerification(task) {
     aiAuditorName = isAuditedByAi ? auditedBy : (task.aiAuditorName || 'gemini-3.8-flash');
   }
 
-  aiConfidenceScore = (task.aiConfidenceScore !== undefined && task.aiConfidenceScore !== null) 
+  let conf = (task.aiConfidenceScore !== undefined && task.aiConfidenceScore !== null) 
     ? Number(task.aiConfidenceScore) 
     : (task.ai_confidence_score !== undefined && task.ai_confidence_score !== null 
         ? Number(task.ai_confidence_score) 
         : (localAiData?.aiConfidenceScore ? Number(localAiData.aiConfidenceScore) : null));
+
+  if (!conf || conf === 0) {
+    const confMatch = remarks.match(/(?:Conf|Confidence|Score)[:\s]+(\d+)%/i);
+    if (confMatch) {
+      conf = Number(confMatch[1]);
+    } else if (isAiAudited) {
+      conf = 95;
+    }
+  }
+  aiConfidenceScore = conf;
 
   aiAuditedAt = task.aiAuditedAt || task.ai_audited_at || localAiData?.aiAuditedAt || (isLegacyAiAudit ? task.auditedAt : null);
 
@@ -224,30 +335,89 @@ export function getTaskCrossVerification(task) {
   const isDualAudited = Boolean(isHumanAudited && isAiAudited);
 
   // 4. Station-by-Station Compliance Evaluation
-  const humanCriteria = task.criteriaStatus || task.criteria_status || {};
-  let aiCriteria = task.aiCriteriaStatus || task.ai_criteria_status || localAiData?.aiCriteriaStatus || null;
+  let humanCriteria = { ...(task.criteriaStatus || task.criteria_status || {}) };
+  let aiCriteria = { ...(task.aiCriteriaStatus || task.ai_criteria_status || localAiData?.aiCriteriaStatus || {}) };
 
-  // Fallback for AI criteria when explicit human verification confirmed/overturned task
-  if (!aiCriteria && isDualAudited && humanCriteria && Object.keys(humanCriteria).length > 0) {
-    if (humanStatus === aiStatus) {
-      aiCriteria = humanCriteria;
-    } else if (remarks.includes('[Human Overturned FATAL to PASS')) {
-      const failedList = task.failedReasons || task.failed_reasons || [];
-      const derived = { ...humanCriteria };
-      AUDIT_STATIONS.forEach(st => {
-        const isFailedInAi = failedList.some(r => 
-          String(r).toLowerCase().includes(st.shortLabel.toLowerCase()) || 
-          String(r).toLowerCase().includes(st.id.toLowerCase())
-        );
-        if (isFailedInAi) {
-          derived[st.id] = 'FAIL';
-        }
-      });
-      aiCriteria = derived;
+  // Reconcile Human / City Admin Station Criteria
+  if (humanStatus === 'PASSED') {
+    // If human audit status is PASSED, all 5 stations must be PASS
+    AUDIT_STATIONS.forEach(st => {
+      humanCriteria[st.id] = 'PASS';
+    });
+  } else if (humanStatus === 'FATAL') {
+    // If human verdict is FATAL, human criteria CANNOT be all PASS!
+    // If all stations are currently PASS or empty, derive failed stations from remarks / failed reasons:
+    const hasAnyHumanFail = AUDIT_STATIONS.some(st => normalizeStationStatus(humanCriteria[st.id]) === 'FAIL');
+    if (!hasAnyHumanFail) {
+      const combinedReasonText = [
+        ...(Array.isArray(task.failedReasons) ? task.failedReasons : []),
+        ...(Array.isArray(task.failed_reasons) ? task.failed_reasons : []),
+        remarks,
+        task.disputeReason || '',
+        task.disputeCategory || ''
+      ].join(' ');
+
+      const failedStationIds = parseFailedStationsFromText(combinedReasonText);
+      if (failedStationIds.length > 0) {
+        AUDIT_STATIONS.forEach(st => {
+          humanCriteria[st.id] = failedStationIds.includes(st.id) ? 'FAIL' : 'PASS';
+        });
+      } else {
+        // If blanket fatal or no station keyword detected, all stations failed
+        AUDIT_STATIONS.forEach(st => {
+          humanCriteria[st.id] = 'FAIL';
+        });
+      }
     } else {
-      aiCriteria = humanCriteria;
+      // Ensure missing stations are set to PASS
+      AUDIT_STATIONS.forEach(st => {
+        if (!humanCriteria[st.id]) humanCriteria[st.id] = 'PASS';
+      });
     }
-  } else if (!aiCriteria) {
+  }
+
+  // Reconcile AI Station Criteria
+  if (isAiAudited) {
+    if (aiStatus === 'PASSED') {
+      // For AI PASSED audits, all stations must be PASS
+      AUDIT_STATIONS.forEach(st => {
+        aiCriteria[st.id] = 'PASS';
+      });
+    } else if (aiStatus === 'FATAL') {
+      // For AI FATAL audits, at least one station must be FAIL
+      const hasAnyAiFail = AUDIT_STATIONS.some(st => normalizeStationStatus(aiCriteria[st.id]) === 'FAIL');
+      if (!hasAnyAiFail) {
+        const aiReasonText = [
+          task.aiRemarks || '',
+          ...(Array.isArray(task.aiFailedReasons) ? task.aiFailedReasons : []),
+          ...(Array.isArray(task.ai_failed_reasons) ? task.ai_failed_reasons : []),
+          remarks.includes('Original AI:') ? remarks.split('Original AI:')[1] : remarks
+        ].join(' ');
+
+        const aiFailedIds = parseFailedStationsFromText(aiReasonText);
+        if (aiFailedIds.length > 0) {
+          AUDIT_STATIONS.forEach(st => {
+            aiCriteria[st.id] = aiFailedIds.includes(st.id) ? 'FAIL' : 'PASS';
+          });
+        } else if (remarks.includes('[Human Overturned FATAL to PASS')) {
+          const overturnMatch = remarks.match(/\[Human Overturned FATAL to PASS[^:]*:\s*([^\]]+)\]/);
+          const overturnReason = overturnMatch ? overturnMatch[1] : remarks;
+          const overturnedIds = parseFailedStationsFromText(overturnReason);
+          AUDIT_STATIONS.forEach(st => {
+            aiCriteria[st.id] = overturnedIds.includes(st.id) ? 'FAIL' : 'PASS';
+          });
+        } else {
+          AUDIT_STATIONS.forEach(st => {
+            aiCriteria[st.id] = 'FAIL';
+          });
+        }
+      } else {
+        AUDIT_STATIONS.forEach(st => {
+          if (!aiCriteria[st.id]) aiCriteria[st.id] = 'PASS';
+        });
+      }
+    }
+  } else {
     aiCriteria = {};
   }
 

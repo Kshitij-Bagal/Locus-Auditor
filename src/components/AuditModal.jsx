@@ -35,6 +35,7 @@ import {
   getHumanVerificationStatus, 
   isAwaitingHumanVerification 
 } from '../lib/supabase.js';
+import { parseFailedStationsFromText } from '../utils/crossVerificationHelper.js';
 
 export const BLANKET_FATAL_REASONS = [
   'All images missing / blank / black',
@@ -337,12 +338,29 @@ export default function AuditModal({
       return;
     }
 
+    // Reconcile and finalize item-level criteria statuses:
+    // Mark failed stations as FAIL and remaining stations as PASS to prevent contradictory all-PASS states
+    const finalizedCriteria = {};
+    const textReasons = [...(selectedViolations || []), customRemark || ''].join(' ');
+    const parsedFails = parseFailedStationsFromText(textReasons);
+
+    rules.forEach(r => {
+      const key = r.id || r.imageKey;
+      const isMarkedFail = criteriaStatus[key] === 'FAIL' || failedCheckpoints.includes(key) || parsedFails.includes(key);
+      finalizedCriteria[key] = isMarkedFail ? 'FAIL' : 'PASS';
+    });
+
+    // Guard: Ensure at least one checkpoint is explicitly FAIL
+    const hasFail = Object.values(finalizedCriteria).some(v => v === 'FAIL');
+    if (!hasFail) {
+      const currentKey = currentCriterion?.id || currentCriterion?.imageKey || 'selfie';
+      finalizedCriteria[currentKey] = 'FAIL';
+    }
+
     onFatalAudit(task.id, {
       failedReasons: selectedViolations.length > 0 ? selectedViolations : [customRemark.trim()],
       remarks: customRemark.trim(),
-      criteriaStatus: {
-        ...criteriaStatus
-      },
+      criteriaStatus: finalizedCriteria,
       replacements: replacements,
       taskData: task,
       emailNotified: false

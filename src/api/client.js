@@ -517,7 +517,9 @@ export const tasksApi = {
           disputeProofUrl: row.dispute_proof_url || null,
           totalTokens: row.total_tokens || 0,
           total_tokens: row.total_tokens || 0,
-          auditorModel: row.auditor_model || row.audited_by_name || null,
+          auditorModel: (row.auditor_model && !/^(Kshitij|Admin|Auditor|Fe|User|Central)/i.test(row.auditor_model)) 
+            ? row.auditor_model 
+            : (row.ai_auditor_name || fallbackAi.aiAuditorName || null),
           humanVerified: Boolean(row.human_verified),
           human_verified: Boolean(row.human_verified),
           humanOverturned: Boolean(row.human_overturned),
@@ -659,7 +661,7 @@ export const tasksApi = {
   },
 
   // Auditor PASS write operation
-  async passAudit({ taskId, auditorName, auditorLocation, remarks, criteriaStatus, replacements, taskData, totalTokens = null }) {
+  async passAudit({ taskId, auditorName, auditorLocation, remarks, criteriaStatus, replacements, taskData, totalTokens = null, aiAuditStatus = null, aiCriteriaStatus = null, aiAuditorName = null }) {
     // 1. Update task in tasks table
     if (supabase) {
       const updatePayload = {
@@ -677,13 +679,19 @@ export const tasksApi = {
       if (totalTokens !== null && totalTokens !== undefined) {
         updatePayload.total_tokens = Number(totalTokens);
       }
+      if (aiAuditStatus) updatePayload.ai_audit_status = aiAuditStatus;
+      if (aiCriteriaStatus) updatePayload.ai_criteria_status = aiCriteriaStatus;
+      if (aiAuditorName) updatePayload.ai_auditor_name = aiAuditorName;
 
       let { data, error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
 
-      // Resilient fallback if 'total_tokens' column hasn't been added to tasks table via SQL yet
-      if (error && error.message && error.message.includes('total_tokens')) {
-        console.warn('Supabase tasks table is missing total_tokens column. Please run the SQL snippet.');
+      // Resilient fallback if 'total_tokens' or dedicated 'ai_*' columns haven't been added to tasks table via SQL yet
+      if (error && error.message && (error.message.includes('total_tokens') || error.message.includes('ai_'))) {
+        console.warn('Supabase tasks table is missing optional columns. Retrying without them...');
         delete updatePayload.total_tokens;
+        delete updatePayload.ai_audit_status;
+        delete updatePayload.ai_criteria_status;
+        delete updatePayload.ai_auditor_name;
         const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
         data = retry.data;
         error = retry.error;
@@ -700,6 +708,22 @@ export const tasksApi = {
       if (error) {
         console.error('tasksApi.passAudit Supabase error:', error);
         throw new Error(error.message || 'Failed to update pass audit in Supabase');
+      }
+
+      // Preserve AI verdict and criteria in local ledger
+      if (typeof window !== 'undefined' && window.localStorage && (aiAuditStatus || aiCriteriaStatus)) {
+        try {
+          const raw = window.localStorage.getItem('locus_ai_verdicts_ledger');
+          const ledger = raw ? JSON.parse(raw) : {};
+          const prevEntry = ledger[String(taskId)] || {};
+          ledger[String(taskId)] = {
+            ...prevEntry,
+            aiAuditStatus: aiAuditStatus || prevEntry.aiAuditStatus,
+            aiCriteriaStatus: aiCriteriaStatus || prevEntry.aiCriteriaStatus,
+            aiAuditorName: aiAuditorName || prevEntry.aiAuditorName
+          };
+          window.localStorage.setItem('locus_ai_verdicts_ledger', JSON.stringify(ledger));
+        } catch (_) {}
       }
     }
 
@@ -735,7 +759,10 @@ export const tasksApi = {
     rmEmail,
     improvementTips,
     immediateEmail = false,
-    totalTokens = null
+    totalTokens = null,
+    aiAuditStatus = null,
+    aiCriteriaStatus = null,
+    aiAuditorName = null
   }) {
     // 1. Single immediate email only if explicitly enabled (default is false to use daily scheduled batch)
     const recipients = [feEmail, amEmail, rmEmail].filter(Boolean);
@@ -783,13 +810,19 @@ export const tasksApi = {
       if (totalTokens !== null && totalTokens !== undefined) {
         updatePayload.total_tokens = Number(totalTokens);
       }
+      if (aiAuditStatus) updatePayload.ai_audit_status = aiAuditStatus;
+      if (aiCriteriaStatus) updatePayload.ai_criteria_status = aiCriteriaStatus;
+      if (aiAuditorName) updatePayload.ai_auditor_name = aiAuditorName;
 
       let { data, error } = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
 
-      // Resilient fallback if 'total_tokens' column hasn't been added to tasks table via SQL yet
-      if (error && error.message && error.message.includes('total_tokens')) {
-        console.warn('Supabase tasks table is missing total_tokens column. Please run the SQL snippet.');
+      // Resilient fallback if 'total_tokens' or dedicated 'ai_*' columns haven't been added to tasks table via SQL yet
+      if (error && error.message && (error.message.includes('total_tokens') || error.message.includes('ai_'))) {
+        console.warn('Supabase tasks table is missing optional columns. Retrying without them...');
         delete updatePayload.total_tokens;
+        delete updatePayload.ai_audit_status;
+        delete updatePayload.ai_criteria_status;
+        delete updatePayload.ai_auditor_name;
         const retry = await supabase.from('tasks').update(updatePayload).eq('id', String(taskId)).select('id');
         data = retry.data;
         error = retry.error;
@@ -806,6 +839,22 @@ export const tasksApi = {
       if (error) {
         console.error('tasksApi.failAudit Supabase error:', error);
         throw new Error(error.message || 'Failed to record fatal audit in Supabase');
+      }
+
+      // Preserve AI verdict and criteria in local ledger
+      if (typeof window !== 'undefined' && window.localStorage && (aiAuditStatus || aiCriteriaStatus)) {
+        try {
+          const raw = window.localStorage.getItem('locus_ai_verdicts_ledger');
+          const ledger = raw ? JSON.parse(raw) : {};
+          const prevEntry = ledger[String(taskId)] || {};
+          ledger[String(taskId)] = {
+            ...prevEntry,
+            aiAuditStatus: aiAuditStatus || prevEntry.aiAuditStatus,
+            aiCriteriaStatus: aiCriteriaStatus || prevEntry.aiCriteriaStatus,
+            aiAuditorName: aiAuditorName || prevEntry.aiAuditorName
+          };
+          window.localStorage.setItem('locus_ai_verdicts_ledger', JSON.stringify(ledger));
+        } catch (_) {}
       }
     }
 
