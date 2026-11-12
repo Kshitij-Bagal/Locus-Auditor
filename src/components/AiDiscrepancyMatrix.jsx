@@ -20,6 +20,11 @@ import {
   FileCode,
   UserCheck
 } from 'lucide-react';
+import { 
+  getTaskCrossVerification, 
+  AUDIT_STATIONS, 
+  normalizeStationStatus 
+} from '../utils/crossVerificationHelper.js';
 
 const STATIONS = [
   { id: 'selfie', label: '1. Selfie & ID Card', desc: 'Official Lenskart polo & visible employee photo ID card' },
@@ -52,12 +57,11 @@ export default function AiDiscrepancyMatrix({
     return null;
   };
 
-  // 1. Identify Dual-Audited Tasks (audited by BOTH City Admin & AI)
+  // 1. Identify Dual-Audited Tasks (audited by BOTH City Admin & AI, or verified by human)
   const dualAuditedTasks = useMemo(() => {
     return (tasks || []).filter(t => {
-      const hasHuman = t.auditStatus === 'PASSED' || t.auditStatus === 'FATAL';
-      const hasAi = t.aiAuditStatus === 'PASSED' || t.aiAuditStatus === 'FATAL';
-      return hasHuman && hasAi;
+      const cross = getTaskCrossVerification(t);
+      return cross.isDualAudited;
     });
   }, [tasks]);
 
@@ -91,15 +95,16 @@ export default function AiDiscrepancyMatrix({
     let highConfDivergence = 0;
 
     dualAuditedTasks.forEach(t => {
-      const hStatus = t.auditStatus;
-      const aiStatus = t.aiAuditStatus;
+      const cross = getTaskCrossVerification(t);
+      const hStatus = cross.humanStatus;
+      const aiStatus = cross.aiStatus;
       if (hStatus === aiStatus) {
         agreed++;
       } else if (hStatus === 'FATAL' && aiStatus === 'PASSED') {
         aiFalsePositives++;
       } else if (hStatus === 'PASSED' && aiStatus === 'FATAL') {
         aiFalseNegatives++;
-        if (Number(t.aiConfidenceScore) >= 90) {
+        if (Number(cross.aiConfidenceScore || t.aiConfidenceScore) >= 90) {
           highConfDivergence++;
         }
       }
@@ -124,8 +129,10 @@ export default function AiDiscrepancyMatrix({
       let fnCount = 0; // Human PASS, AI FAIL
 
       dualAuditedTasks.forEach(t => {
-        const humanSt = normStation(t.criteriaStatus?.[station.id]);
-        const aiSt = normStation(t.aiCriteriaStatus?.[station.id]);
+        const cross = getTaskCrossVerification(t);
+        const stDetail = cross.stationDetails.find(s => s.id === station.id);
+        const humanSt = stDetail?.humanStatus || normStation(t.criteriaStatus?.[station.id]);
+        const aiSt = stDetail?.aiStatus || normStation(t.aiCriteriaStatus?.[station.id]);
 
         if (humanSt && aiSt) {
           evaluatedCount++;
@@ -199,9 +206,10 @@ export default function AiDiscrepancyMatrix({
         if (!mId && !mFe && !mAud) return false;
       }
 
-      const isMismatch = t.auditStatus !== t.aiAuditStatus;
-      const isFp = t.auditStatus === 'FATAL' && t.aiAuditStatus === 'PASSED';
-      const isFn = t.auditStatus === 'PASSED' && t.aiAuditStatus === 'FATAL';
+      const cross = getTaskCrossVerification(t);
+      const isMismatch = cross.humanStatus !== cross.aiStatus;
+      const isFp = cross.humanStatus === 'FATAL' && cross.aiStatus === 'PASSED';
+      const isFn = cross.humanStatus === 'PASSED' && cross.aiStatus === 'FATAL';
 
       if (filterMode === 'MISMATCH_ONLY' && !isMismatch) return false;
       if (filterMode === 'AI_FP' && !isFp) return false;
@@ -209,8 +217,9 @@ export default function AiDiscrepancyMatrix({
 
       // Station specific filter
       if (selectedStationFilter !== 'ALL') {
-        const humanSt = normStation(t.criteriaStatus?.[selectedStationFilter]);
-        const aiSt = normStation(t.aiCriteriaStatus?.[selectedStationFilter]);
+        const stDetail = cross.stationDetails.find(s => s.id === selectedStationFilter);
+        const humanSt = stDetail?.humanStatus || normStation(t.criteriaStatus?.[selectedStationFilter]);
+        const aiSt = stDetail?.aiStatus || normStation(t.aiCriteriaStatus?.[selectedStationFilter]);
         if (!humanSt || !aiSt || humanSt === aiSt) return false;
       }
 
@@ -512,9 +521,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_ai_audit_status ON public.tasks (ai_audit_s
             ) : (
               filteredDualTasks.map(task => {
                 const isSelected = activeTask && String(activeTask.id || activeTask.taskId) === String(task.id || task.taskId);
-                const isMismatch = task.auditStatus !== task.aiAuditStatus;
-                const isFp = task.auditStatus === 'FATAL' && task.aiAuditStatus === 'PASSED';
-                const isFn = task.auditStatus === 'PASSED' && task.aiAuditStatus === 'FATAL';
+                const cross = getTaskCrossVerification(task);
+                const isMismatch = cross.humanStatus !== cross.aiStatus;
+                const isFp = cross.humanStatus === 'FATAL' && cross.aiStatus === 'PASSED';
+                const isFn = cross.humanStatus === 'PASSED' && cross.aiStatus === 'FATAL';
 
                 return (
                   <div
@@ -536,19 +546,19 @@ CREATE INDEX IF NOT EXISTS idx_tasks_ai_audit_status ON public.tasks (ai_audit_s
 
                       {/* Verdict Badges */}
                       <div className="flex items-center gap-1 text-[10px] font-black">
-                        <span className={`px-1.5 py-0.5 rounded ${task.auditStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
-                          H: {task.auditStatus === 'PASSED' ? 'PASS' : 'FATAL'}
+                        <span className={`px-1.5 py-0.5 rounded ${cross.humanStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                          H: {cross.humanStatus === 'PASSED' ? 'PASS' : 'FATAL'}
                         </span>
                         <span className="text-slate-500">vs</span>
-                        <span className={`px-1.5 py-0.5 rounded ${task.aiAuditStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
-                          AI: {task.aiAuditStatus === 'PASSED' ? 'PASS' : 'FATAL'}
+                        <span className={`px-1.5 py-0.5 rounded ${cross.aiStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                          AI: {cross.aiStatus === 'PASSED' ? 'PASS' : 'FATAL'}
                         </span>
                       </div>
                     </div>
 
                     <div className="flex items-center justify-between text-[11px] text-slate-400">
                       <span>FE: {task.feName || 'Unknown'}</span>
-                      <span>Auditor: {task.auditedBy || task.audited_by_name || 'City Admin'}</span>
+                      <span>Auditor: {cross.humanAuditorName || task.auditedBy || 'City Admin'}</span>
                     </div>
 
                     {isMismatch && (
@@ -556,7 +566,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_ai_audit_status ON public.tasks (ai_audit_s
                         <span className={`font-bold ${isFp ? 'text-rose-400' : 'text-amber-400'}`}>
                           {isFp ? '⚠️ AI False Positive (Too Lenient)' : '⚠️ AI False Negative (Too Strict)'}
                         </span>
-                        <span className="text-slate-500 font-mono">Conf: {task.aiConfidenceScore || 0}%</span>
+                        <span className="text-slate-500 font-mono">Conf: {cross.aiConfidenceScore || task.aiConfidenceScore || 0}%</span>
                       </div>
                     )}
                   </div>
@@ -572,184 +582,198 @@ CREATE INDEX IF NOT EXISTS idx_tasks_ai_audit_status ON public.tasks (ai_audit_s
             <div className="p-16 text-center text-slate-500 text-xs">
               Select a task from the list on the left to inspect side-by-side criteria and photos.
             </div>
-          ) : (
-            <>
-              {/* Header */}
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800 flex-wrap gap-2">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h4 className="text-sm font-black text-white font-mono">Task #{activeTask.taskId || activeTask.id}</h4>
-                    <span className="text-xs text-slate-400">• {activeTask.feName} ({activeTask.feCode || 'FE'})</span>
-                    <span className="text-xs text-slate-500 font-mono">[{activeTask.facilityCode || 'Hub'}]</span>
+          ) : (() => {
+            const activeCross = getTaskCrossVerification(activeTask);
+            const activeHumanStatus = activeCross.humanStatus;
+            const activeAiStatus = activeCross.aiStatus;
+            const activeHumanAuditor = activeCross.humanAuditorName || activeTask.auditedBy || 'City Admin';
+            const activeAiAuditor = activeCross.aiAuditorName || activeTask.aiAuditorName || 'Universal AI';
+            const activeAiConfidence = activeCross.aiConfidenceScore ?? activeTask.aiConfidenceScore ?? 0;
+            const rawRemarks = activeTask.remarks || activeTask.auditor_remarks || '';
+            const activeAiRemarks = activeTask.aiRemarks || (rawRemarks.includes('Original AI:') ? rawRemarks.split('Original AI:')[1]?.trim() : '');
+
+            return (
+              <>
+                {/* Header */}
+                <div className="flex items-center justify-between pb-3 border-b border-slate-800 flex-wrap gap-2">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-sm font-black text-white font-mono">Task #{activeTask.taskId || activeTask.id}</h4>
+                      <span className="text-xs text-slate-400">• {activeTask.feName} ({activeTask.feCode || 'FE'})</span>
+                      <span className="text-xs text-slate-500 font-mono">[{activeTask.facilityCode || 'Hub'}]</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Dispatch: {activeTask.date || activeTask.dispatch_date || 'N/A'} • Customer: {activeTask.customerName || 'N/A'}
+                    </p>
                   </div>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    Dispatch: {activeTask.date || activeTask.dispatch_date || 'N/A'} • Customer: {activeTask.customerName || 'N/A'}
-                  </p>
+
+                  {onInspectTask && (
+                    <button
+                      onClick={() => onInspectTask(activeTask)}
+                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white flex items-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Open in Full Viewer</span>
+                    </button>
+                  )}
                 </div>
 
-                {onInspectTask && (
-                  <button
-                    onClick={() => onInspectTask(activeTask)}
-                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white flex items-center gap-1 transition-colors cursor-pointer"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>Open in Full Viewer</span>
-                  </button>
-                )}
-              </div>
+                {/* Side-by-Side Comparison Columns */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* 1. City Admin Ground Truth */}
+                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                      <span className="text-xs font-bold text-sky-300 flex items-center gap-1">
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>City Admin Audit (Ground Truth)</span>
+                      </span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                        activeHumanStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                      }`}>
+                        {activeHumanStatus}
+                      </span>
+                    </div>
 
-              {/* Side-by-Side Comparison Columns */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* 1. City Admin Ground Truth */}
-                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <span className="text-xs font-bold text-sky-300 flex items-center gap-1">
-                      <UserCheck className="w-3.5 h-3.5" />
-                      <span>City Admin Audit (Ground Truth)</span>
-                    </span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                      activeTask.auditStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                    }`}>
-                      {activeTask.auditStatus}
-                    </span>
-                  </div>
+                    <div className="text-[11px] text-slate-400 space-y-1">
+                      <div><span className="text-slate-500">Auditor:</span> {activeHumanAuditor}</div>
+                      {activeCross.humanAuditedAt && (
+                        <div><span className="text-slate-500">Audited At:</span> {new Date(activeCross.humanAuditedAt).toLocaleString()}</div>
+                      )}
+                    </div>
 
-                  <div className="text-[11px] text-slate-400 space-y-1">
-                    <div><span className="text-slate-500">Auditor:</span> {activeTask.auditedBy || activeTask.audited_by_name || 'City Admin'}</div>
-                    {activeTask.auditedAt && (
-                      <div><span className="text-slate-500">Audited At:</span> {new Date(activeTask.auditedAt).toLocaleString()}</div>
+                    {/* Criteria Checklist */}
+                    <div className="space-y-1 pt-1">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Station Status:</span>
+                      {STATIONS.map(s => {
+                        const stDetail = activeCross.stationDetails.find(st => st.id === s.id);
+                        const st = stDetail?.humanStatus || normStation(activeTask.criteriaStatus?.[s.id]);
+                        return (
+                          <div key={s.id} className="flex items-center justify-between text-[11px] py-0.5">
+                            <span className="text-slate-300">{s.label}</span>
+                            <span className={`font-mono font-bold text-[10px] ${st === 'PASS' ? 'text-emerald-400' : (st === 'FAIL' ? 'text-rose-400' : 'text-slate-500')}`}>
+                              {st || 'N/A'}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Auditor Remarks */}
+                    {rawRemarks && (
+                      <div className="pt-2 border-t border-slate-800/80 text-[11px]">
+                        <span className="text-slate-500 block mb-0.5">Remarks:</span>
+                        <p className="text-slate-300 italic bg-slate-900/60 p-2 rounded-lg border border-slate-800">
+                          "{rawRemarks}"
+                        </p>
+                      </div>
                     )}
                   </div>
 
-                  {/* Criteria Checklist */}
-                  <div className="space-y-1 pt-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Station Status:</span>
-                    {STATIONS.map(s => {
-                      const st = normStation(activeTask.criteriaStatus?.[s.id]);
-                      return (
-                        <div key={s.id} className="flex items-center justify-between text-[11px] py-0.5">
-                          <span className="text-slate-300">{s.label}</span>
-                          <span className={`font-mono font-bold text-[10px] ${st === 'PASS' ? 'text-emerald-400' : (st === 'FAIL' ? 'text-rose-400' : 'text-slate-500')}`}>
-                            {st || 'N/A'}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Auditor Remarks */}
-                  {activeTask.remarks && (
-                    <div className="pt-2 border-t border-slate-800/80 text-[11px]">
-                      <span className="text-slate-500 block mb-0.5">Remarks:</span>
-                      <p className="text-slate-300 italic bg-slate-900/60 p-2 rounded-lg border border-slate-800">
-                        "{activeTask.remarks}"
-                      </p>
+                  {/* 2. AI Vision Audit */}
+                  <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                      <span className="text-xs font-bold text-purple-300 flex items-center gap-1">
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>AI Vision Audit</span>
+                      </span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                        activeAiStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                      }`}>
+                        {activeAiStatus}
+                      </span>
                     </div>
-                  )}
+
+                    <div className="text-[11px] text-slate-400 space-y-1">
+                      <div><span className="text-slate-500">Model:</span> {activeAiAuditor}</div>
+                      <div>
+                        <span className="text-slate-500">Confidence:</span> {activeAiConfidence}%
+                        {activeTask.aiErrorMargin ? ` (±${activeTask.aiErrorMargin}%)` : ''}
+                      </div>
+                    </div>
+
+                    {/* AI Criteria Checklist */}
+                    <div className="space-y-1 pt-1">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">AI Station Status:</span>
+                      {STATIONS.map(s => {
+                        const stDetail = activeCross.stationDetails.find(st => st.id === s.id);
+                        const st = stDetail?.aiStatus || normStation(activeTask.aiCriteriaStatus?.[s.id]);
+                        const humanSt = stDetail?.humanStatus || normStation(activeTask.criteriaStatus?.[s.id]);
+                        const isDiscrepant = humanSt && st && humanSt !== st;
+
+                        return (
+                          <div key={s.id} className="flex items-center justify-between text-[11px] py-0.5">
+                            <span className={`${isDiscrepant ? 'text-amber-300 font-bold' : 'text-slate-300'}`}>
+                              {s.label}
+                            </span>
+                            <div className="flex items-center gap-1 font-mono text-[10px] font-bold">
+                              <span className={st === 'PASS' ? 'text-emerald-400' : (st === 'FAIL' ? 'text-rose-400' : 'text-slate-500')}>
+                                {st || 'N/A'}
+                              </span>
+                              {isDiscrepant && (
+                                <span className="text-[9px] px-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                  Mismatch
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* AI Remarks */}
+                    {activeAiRemarks && (
+                      <div className="pt-2 border-t border-slate-800/80 text-[11px]">
+                        <span className="text-slate-500 block mb-0.5">AI Summary:</span>
+                        <p className="text-slate-300 italic bg-slate-900/60 p-2 rounded-lg border border-slate-800">
+                          "{activeAiRemarks}"
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
-                {/* 2. AI Vision Audit */}
-                <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <span className="text-xs font-bold text-purple-300 flex items-center gap-1">
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>AI Vision Audit</span>
-                    </span>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                      activeTask.aiAuditStatus === 'PASSED' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                    }`}>
-                      {activeTask.aiAuditStatus}
-                    </span>
-                  </div>
-
-                  <div className="text-[11px] text-slate-400 space-y-1">
-                    <div><span className="text-slate-500">Model:</span> {activeTask.aiAuditorName || 'Universal AI'}</div>
-                    <div>
-                      <span className="text-slate-500">Confidence:</span> {activeTask.aiConfidenceScore || 0}%
-                      {activeTask.aiErrorMargin ? ` (±${activeTask.aiErrorMargin}%)` : ''}
-                    </div>
-                  </div>
-
-                  {/* AI Criteria Checklist */}
-                  <div className="space-y-1 pt-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">AI Station Status:</span>
+                {/* Photos Row (5 photos side-by-side) */}
+                <div className="pt-2 border-t border-slate-800 space-y-2">
+                  <span className="text-xs font-bold text-slate-400 block">Submitted Dispatch Photos (Review Ground Truth):</span>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
                     {STATIONS.map(s => {
-                      const st = normStation(activeTask.aiCriteriaStatus?.[s.id]);
-                      const humanSt = normStation(activeTask.criteriaStatus?.[s.id]);
-                      const isDiscrepant = humanSt && st && humanSt !== st;
+                      const imgUrl = activeTask.images?.[s.id] || activeTask.images?.[s.id.toLowerCase()];
+                      const stDetail = activeCross.stationDetails.find(st => st.id === s.id);
+                      const hSt = stDetail?.humanStatus || normStation(activeTask.criteriaStatus?.[s.id]);
+                      const aiSt = stDetail?.aiStatus || normStation(activeTask.aiCriteriaStatus?.[s.id]);
 
                       return (
-                        <div key={s.id} className="flex items-center justify-between text-[11px] py-0.5">
-                          <span className={`${isDiscrepant ? 'text-amber-300 font-bold' : 'text-slate-300'}`}>
-                            {s.label}
-                          </span>
-                          <div className="flex items-center gap-1 font-mono text-[10px] font-bold">
-                            <span className={st === 'PASS' ? 'text-emerald-400' : (st === 'FAIL' ? 'text-rose-400' : 'text-slate-500')}>
-                              {st || 'N/A'}
-                            </span>
-                            {isDiscrepant && (
-                              <span className="text-[9px] px-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                                Mismatch
-                              </span>
+                        <div key={s.id} className="rounded-xl overflow-hidden bg-slate-950 border border-slate-800 relative group">
+                          <div className="h-28 w-full bg-slate-900 flex items-center justify-center overflow-hidden">
+                            {imgUrl ? (
+                              <img
+                                src={imgUrl}
+                                alt={s.label}
+                                className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                onError={(e) => {
+                                  e.target.style.display = 'none';
+                                }}
+                              />
+                            ) : (
+                              <span className="text-[10px] text-slate-500 italic">No image</span>
                             )}
                           </div>
+
+                          <div className="p-1.5 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between text-[9px] font-mono">
+                            <span className="text-slate-300 truncate">{s.id}</span>
+                            <div className="flex items-center gap-1 font-bold">
+                              <span className={hSt === 'PASS' ? 'text-emerald-400' : 'text-rose-400'}>H:{hSt || '-'}</span>
+                              <span className={aiSt === 'PASS' ? 'text-emerald-400' : 'text-rose-400'}>AI:{aiSt || '-'}</span>
+                            </div>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
-
-                  {/* AI Remarks */}
-                  {activeTask.aiRemarks && (
-                    <div className="pt-2 border-t border-slate-800/80 text-[11px]">
-                      <span className="text-slate-500 block mb-0.5">AI Summary:</span>
-                      <p className="text-slate-300 italic bg-slate-900/60 p-2 rounded-lg border border-slate-800">
-                        "{activeTask.aiRemarks}"
-                      </p>
-                    </div>
-                  )}
                 </div>
-              </div>
-
-              {/* Photos Row (5 photos side-by-side) */}
-              <div className="pt-2 border-t border-slate-800 space-y-2">
-                <span className="text-xs font-bold text-slate-400 block">Submitted Dispatch Photos (Review Ground Truth):</span>
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                  {STATIONS.map(s => {
-                    const imgUrl = activeTask.images?.[s.id] || activeTask.images?.[s.id.toLowerCase()];
-                    const hSt = normStation(activeTask.criteriaStatus?.[s.id]);
-                    const aiSt = normStation(activeTask.aiCriteriaStatus?.[s.id]);
-
-                    return (
-                      <div key={s.id} className="rounded-xl overflow-hidden bg-slate-950 border border-slate-800 relative group">
-                        <div className="h-28 w-full bg-slate-900 flex items-center justify-center overflow-hidden">
-                          {imgUrl ? (
-                            <img
-                              src={imgUrl}
-                              alt={s.label}
-                              className="w-full h-full object-cover transition-transform group-hover:scale-105"
-                              onError={(e) => {
-                                e.target.style.display = 'none';
-                              }}
-                            />
-                          ) : (
-                            <span className="text-[10px] text-slate-500 italic">No image</span>
-                          )}
-                        </div>
-
-                        <div className="p-1.5 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between text-[9px] font-mono">
-                          <span className="text-slate-300 truncate">{s.id}</span>
-                          <div className="flex items-center gap-1 font-bold">
-                            <span className={hSt === 'PASS' ? 'text-emerald-400' : 'text-rose-400'}>H:{hSt || '-'}</span>
-                            <span className={aiSt === 'PASS' ? 'text-emerald-400' : 'text-rose-400'}>AI:{aiSt || '-'}</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </>
-          )}
+              </>
+            );
+          })()}
         </div>
       </div>
 

@@ -88,6 +88,30 @@ export function getTaskCrossVerification(task) {
   const auditedBy = String(task.auditedBy || task.audited_by_name || '').trim();
   const remarks = String(task.remarks || task.auditor_remarks || '');
 
+  // Look up local AI verdict ledger if available in browser
+  let localAiData = null;
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const rawLedger = window.localStorage.getItem('locus_ai_verdicts_ledger');
+      if (rawLedger) {
+        const parsed = JSON.parse(rawLedger);
+        localAiData = parsed[String(task.id)] || parsed[String(task.taskId)] || null;
+      }
+    } catch (_) {}
+  }
+
+  // Detect explicit human verification or overturn action
+  const isExplicitVerification = Boolean(
+    task.human_verified || 
+    task.humanVerified || 
+    task.human_overturned || 
+    task.humanOverturned || 
+    task.humanStatus === 'VERIFIED' || 
+    task.humanStatus === 'OVERTURNED' ||
+    remarks.includes('[Human Verified') || 
+    remarks.includes('[Human Overturned')
+  );
+
   // Detect AI presence on this task
   const hasDedicatedAiField = Boolean(task.aiAuditStatus || task.ai_audit_status);
   const isAuditedByAi = isAiAuditorName(auditedBy);
@@ -100,25 +124,38 @@ export function getTaskCrossVerification(task) {
   let humanAuditedAt = null;
 
   // A human audit is only valid if:
-  // - auditedBy is a real human (not an AI model) AND status is PASSED or FATAL
-  // - OR explicit human verification / overturn was conducted
+  // - Explicit human verification / overturn was conducted
+  // - OR auditedBy is a real human (not an AI model) AND status is PASSED or FATAL
   const hasRealHumanAuditorName = Boolean(auditedBy && !isAiAuditorName(auditedBy));
 
-  if (hasRealHumanAuditorName && (rawAuditStatus === 'PASSED' || rawAuditStatus === 'FATAL')) {
+  if (isExplicitVerification) {
+    isHumanAudited = true;
+    const isOverturn = Boolean(
+      task.human_overturned || 
+      task.humanOverturned || 
+      task.humanStatus === 'OVERTURNED' || 
+      remarks.includes('[Human Overturned')
+    );
+
+    if (remarks.includes('[Human Overturned FATAL to PASS')) {
+      humanStatus = 'PASSED';
+    } else if (remarks.includes('[Human Overturned PASS to FATAL')) {
+      humanStatus = 'FATAL';
+    } else if (isOverturn) {
+      humanStatus = (rawAuditStatus === 'FATAL' ? 'PASSED' : 'FATAL');
+    } else {
+      humanStatus = (rawAuditStatus === 'FATAL' ? 'FATAL' : 'PASSED');
+    }
+
+    const reviewerMatch = remarks.match(/\[Human (?:Verified|Overturned)[^\]]*by ([^:\]]+)/);
+    const reviewerName = task.verified_by || task.verifiedBy || (reviewerMatch ? reviewerMatch[1].trim() : null) || task.assignedAuditorName;
+    humanAuditorName = (reviewerName && !isAiAuditorName(reviewerName)) ? reviewerName : 'City Admin';
+    humanAuditedAt = task.verified_at || task.verifiedAt || task.auditedAt || task.audited_at || null;
+  } else if (hasRealHumanAuditorName && (rawAuditStatus === 'PASSED' || rawAuditStatus === 'FATAL')) {
     isHumanAudited = true;
     humanStatus = rawAuditStatus;
     humanAuditorName = auditedBy;
     humanAuditedAt = task.auditedAt || task.audited_at || null;
-  } else if (task.human_verified || task.humanVerified || remarks.includes('[Human Verified') || remarks.includes('[Human Overturned')) {
-    // Explicit human verification / overturn
-    isHumanAudited = true;
-    const isOverturned = Boolean(task.human_overturned || task.humanOverturned || remarks.includes('[Human Overturned'));
-    humanStatus = isOverturned 
-      ? (rawAuditStatus === 'FATAL' ? 'PASSED' : 'FATAL') 
-      : (rawAuditStatus === 'FATAL' ? 'FATAL' : 'PASSED');
-    const reviewerName = task.verified_by || task.verifiedBy || task.assignedAuditorName;
-    humanAuditorName = (reviewerName && !isAiAuditorName(reviewerName)) ? reviewerName : 'City Admin';
-    humanAuditedAt = task.verified_at || task.auditedAt || task.audited_at || null;
   } else {
     // No human has audited this task yet. It is PENDING City Admin audit.
     // Under NO circumstances does an AI model's verdict count as an Auditor Verdict!
@@ -142,6 +179,27 @@ export function getTaskCrossVerification(task) {
       aiStatus = rawAiStatus;
       aiAuditorName = task.aiAuditorName || task.ai_auditor_name || (isAuditedByAi ? auditedBy : 'gemini-3.8-flash');
     }
+  } else if (localAiData?.aiAuditStatus) {
+    const rawAiStatus = String(localAiData.aiAuditStatus).trim().toUpperCase();
+    if (rawAiStatus === 'PASSED' || rawAiStatus === 'FATAL') {
+      isAiAudited = true;
+      aiStatus = rawAiStatus;
+      aiAuditorName = localAiData.aiAuditorName || 'gemini-3.8-flash';
+    }
+  } else if (isExplicitVerification) {
+    // A task that was explicitly verified or overturned was by definition audited by AI!
+    isAiAudited = true;
+    if (remarks.includes('[Human Overturned FATAL to PASS')) {
+      aiStatus = 'FATAL'; // The AI gave FATAL, which human overturned to PASS
+    } else if (remarks.includes('[Human Overturned PASS to FATAL')) {
+      aiStatus = 'PASSED'; // The AI gave PASS, which human overturned to FATAL
+    } else if (task.human_overturned || task.humanOverturned || task.humanStatus === 'OVERTURNED') {
+      aiStatus = (humanStatus === 'PASSED' ? 'FATAL' : 'PASSED');
+    } else {
+      // Confirmed verification: AI verdict matches rawAuditStatus
+      aiStatus = (rawAuditStatus === 'FATAL' ? 'FATAL' : 'PASSED');
+    }
+    aiAuditorName = task.aiAuditorName || task.auditorModel || (isAuditedByAi ? auditedBy : 'gemini-3.8-flash');
   } else if (isLegacyAiAudit) {
     isAiAudited = true;
     if (rawAuditStatus === 'PASSED' || rawAuditStatus === 'FATAL') {
@@ -156,15 +214,42 @@ export function getTaskCrossVerification(task) {
 
   aiConfidenceScore = (task.aiConfidenceScore !== undefined && task.aiConfidenceScore !== null) 
     ? Number(task.aiConfidenceScore) 
-    : (task.ai_confidence_score !== undefined && task.ai_confidence_score !== null ? Number(task.ai_confidence_score) : null);
-  aiAuditedAt = task.aiAuditedAt || task.ai_audited_at || (isLegacyAiAudit ? task.auditedAt : null);
+    : (task.ai_confidence_score !== undefined && task.ai_confidence_score !== null 
+        ? Number(task.ai_confidence_score) 
+        : (localAiData?.aiConfidenceScore ? Number(localAiData.aiConfidenceScore) : null));
 
-  // 3. Dual-Audit Detection (BOTH City Admin AND AI have audited)
-  const isDualAudited = isHumanAudited && isAiAudited;
+  aiAuditedAt = task.aiAuditedAt || task.ai_audited_at || localAiData?.aiAuditedAt || (isLegacyAiAudit ? task.auditedAt : null);
+
+  // 3. Dual-Audit Detection (BOTH City Admin AND AI have audited or verified)
+  const isDualAudited = Boolean(isHumanAudited && isAiAudited);
 
   // 4. Station-by-Station Compliance Evaluation
   const humanCriteria = task.criteriaStatus || task.criteria_status || {};
-  const aiCriteria = task.aiCriteriaStatus || task.ai_criteria_status || {};
+  let aiCriteria = task.aiCriteriaStatus || task.ai_criteria_status || localAiData?.aiCriteriaStatus || null;
+
+  // Fallback for AI criteria when explicit human verification confirmed/overturned task
+  if (!aiCriteria && isDualAudited && humanCriteria && Object.keys(humanCriteria).length > 0) {
+    if (humanStatus === aiStatus) {
+      aiCriteria = humanCriteria;
+    } else if (remarks.includes('[Human Overturned FATAL to PASS')) {
+      const failedList = task.failedReasons || task.failed_reasons || [];
+      const derived = { ...humanCriteria };
+      AUDIT_STATIONS.forEach(st => {
+        const isFailedInAi = failedList.some(r => 
+          String(r).toLowerCase().includes(st.shortLabel.toLowerCase()) || 
+          String(r).toLowerCase().includes(st.id.toLowerCase())
+        );
+        if (isFailedInAi) {
+          derived[st.id] = 'FAIL';
+        }
+      });
+      aiCriteria = derived;
+    } else {
+      aiCriteria = humanCriteria;
+    }
+  } else if (!aiCriteria) {
+    aiCriteria = {};
+  }
 
   let evaluatedStations = 0;
   let matchingStations = 0;

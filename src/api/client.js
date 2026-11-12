@@ -518,6 +518,12 @@ export const tasksApi = {
           totalTokens: row.total_tokens || 0,
           total_tokens: row.total_tokens || 0,
           auditorModel: row.auditor_model || row.audited_by_name || null,
+          humanVerified: Boolean(row.human_verified),
+          human_verified: Boolean(row.human_verified),
+          humanOverturned: Boolean(row.human_overturned),
+          human_overturned: Boolean(row.human_overturned),
+          verifiedBy: row.verified_by || null,
+          verifiedAt: row.verified_at || null,
           // Dedicated Independent AI Audit Verdict Fields
           aiAuditStatus: row.ai_audit_status || fallbackAi.aiAuditStatus || null,
           aiAuditedAt: row.ai_audited_at || fallbackAi.aiAuditedAt || null,

@@ -85,7 +85,22 @@ export async function fetchTasksFromSupabase() {
       emailSent: Boolean(row.email_sent),
       emailSentAt: row.email_sent_at,
       criteriaStatus: row.criteria_status || {},
-      replacements: Array.isArray(row.replacements) ? row.replacements : []
+      replacements: Array.isArray(row.replacements) ? row.replacements : [],
+      humanVerified: Boolean(row.human_verified),
+      human_verified: Boolean(row.human_verified),
+      humanOverturned: Boolean(row.human_overturned),
+      human_overturned: Boolean(row.human_overturned),
+      verifiedBy: row.verified_by || null,
+      verifiedAt: row.verified_at || null,
+      aiAuditStatus: row.ai_audit_status || null,
+      aiAuditedAt: row.ai_audited_at || null,
+      aiAuditorName: row.ai_auditor_name || null,
+      aiRemarks: row.ai_remarks || null,
+      aiCriteriaStatus: row.ai_criteria_status || null,
+      aiCriteriaEvaluation: row.ai_criteria_evaluation || null,
+      aiFailedReasons: Array.isArray(row.ai_failed_reasons) ? row.ai_failed_reasons : [],
+      aiConfidenceScore: row.ai_confidence_score ?? null,
+      aiErrorMargin: row.ai_error_margin ?? null
     }));
   } catch (err) {
     console.warn('Failed to fetch tasks from Supabase:', err.message);
