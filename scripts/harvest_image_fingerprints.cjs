@@ -73,7 +73,7 @@ function getArg(flag, defaultValue) {
   return defaultValue;
 }
 const filterDate = getArg('--date', null);
-const concurrency = parseInt(getArg('--concurrency', '10'), 10);
+const concurrency = parseInt(getArg('--concurrency', '6'), 10);
 const batchSize = parseInt(getArg('--batch-size', '50'), 10);
 const taskLimit = parseInt(getArg('--limit', '0'), 10);
 const isDryRun = args.includes('--dry-run');
@@ -293,78 +293,105 @@ function analyzeIntegrity(data, width, height, bufferLength) {
 }
 
 /**
- * Downloads single image and computes its full fingerprint record
+ * Downloads single image and computes its full fingerprint record with automatic 429 retry
  */
-async function processImage(imageItem) {
-  try {
-    const resp = await fetch(imageItem.url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 LocusAuditorBatchHarvester/1.0' }
-    });
-    if (!resp.ok) {
-      return null;
-    }
+async function processImage(imageItem, maxRetries = 4) {
+  const browserHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://locus-api.com/'
+  };
 
-    const arrayBuffer = await resp.arrayBuffer();
-    const buf = Buffer.from(arrayBuffer);
-    if (buf.length < 100) return null;
-
-    const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-    const exif = extractExif(buf);
-
-    let dhashHex = '0000000000000000';
-    let dhash256Hex = null;
-    let meanLuma = 128;
-    let stdDev = 50.0;
-    let darkRatio = 0.0;
-    let isBlankBlack = false;
-    let blankReason = null;
-
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    attempt++;
     try {
-      const decoded = jpeg.decode(buf, { useTArray: true });
-      if (decoded && decoded.width > 0 && decoded.height > 0) {
-        const hashes = computePerceptualHashes(decoded.data, decoded.width, decoded.height);
-        dhashHex = hashes.dhashHex;
-        dhash256Hex = hashes.dhash256Hex;
+      const resp = await fetch(imageItem.url, {
+        headers: browserHeaders,
+        signal: AbortSignal.timeout(12000)
+      });
 
-        const metrics = analyzeIntegrity(decoded.data, decoded.width, decoded.height, buf.length);
-        meanLuma = metrics.meanLuma;
-        stdDev = metrics.stdDev;
-        darkRatio = metrics.darkRatio;
-        isBlankBlack = metrics.isBlankBlack;
-        blankReason = metrics.blankReason;
+      // 1. Handle HTTP 429 (Too Many Requests) or 503 (Service Unavailable)
+      if (resp.status === 429 || resp.status === 503) {
+        const backoffSec = Math.min(30, 4 * attempt + Math.floor(Math.random() * 3));
+        process.stdout.write(`\n\x1b[33m[RATE LIMIT 429] Locus CDN limit. Backing off stream for ${backoffSec}s (retry ${attempt}/${maxRetries})...\x1b[0m\n`);
+        await new Promise(r => setTimeout(r, backoffSec * 1000));
+        continue;
       }
-    } catch (decodeErr) {
-      // Non-JPEG format (e.g. raw PNG or WebP)
-      if (buf.length < 1500) {
-        isBlankBlack = true;
-        blankReason = `Undersized placeholder file (${Math.round(buf.length / 1024)} KB)`;
+
+      if (!resp.ok) {
+        if (resp.status === 404 || attempt >= maxRetries) {
+          return null; // File missing or exhausted retries
+        }
+        await new Promise(r => setTimeout(r, 1200));
+        continue;
       }
+
+      const arrayBuffer = await resp.arrayBuffer();
+      const buf = Buffer.from(arrayBuffer);
+      if (buf.length < 50) return null;
+
+      const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+      const exif = extractExif(buf);
+
+      let dhashHex = '0000000000000000';
+      let dhash256Hex = null;
+      let meanLuma = 128;
+      let stdDev = 50.0;
+      let darkRatio = 0.0;
+      let isBlankBlack = false;
+      let blankReason = null;
+
+      try {
+        const decoded = jpeg.decode(buf, { useTArray: true });
+        if (decoded && decoded.width > 0 && decoded.height > 0) {
+          const hashes = computePerceptualHashes(decoded.data, decoded.width, decoded.height);
+          dhashHex = hashes.dhashHex;
+          dhash256Hex = hashes.dhash256Hex;
+
+          const metrics = analyzeIntegrity(decoded.data, decoded.width, decoded.height, buf.length);
+          meanLuma = metrics.meanLuma;
+          stdDev = metrics.stdDev;
+          darkRatio = metrics.darkRatio;
+          isBlankBlack = metrics.isBlankBlack;
+          blankReason = metrics.blankReason;
+        }
+      } catch (decodeErr) {
+        // Non-JPEG format (e.g. raw PNG or WebP)
+        if (buf.length < 1500) {
+          isBlankBlack = true;
+          blankReason = `Undersized placeholder file (${Math.round(buf.length / 1024)} KB)`;
+        }
+      }
+
+      return {
+        task_id: String(imageItem.taskId),
+        station_id: imageItem.stationId,
+        slot_label: imageItem.slotLabel,
+        fe_code: imageItem.feCode,
+        fe_name: imageItem.feName,
+        facility_code: imageItem.facilityCode,
+        dispatch_date: imageItem.dispatchDate,
+        image_url: imageItem.url,
+        sha256_hash: sha256,
+        dhash_hex: dhashHex,
+        dhash256_hex: dhash256Hex,
+        mean_luma: meanLuma,
+        std_dev: stdDev,
+        dark_ratio: darkRatio,
+        is_blank_black: isBlankBlack,
+        blank_reason: blankReason,
+        exif_time: exif.time,
+        exif_model: exif.model,
+        file_size_bytes: buf.length
+      };
+    } catch (err) {
+      if (attempt >= maxRetries) return null;
+      await new Promise(r => setTimeout(r, 1000));
     }
-
-    return {
-      task_id: String(imageItem.taskId),
-      station_id: imageItem.stationId,
-      slot_label: imageItem.slotLabel,
-      fe_code: imageItem.feCode,
-      fe_name: imageItem.feName,
-      facility_code: imageItem.facilityCode,
-      dispatch_date: imageItem.dispatchDate,
-      image_url: imageItem.url,
-      sha256_hash: sha256,
-      dhash_hex: dhashHex,
-      dhash256_hex: dhash256Hex,
-      mean_luma: meanLuma,
-      std_dev: stdDev,
-      dark_ratio: darkRatio,
-      is_blank_black: isBlankBlack,
-      blank_reason: blankReason,
-      exif_time: exif.time,
-      exif_model: exif.model,
-      file_size_bytes: buf.length
-    };
-  } catch (err) {
-    return null;
   }
+  return null;
 }
 
 /**
@@ -528,6 +555,9 @@ async function run() {
       } else {
         failedCount++;
       }
+
+      // Small 80ms pacing delay per stream to stay under Locus rate limits
+      await new Promise(r => setTimeout(r, 80));
 
       // Render live terminal status every 10 images or on completion
       if (processedCount % 10 === 0 || processedCount === imageQueue.length) {
