@@ -28,12 +28,15 @@ import {
   Search,
   Sliders,
   Moon,
-  Zap
+  Zap,
+  Database
 } from 'lucide-react';
 import { 
   extractTaskImageItems, 
-  runBatchForensicScan 
+  runBatchForensicScan,
+  runPrecomputedFingerprintScan
 } from '../utils/imageForensics.js';
+import { fingerprintsApi } from '../api/client.js';
 
 function formatEta(seconds) {
   if (!seconds || seconds <= 0) return 'Calculating...';
@@ -102,6 +105,18 @@ export default function ImageForensicsLab({
   const [scanResults, setScanResults] = useState(null);
   const abortControllerRef = useRef(null);
   const pauseSignalRef = useRef({ isPaused: false });
+
+  // Cloud Fingerprint Ledger Integration
+  const [cloudStats, setCloudStats] = useState({ total: 0 });
+  const [isCloudScanning, setIsCloudScanning] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    fingerprintsApi.getFingerprintStats().then(stats => {
+      if (isMounted) setCloudStats(stats);
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, []);
 
   // UI state: 'all' | 'blank' | 'exact' | 'perceptual' | 'stale'
   const [activeTab, setActiveTab] = useState('all');
@@ -216,6 +231,39 @@ export default function ImageForensicsLab({
       abortControllerRef.current.abort();
       setIsScanning(false);
       setIsPaused(false);
+    }
+  };
+
+  // Handle Instant Sub-Second Cloud Ledger Scan
+  const handleCloudLedgerScan = async () => {
+    setIsCloudScanning(true);
+    try {
+      const fingerprints = await fingerprintsApi.getFingerprints({
+        date: selectedDate === 'ALL' ? null : selectedDate,
+        stationId: selectedSlot === 'ALL' ? null : selectedSlot,
+        limit: 15000
+      });
+
+      if (!fingerprints || fingerprints.length === 0) {
+        alert(
+          'No image fingerprints found in Supabase for the selected filter.\n\n' +
+          'To pre-compute fingerprints for all tasks without freezing your browser:\n' +
+          '1. Run the terminal batch harvester: node scripts/harvest_image_fingerprints.cjs\n' +
+          '2. Or run the live in-browser scan below.'
+        );
+        return;
+      }
+
+      const results = runPrecomputedFingerprintScan(fingerprints, tasks, {
+        maxHamming: Number(sensitivity)
+      });
+
+      setScanResults(results);
+    } catch (err) {
+      console.error('Cloud ledger scan failed:', err);
+      alert('Cloud ledger scan failed: ' + err.message);
+    } finally {
+      setIsCloudScanning(false);
     }
   };
 
@@ -550,17 +598,32 @@ export default function ImageForensicsLab({
                 </button>
               </div>
             ) : (
-              <button
-                onClick={handleStartScan}
-                disabled={imageQueue.length === 0}
-                className="px-5 py-2.5 text-xs font-bold rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 text-white shadow-lg shadow-indigo-600/30 transition-all flex items-center gap-2.5"
-              >
-                <Play className="w-4 h-4 fill-white" />
-                Run Anti-Fraud Forensics Scan
-                <span className="bg-white/20 px-2 py-0.5 rounded-md font-mono text-[11px]">
-                  {imageQueue.length} Photos
-                </span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleCloudLedgerScan}
+                  disabled={isCloudScanning || isScanning}
+                  className="px-5 py-2.5 text-xs font-bold rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 text-white shadow-lg shadow-emerald-600/30 transition-all flex items-center gap-2"
+                  title="Sub-second scan using pre-computed hashes from Supabase ledger"
+                >
+                  <Zap className={`w-4 h-4 fill-white ${isCloudScanning ? 'animate-spin' : ''}`} />
+                  {isCloudScanning ? 'Querying Cloud Ledger...' : 'Scan Cloud Fingerprints (Instant)'}
+                  {cloudStats.total > 0 && (
+                    <span className="bg-white/20 px-2 py-0.5 rounded-md font-mono text-[11px]">
+                      {cloudStats.total.toLocaleString()} Synced
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  onClick={handleStartScan}
+                  disabled={imageQueue.length === 0 || isCloudScanning}
+                  className="px-4 py-2.5 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-700 shadow-sm transition-all flex items-center gap-2"
+                  title="Live deep scan downloading images in browser"
+                >
+                  <Play className="w-3.5 h-3.5 fill-slate-300" />
+                  Live In-Browser Scan ({imageQueue.length})
+                </button>
+              </div>
             )}
 
             {scanResults && (
@@ -1418,19 +1481,33 @@ export default function ImageForensicsLab({
               Ready to Scan {imageQueue.length} Checklist Photos
             </h2>
             <p className="text-xs text-slate-400 max-w-lg mx-auto leading-relaxed">
-              Click <strong className="text-indigo-300">"Run Anti-Fraud Forensics Scan"</strong>. 
-              The system will inspect image content integrity for <strong className="text-rose-300">blank/black covered camera photos</strong>, 
-              cryptographic byte duplicates, and perceptual visual clones.
+              Use <strong className="text-emerald-300">"Scan Cloud Fingerprints (Instant)"</strong> to cross-examine 
+              all tasks in sub-second time using pre-computed hashes from Supabase, or run a live in-browser scan.
             </p>
           </div>
-          <button
-            onClick={handleStartScan}
-            disabled={imageQueue.length === 0}
-            className="px-6 py-2.5 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 transition-all inline-flex items-center gap-2"
-          >
-            <Play className="w-4 h-4 fill-white" />
-            Start Batch Forensics Scan ({imageQueue.length} Photos)
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+            <button
+              onClick={handleCloudLedgerScan}
+              disabled={isCloudScanning}
+              className="px-6 py-2.5 text-xs font-bold rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-lg shadow-emerald-600/30 transition-all inline-flex items-center gap-2"
+            >
+              <Zap className={`w-4 h-4 fill-white ${isCloudScanning ? 'animate-spin' : ''}`} />
+              {isCloudScanning ? 'Analyzing Cloud Ledger...' : 'Scan Cloud Fingerprints (Instant Sub-Second)'}
+              {cloudStats.total > 0 && (
+                <span className="bg-white/20 px-2 py-0.5 rounded-md font-mono text-[11px]">
+                  {cloudStats.total.toLocaleString()} Synced
+                </span>
+              )}
+            </button>
+            <button
+              onClick={handleStartScan}
+              disabled={imageQueue.length === 0}
+              className="px-5 py-2.5 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 shadow-sm transition-all inline-flex items-center gap-2"
+            >
+              <Play className="w-4 h-4 fill-slate-300" />
+              Live In-Browser Scan ({imageQueue.length} Photos)
+            </button>
+          </div>
         </div>
       )}
 

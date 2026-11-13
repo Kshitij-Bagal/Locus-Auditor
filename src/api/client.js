@@ -2949,3 +2949,101 @@ export const groomingApi = {
   }
 };
 
+// ====================================================================
+// 19. IMAGE FINGERPRINTS & PERSISTENT FORENSICS REST API
+// ====================================================================
+
+export const fingerprintsApi = {
+  /**
+   * Fetches image fingerprints from public.task_image_fingerprints with pagination
+   * @param {object} filter { date, stationId, limit }
+   * @returns {Promise<Array>}
+   */
+  async getFingerprints({ date, stationId, limit = 10000 } = {}) {
+    if (!supabase) return [];
+    try {
+      let allRows = [];
+      const pageSize = 1000;
+      let page = 0;
+      const maxPages = Math.ceil(limit / pageSize);
+
+      while (page < maxPages) {
+        let query = supabase
+          .from('task_image_fingerprints')
+          .select('*')
+          .order('dispatch_date', { ascending: false })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (date && date !== 'ALL') {
+          query = query.eq('dispatch_date', date);
+        }
+        if (stationId && stationId !== 'ALL') {
+          query = query.eq('station_id', stationId);
+        }
+
+        const { data, error } = await query;
+        if (error) {
+          if (error.code === 'PGRST205') {
+            console.warn('task_image_fingerprints table not found. Please run the SQL migration.');
+            return [];
+          }
+          throw error;
+        }
+
+        if (!data || data.length === 0) break;
+        allRows.push(...data);
+        if (data.length < pageSize || allRows.length >= limit) break;
+        page++;
+      }
+
+      return allRows;
+    } catch (err) {
+      console.warn('fingerprintsApi.getFingerprints error:', err.message);
+      return [];
+    }
+  },
+
+  /**
+   * Upsert single or batch of fingerprints
+   * @param {Array|object} records 
+   */
+  async upsertFingerprints(records) {
+    if (!supabase) return false;
+    const list = Array.isArray(records) ? records : [records];
+    if (list.length === 0) return true;
+
+    try {
+      const { error } = await supabase
+        .from('task_image_fingerprints')
+        .upsert(list, { onConflict: 'task_id,station_id' });
+
+      if (error) {
+        console.warn('fingerprintsApi.upsertFingerprints error:', error.message);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.warn('fingerprintsApi.upsertFingerprints exception:', e.message);
+      return false;
+    }
+  },
+
+  /**
+   * Get fingerprint counts / statistics
+   */
+  async getFingerprintStats() {
+    if (!supabase) return { total: 0 };
+    try {
+      const { count, error } = await supabase
+        .from('task_image_fingerprints')
+        .select('*', { count: 'exact', head: true });
+
+      if (error) return { total: 0 };
+      return { total: count || 0 };
+    } catch (e) {
+      return { total: 0 };
+    }
+  }
+};
+
+
