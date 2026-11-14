@@ -90,18 +90,37 @@ export function getUnifiedAiUsage(dateStr = null) {
   return normalizeRecord(null, date);
 }
 
+// Throttle & in-flight promise tracker to eliminate infinite network polling loops
+let lastRemoteFetchTime = 0;
+let activeRemoteFetchPromise = null;
+const MIN_REMOTE_FETCH_GAP_MS = 25000; // Minimum 25-second cooldown between remote network fetches
+
 /**
- * Fetch remote usage from Supabase and merge with local
+ * Fetch remote usage from Supabase and merge with local (Throttled & Deduplicated)
  */
-export async function fetchRemoteUnifiedAiUsage(dateStr = null) {
+export async function fetchRemoteUnifiedAiUsage(dateStr = null, force = false) {
   const date = dateStr || getTodayYMD();
   const local = getUnifiedAiUsage(date);
+  const now = Date.now();
 
-  try {
-    const [remoteUnified, remoteLegacy] = await Promise.all([
-      settingsApi.getSetting(`unified_ai_rpd_${date}`, null).catch(() => null),
-      settingsApi.getSetting(`daily_ai_audit_tracker_${date}`, null).catch(() => null)
-    ]);
+  // Return local if called too frequently (prevents infinite render loops from triggering remote calls)
+  if (!force && (now - lastRemoteFetchTime < MIN_REMOTE_FETCH_GAP_MS)) {
+    return local;
+  }
+
+  // Deduplicate in-flight network requests
+  if (activeRemoteFetchPromise) {
+    return activeRemoteFetchPromise;
+  }
+
+  activeRemoteFetchPromise = (async () => {
+    try {
+      lastRemoteFetchTime = Date.now();
+
+      const [remoteUnified, remoteLegacy] = await Promise.all([
+        settingsApi.getSetting(`unified_ai_rpd_${date}`, null).catch(() => null),
+        settingsApi.getSetting(`daily_ai_audit_tracker_${date}`, null).catch(() => null)
+      ]);
 
     const remoteUnifiedNorm = remoteUnified && remoteUnified.date === date ? normalizeRecord(remoteUnified, date) : null;
     const legacyReqs = (remoteLegacy && remoteLegacy.date === date && typeof remoteLegacy.requests === 'number') ? remoteLegacy.requests : 0;
@@ -179,7 +198,12 @@ export async function fetchRemoteUnifiedAiUsage(dateStr = null) {
     return finalRecord;
   } catch (err) {
     return local;
+  } finally {
+    activeRemoteFetchPromise = null;
   }
+})();
+
+  return activeRemoteFetchPromise;
 }
 
 /**
@@ -262,37 +286,75 @@ export function recordAiApiCall({
   return updatedRecord;
 }
 
-/**
- * Subscribe to real-time RPD updates
- */
-export function subscribeToUnifiedAiUsage(callback, pollIntervalMs = 20000) {
-  if (typeof window === 'undefined') return () => {};
+// Global Singleton subscriber pool to prevent duplicate intervals and redundant network queries
+const activeSubscribers = new Set();
+let globalPollTimer = null;
+let globalListenersAttached = false;
 
-  const handleUpdate = (e) => {
-    if (e?.detail) callback(e.detail);
-    else callback(getUnifiedAiUsage());
-  };
+function setupGlobalListeners() {
+  if (globalListenersAttached || typeof window === 'undefined') return;
+  globalListenersAttached = true;
 
-  const handleStorage = (e) => {
+  window.addEventListener('locus_ai_rpd_updated', (e) => {
+    const data = e?.detail || getUnifiedAiUsage();
+    activeSubscribers.forEach(cb => {
+      try { cb(data); } catch (_) {}
+    });
+  });
+
+  window.addEventListener('storage', (e) => {
     if (e.key && e.key.includes('unified_ai_rpd')) {
-      callback(getUnifiedAiUsage());
+      const data = getUnifiedAiUsage();
+      activeSubscribers.forEach(cb => {
+        try { cb(data); } catch (_) {}
+      });
     }
-  };
+  });
+}
 
-  window.addEventListener('locus_ai_rpd_updated', handleUpdate);
-  window.addEventListener('storage', handleStorage);
+/**
+ * Subscribe to real-time RPD updates (Singleton, Throttled)
+ */
+export function subscribeToUnifiedAiUsage(callback, pollIntervalMs = 60000) {
+  if (typeof window === 'undefined' || typeof callback !== 'function') return () => {};
 
-  // Initial remote fetch
-  fetchRemoteUnifiedAiUsage().then(data => callback(data)).catch(() => {});
+  setupGlobalListeners();
+  activeSubscribers.add(callback);
 
-  // Background polling for cross-machine updates
-  const timer = setInterval(() => {
-    fetchRemoteUnifiedAiUsage().then(data => callback(data)).catch(() => {});
-  }, pollIntervalMs);
+  // Deliver current local state immediately without making network calls
+  try {
+    callback(getUnifiedAiUsage());
+  } catch (_) {}
+
+  // Initial throttled fetch
+  fetchRemoteUnifiedAiUsage().then(data => {
+    activeSubscribers.forEach(cb => {
+      try { cb(data); } catch (_) {}
+    });
+  }).catch(() => {});
+
+  // Maintain single shared timer for all badges across the entire page
+  if (!globalPollTimer) {
+    const interval = Math.max(45000, pollIntervalMs);
+    globalPollTimer = setInterval(() => {
+      if (activeSubscribers.size === 0) {
+        clearInterval(globalPollTimer);
+        globalPollTimer = null;
+        return;
+      }
+      fetchRemoteUnifiedAiUsage().then(data => {
+        activeSubscribers.forEach(cb => {
+          try { cb(data); } catch (_) {}
+        });
+      }).catch(() => {});
+    }, interval);
+  }
 
   return () => {
-    window.removeEventListener('locus_ai_rpd_updated', handleUpdate);
-    window.removeEventListener('storage', handleStorage);
-    clearInterval(timer);
+    activeSubscribers.delete(callback);
+    if (activeSubscribers.size === 0 && globalPollTimer) {
+      clearInterval(globalPollTimer);
+      globalPollTimer = null;
+    }
   };
 }

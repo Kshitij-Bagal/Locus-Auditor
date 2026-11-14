@@ -1245,12 +1245,18 @@ export default function App() {
   };
 
   // Reassignment Handler for D+1 Overdue Audits (BH & GM Console)
-  const handleReassignTask = async ({ taskId, auditorId, auditorName }) => {
+  const handleReassignTask = async ({ taskId, altTaskId, auditorId, auditorName }) => {
     try {
       showToast(`Reassigning task to ${auditorName}...`, 'info');
-      await tasksApi.reassignTask({ taskId, auditorId, auditorName });
+      await tasksApi.reassignTask({ taskId, altTaskId, auditorId, auditorName });
+      const targetId = String(taskId);
+      const targetAlt = altTaskId ? String(altTaskId) : null;
       setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
+        if (
+          String(t.id) === targetId ||
+          String(t.taskId) === targetId ||
+          (targetAlt && (String(t.id) === targetAlt || String(t.taskId) === targetAlt))
+        ) {
           return {
             ...t,
             assignedAuditorId: auditorId,

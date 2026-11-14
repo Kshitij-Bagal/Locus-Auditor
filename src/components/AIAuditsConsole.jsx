@@ -482,39 +482,40 @@ export default function AIAuditsConsole({
       const remoteReqs = (remote && remote.date === today && typeof remote.requests === 'number') ? remote.requests : 0;
       const remoteToks = (remote && remote.date === today && typeof remote.totalTokens === 'number') ? remote.totalTokens : 0;
 
-      const finalRequests = Math.max(remoteReqs, dbTodayCount, dailyAiUsage.date === today ? (dailyAiUsage.requests || 0) : 0);
-      const finalTokens = Math.max(remoteToks, dbTodayTokens, dailyAiUsage.date === today ? (dailyAiUsage.totalTokens || 0) : 0);
+      setDailyAiUsage(prev => {
+        const finalRequests = Math.max(remoteReqs, dbTodayCount, prev.date === today ? (prev.requests || 0) : 0);
+        const finalTokens = Math.max(remoteToks, dbTodayTokens, prev.date === today ? (prev.totalTokens || 0) : 0);
 
-      const record = {
-        date: today,
-        requests: finalRequests,
-        totalTokens: finalTokens,
-        lastUpdated: new Date().toISOString()
-      };
+        const record = {
+          date: today,
+          requests: finalRequests,
+          totalTokens: finalTokens,
+          lastUpdated: new Date().toISOString()
+        };
 
-      setDailyAiUsage(record);
-      try {
-        localStorage.setItem(`locus_daily_ai_audit_tracker_${today}`, JSON.stringify(record));
-      } catch (_) {}
+        try {
+          localStorage.setItem(`locus_daily_ai_audit_tracker_${today}`, JSON.stringify(record));
+        } catch (_) {}
 
-      // Keep Supabase updated with the highest accurate count
-      if (remoteReqs < finalRequests) {
-        settingsApi.setSetting(`daily_ai_audit_tracker_${today}`, record).catch(() => {});
-      }
+        // Keep Supabase updated with the highest accurate count
+        if (remoteReqs < finalRequests) {
+          settingsApi.setSetting(`daily_ai_audit_tracker_${today}`, record).catch(() => {});
+        }
+
+        return record;
+      });
     }).catch(() => {
       if (!isMounted) return;
-      const finalRequests = Math.max(dbTodayCount, dailyAiUsage.date === today ? (dailyAiUsage.requests || 0) : 0);
-      const finalTokens = Math.max(dbTodayTokens, dailyAiUsage.date === today ? (dailyAiUsage.totalTokens || 0) : 0);
-      setDailyAiUsage({
+      setDailyAiUsage(prev => ({
         date: today,
-        requests: finalRequests,
-        totalTokens: finalTokens,
+        requests: Math.max(dbTodayCount, prev.date === today ? (prev.requests || 0) : 0),
+        totalTokens: Math.max(dbTodayTokens, prev.date === today ? (prev.totalTokens || 0) : 0),
         lastUpdated: new Date().toISOString()
-      });
+      }));
     });
 
     return () => { isMounted = false; };
-  }, [tasks]);
+  }, [tasks?.length]);
 
   // Synchronize with unified AI RPD tracker events
   useEffect(() => {

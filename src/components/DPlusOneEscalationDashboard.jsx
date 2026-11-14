@@ -116,14 +116,16 @@ export default function DPlusOneEscalationDashboard({
   // Reassignment submit
   const handleConfirmReassign = async () => {
     if (!reassignModalTask || !selectedNewAuditor) return;
-    const targetAuditor = auditors.find(a => a.id === selectedNewAuditor || a.full_name === selectedNewAuditor);
+    const auditorPool = (auditors && auditors.length > 0) ? auditors : (users || []).filter(u => u.role !== 'FE');
+    const targetAuditor = auditorPool.find(a => String(a.id) === String(selectedNewAuditor) || a.full_name === selectedNewAuditor || a.name === selectedNewAuditor);
     if (!targetAuditor) return;
 
     setIsReassigning(true);
     try {
       if (onReassignTask) {
         await onReassignTask({
-          taskId: reassignModalTask.id,
+          taskId: reassignModalTask.id || reassignModalTask.taskId,
+          altTaskId: reassignModalTask.taskId || reassignModalTask.id,
           auditorId: targetAuditor.id,
           auditorName: targetAuditor.full_name || targetAuditor.name
         });
@@ -532,11 +534,11 @@ export default function DPlusOneEscalationDashboard({
                 className="w-full bg-slate-850 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
               >
                 <option value="">-- Choose an Available Auditor --</option>
-                {auditors
-                  .filter(a => a.full_name !== reassignModalTask.assignedAuditorName && a.name !== reassignModalTask.assignedAuditorName)
+                {((auditors && auditors.length > 0) ? auditors : (users || []).filter(u => u.role !== 'FE'))
+                  .filter(a => (a.full_name || a.name) !== reassignModalTask.assignedAuditorName)
                   .map(a => (
                     <option key={a.id} value={a.id}>
-                      {a.full_name || a.name} ({a.facility_code || 'Hub'})
+                      {a.full_name || a.name} ({a.facility_code || a.city || a.role || 'Hub'})
                     </option>
                   ))
                 }

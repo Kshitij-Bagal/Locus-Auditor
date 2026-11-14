@@ -338,22 +338,50 @@ export const tasksApi = {
   },
 
   // Reassign single task to new auditor (Used by BH, GM, SuperAdmin on D+1 breaches)
-  async reassignTask({ taskId, auditorId, auditorName }) {
+  async reassignTask({ taskId, altTaskId, auditorId, auditorName }) {
+    if (!taskId && !altTaskId) throw new Error('Task ID is required for reassignment');
     if (!supabase) return { success: true };
     try {
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(auditorId);
-      const { error } = await supabase
+      const cleanId = String(taskId || altTaskId);
+      const cleanAltId = String(altTaskId || taskId);
+      const updatePayload = {
+        assigned_auditor_id: isUUID ? auditorId : null,
+        assigned_auditor_name: auditorName || null,
+        allocated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      let { data, error } = await supabase
         .from('tasks')
-        .update({
-          assigned_auditor_id: isUUID ? auditorId : null,
-          assigned_auditor_name: auditorName || null,
-          allocated_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', String(taskId));
+        .update(updatePayload)
+        .eq('id', cleanId)
+        .select('id');
+
+      // If id didn't match or caused column type mismatch, try by task_id
+      if (error || !data || data.length === 0) {
+        const retryByTaskId = await supabase
+          .from('tasks')
+          .update(updatePayload)
+          .eq('task_id', cleanId)
+          .select('id');
+        
+        if (!retryByTaskId.error && retryByTaskId.data && retryByTaskId.data.length > 0) {
+          error = null;
+        } else if (cleanAltId !== cleanId) {
+          const retryByAlt = await supabase
+            .from('tasks')
+            .update(updatePayload)
+            .eq('task_id', cleanAltId)
+            .select('id');
+          if (!retryByAlt.error && retryByAlt.data && retryByAlt.data.length > 0) {
+            error = null;
+          }
+        }
+      }
 
       if (error) throw error;
-      return { success: true };
+      return { success: true, taskId: cleanId, auditorId, auditorName };
     } catch (err) {
       console.warn('tasksApi.reassignTask error:', err.message);
       throw err;
@@ -2653,54 +2681,92 @@ export const feFatalDigestApi = {
 // 8. SYSTEM SETTINGS & LIVE ROLE PRESETS REST API
 // ====================================================================
 
+// In-memory cache & in-flight promise tracker for system_settings to prevent repeated network loops
+const settingsMemoryCache = new Map(); // key -> { value, expiresAt }
+const settingsInFlightPromises = new Map(); // key -> Promise
+const SETTINGS_CACHE_TTL_MS = 30000; // 30 seconds TTL
+
 export const settingsApi = {
-  // Fetch system setting by key (e.g., 'role_presets')
+  // Fetch system setting by key (e.g., 'role_presets', 'unified_ai_rpd_YYYY-MM-DD')
   async getSetting(key, defaultValue = null) {
-    // If the table is missing from Supabase schema, cleanly avoid failing network calls
+    const now = Date.now();
+
+    // 1. Return from in-memory cache if fresh
+    const mem = settingsMemoryCache.get(key);
+    if (mem && mem.expiresAt > now) {
+      return mem.value !== undefined ? mem.value : defaultValue;
+    }
+
+    // 2. Return in-flight promise if an identical request is already active (zero duplicate queries)
+    if (settingsInFlightPromises.has(key)) {
+      return settingsInFlightPromises.get(key);
+    }
+
+    // If table is missing from Supabase schema, cleanly avoid failing network calls
     if (typeof window !== 'undefined' && sessionStorage.getItem('locus_table_system_settings_missing') === 'true') {
       try {
         const cached = localStorage.getItem(`locus_setting_${key}`);
-        if (cached) return JSON.parse(cached);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          settingsMemoryCache.set(key, { value: parsed, expiresAt: now + SETTINGS_CACHE_TTL_MS });
+          return parsed;
+        }
       } catch (e) {}
       return defaultValue;
     }
 
-    if (supabase) {
+    const fetchPromise = (async () => {
       try {
-        const { data, error } = await supabase
-          .from('system_settings')
-          .select('*')
-          .eq('key', key)
-          .maybeSingle();
+        if (supabase) {
+          const { data, error } = await supabase
+            .from('system_settings')
+            .select('*')
+            .eq('key', key)
+            .maybeSingle();
 
-        if (error) {
-          if (error.code === 'PGRST205' && typeof window !== 'undefined') {
-            sessionStorage.setItem('locus_table_system_settings_missing', 'true');
+          if (error) {
+            if (error.code === 'PGRST205' && typeof window !== 'undefined') {
+              sessionStorage.setItem('locus_table_system_settings_missing', 'true');
+            }
+          } else if (data?.value !== undefined) {
+            if (typeof window !== 'undefined') {
+              sessionStorage.removeItem('locus_table_system_settings_missing');
+            }
+            try {
+              localStorage.setItem(`locus_setting_${key}`, JSON.stringify(data.value));
+            } catch (e) {}
+            settingsMemoryCache.set(key, { value: data.value, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
+            return data.value;
           }
-        } else if (data?.value) {
-          if (typeof window !== 'undefined') {
-            sessionStorage.removeItem('locus_table_system_settings_missing');
-          }
-          try {
-            localStorage.setItem(`locus_setting_${key}`, JSON.stringify(data.value));
-          } catch (e) {}
-          return data.value;
         }
       } catch (err) {
-        // Fallback to local storage
+        // Fallback to local storage on network failure
       }
-    }
 
-    try {
-      const cached = localStorage.getItem(`locus_setting_${key}`);
-      if (cached) return JSON.parse(cached);
-    } catch (e) {}
+      try {
+        const cached = localStorage.getItem(`locus_setting_${key}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          settingsMemoryCache.set(key, { value: parsed, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
+          return parsed;
+        }
+      } catch (e) {}
 
-    return defaultValue;
+      settingsMemoryCache.set(key, { value: defaultValue, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
+      return defaultValue;
+    })().finally(() => {
+      settingsInFlightPromises.delete(key);
+    });
+
+    settingsInFlightPromises.set(key, fetchPromise);
+    return fetchPromise;
   },
 
-  // Set system setting by key (persists to Supabase and local cache)
+  // Set system setting by key (persists to Supabase, in-memory cache, and local cache)
   async setSetting(key, value, updatedBy = null) {
+    const now = Date.now();
+    settingsMemoryCache.set(key, { value, expiresAt: now + SETTINGS_CACHE_TTL_MS });
+
     try {
       localStorage.setItem(`locus_setting_${key}`, JSON.stringify(value));
     } catch (e) {}
