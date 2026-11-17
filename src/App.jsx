@@ -21,7 +21,6 @@ import FatalObjectionHub from './components/FatalObjectionHub.jsx';
 import ImageForensicsLab from './components/ImageForensicsLab.jsx';
 import ExecutiveSummaryHub from './components/ExecutiveSummaryHub.jsx';
 import AIAuditsConsole from './components/AIAuditsConsole.jsx';
-import FEGroomingDashboard from './components/FEGroomingDashboard.jsx';
 
 import { authApi, tasksApi, rulesApi, replacementsApi, emailApi, usersApi, rosterApi, settingsApi } from './api/client.js';
 import { INITIAL_CENTRAL_RULES } from './data/centralRules.js';
@@ -1998,13 +1997,6 @@ export default function App() {
             currentUser={currentUser}
             onInspectTask={(task) => setInspectingTask(task)}
             onFatalTask={handleFatalAudit}
-          />
-        )}
-
-        {/* PAGE 12: DAILY FE GROOMING & UNIFORM OVERSIGHT */}
-        {activePage === 'grooming' && (
-          <FEGroomingDashboard
-            currentUser={currentUser}
           />
         )}
 

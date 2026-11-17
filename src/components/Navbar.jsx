@@ -67,12 +67,6 @@ export default function Navbar({
       allowedRoles: ['Auditor', 'Central Ops', 'GM', 'BH', 'SuperAdmin']
     },
     {
-      id: 'grooming',
-      label: 'FE Grooming',
-      icon: UserCheck,
-      allowedRoles: ['SuperAdmin']
-    },
-    {
       id: 'upload',
       label: 'Upload Tasks',
       icon: Upload,

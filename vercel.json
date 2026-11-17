@@ -12,15 +12,5 @@
         }
       ]
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/cron/daily-digest",
-      "schedule": "30 14 * * *"
-    },
-    {
-      "path": "/api/cron/daily-fe-fatal-digest",
-      "schedule": "0 15 * * *"
-    }
   ]
 }

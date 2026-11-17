@@ -29,9 +29,6 @@ import {
   RefreshCw
 } from 'lucide-react';
 import DisputeObjectionModal from './DisputeObjectionModal.jsx';
-import FEGroomingCapture from './FEGroomingCapture.jsx';
-import { groomingApi } from '../api/client.js';
-import { getTodayYMD } from '../utils/groomingAiHelper.js';
 import { getDisputeWindowStatus } from '../utils/calendarHelper.js';
 import { normalizeLocusUrl } from '../utils/geminiAuditHelper.js';
 
@@ -54,48 +51,9 @@ export default function FEPortal({
   const [disputeTask, setDisputeTask] = useState(null);
   const [previewImage, setPreviewImage] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [mainSection, setMainSection] = useState('VISITS'); // 'VISITS' | 'GROOMING'
   const [activeTab, setActiveTab] = useState('FATAL'); // 'FATAL' | 'ALL' | 'PASSED' | 'PENDING' | 'REPLACEMENTS'
-  const [todayGrooming, setTodayGrooming] = useState(null);
 
   // Extract all identifiers from currentFE with full tolerance for snake_case and camelCase
-  const fePersonId = String(currentFE?.person_id || currentFE?.personId || currentFE?.employee_code || currentFE?.employeeCode || currentFE?.id || '').trim();
-  const feCode = String(currentFE?.feCode || currentFE?.fe_code || currentFE?.employee_code || currentFE?.employeeCode || '').trim();
-  const feFacility = String(currentFE?.facility_code || currentFE?.facilityCode || '').trim();
-  const feEmail = String(currentFE?.email || '').trim().toLowerCase();
-  const feFullName = String(currentFE?.full_name || currentFE?.name || 'Field Executive').trim();
-
-  // Extract prefix code and name if full_name is formatted as "LKH1183_Dhrub Chakraborty"
-  let extractedCode = '';
-  let extractedName = '';
-  if (feFullName.includes('_')) {
-    const parts = feFullName.split('_');
-    extractedCode = parts[0].trim();
-    extractedName = parts.slice(1).join(' ').trim();
-  }
-
-  // Load today's grooming check status for the Daily Grooming tab badge
-  useEffect(() => {
-    let active = true;
-    const resolvedCode = feCode || extractedCode;
-    if (!resolvedCode && !fePersonId && !feEmail) return;
-    (async () => {
-      try {
-        const rows = await groomingApi.getChecks(getTodayYMD());
-        if (!active || !Array.isArray(rows)) return;
-        const match = rows.find((r) => {
-          if (resolvedCode && r.feCode && String(r.feCode).toLowerCase() === resolvedCode.toLowerCase()) return true;
-          if (fePersonId && r.feId && String(r.feId).toLowerCase() === fePersonId.toLowerCase()) return true;
-          if (feEmail && r.feEmail && String(r.feEmail).toLowerCase() === feEmail) return true;
-          return false;
-        });
-        setTodayGrooming(match || null);
-      } catch {
-        // Non-blocking
-      }
-    })();
-    return () => { active = false; };
-  }, [feCode, extractedCode, fePersonId, feEmail]);
 
   // Filter tasks belonging to this FE using robust multi-key matching
   const myTasks = useMemo(() => {
@@ -277,66 +235,7 @@ export default function FEPortal({
         </div>
       </div>
 
-      {/* My Visits Top-Level Section Tabs: Visit Audits & Fatals vs Daily Grooming */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-2 flex flex-wrap items-center gap-2 shadow-lg">
-        <button
-          type="button"
-          onClick={() => setMainSection('VISITS')}
-          className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition-all cursor-pointer ${
-            mainSection === 'VISITS'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <Layers className="w-4 h-4" />
-          <span>Visit Audits</span>
-          {fatalCount > 0 && (
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-red-500/20 text-red-200 border border-red-400/40">
-              {fatalCount} Fatal
-            </span>
-          )}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMainSection('GROOMING')}
-          className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition-all cursor-pointer ${
-            mainSection === 'GROOMING'
-              ? 'bg-sky-600 text-white shadow-lg shadow-sky-950/50'
-              : 'text-slate-400 hover:text-white hover:bg-slate-800'
-          }`}
-        >
-          <Camera className="w-4 h-4" />
-          <span>Daily Grooming</span>
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
-            todayGrooming?.status === 'PASS' || todayGrooming?.humanOverrideStatus === 'PASS'
-              ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
-              : todayGrooming?.status === 'FATAL' || todayGrooming?.status === 'RECAPTURE_REQUESTED'
-              ? 'bg-red-500/20 text-red-200 border-red-400/40'
-              : todayGrooming
-              ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
-              : 'bg-sky-950 text-sky-200 border-sky-400/40'
-          }`}>
-            {todayGrooming
-              ? (todayGrooming.status === 'PASS' ? 'PASS' : todayGrooming.status === 'WARNING' ? 'WARN' : todayGrooming.status === 'FATAL' ? 'FATAL' : todayGrooming.status === 'RECAPTURE_REQUESTED' ? 'RETAKE' : 'SENT')
-              : 'DUE TODAY'}
-          </span>
-        </button>
-      </div>
-
-      {mainSection === 'GROOMING' ? (
-        <FEGroomingCapture
-          feProfile={currentFE}
-          feName={extractedName || feFullName}
-          feCode={feCode || extractedCode}
-          feId={fePersonId}
-          feEmail={feEmail}
-          facilityCode={feFacility}
-          onCheckCompleted={(saved) => setTodayGrooming(saved)}
-        />
-      ) : (
-        <>
-          {/* KPI Stats Grid */}
+      {/* KPI Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
         <div 
           onClick={() => setActiveTab('ALL')}
@@ -909,8 +808,6 @@ export default function FEPortal({
           </div>
         </div>
       </div>
-        </>
-      )}
 
       {/* FULL TASK DETAILS MODAL */}
       {selectedTaskForDetails && (
