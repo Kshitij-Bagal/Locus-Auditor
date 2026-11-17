@@ -192,7 +192,8 @@ export async function proxyImageHandler(req, res) {
       res.statusCode = 200;
       res.setHeader('Content-Type', cached.contentType);
       res.setHeader('Content-Length', cached.buffer.length);
-      res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+      // s-maxage instructs Vercel Edge Network to cache at Edge CDN, avoiding Serverless Origin Transfer
+      res.setHeader('Cache-Control', 'public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=86400, immutable');
       res.end(cached.buffer);
       return;
     }
@@ -209,7 +210,8 @@ export async function proxyImageHandler(req, res) {
     res.statusCode = 200;
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Length', buffer.length);
-    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    // s-maxage instructs Vercel Edge Network to cache at Edge CDN, avoiding Serverless Origin Transfer
+    res.setHeader('Cache-Control', 'public, max-age=31536000, s-maxage=31536000, stale-while-revalidate=86400, immutable');
     res.end(buffer);
 
   } catch (err) {

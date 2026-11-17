@@ -95,16 +95,19 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFheHpsaWRlaHVla2Vjc3J6dHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMxODM5NTksImV4cCI6MjEwODc1OTk1OX0.zTFzRDWehSATI78_I38zNZ85jWtBQsbv0LGXvgRptoo';
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // 3. Load Tasks & Users
+    // 3. Load Tasks & Users (fetch only necessary lightweight summary columns to eliminate Fast Origin Transfer overhead)
+    const TASK_DIGEST_FIELDS = 'id, task_id, date, dispatch_date, created_at, audited_at, audit_status, fe_code, fe_name, fe_email, city, hub, facility_code, failed_reasons, auditor_remarks, assigned_auditor_name, email_sent, email_sent_at, email_recipients';
+    const PROFILE_DIGEST_FIELDS = 'id, email, full_name, name, role, roles, city, facility_code, reporting_manager, active';
+
     let tasks = body.tasks;
     let users = body.users;
 
     if (!tasks || tasks.length === 0) {
       const { data: dbTasks, error: taskErr } = await supabase
         .from('tasks')
-        .select('*')
+        .select(TASK_DIGEST_FIELDS)
         .order('created_at', { ascending: false })
-        .limit(5000);
+        .limit(3000);
       if (!taskErr && dbTasks) tasks = dbTasks;
       else tasks = [];
     }
@@ -112,7 +115,7 @@ export async function dailyFeFatalDigestCronHandler(req, res) {
     if (!users || users.length === 0) {
       const { data: dbProfiles, error: profErr } = await supabase
         .from('profiles')
-        .select('*')
+        .select(PROFILE_DIGEST_FIELDS)
         .limit(2000);
       if (!profErr && dbProfiles) users = dbProfiles;
       else users = [];

@@ -166,6 +166,10 @@ export async function compressAndResizeBlob(blob, maxDim = 1024, quality = 0.82)
   });
 }
 
+// In-memory client cache to prevent redundant image downloads and reduce Vercel Fast Origin Transfer
+const clientBase64Cache = new Map();
+const MAX_BASE64_CACHE_ITEMS = 600;
+
 /**
  * Downloads a remote image through the server-side image proxy with a strict 12s timeout,
  * automatically downscales to 1024px, and converts it to optimized base64.
@@ -174,6 +178,10 @@ export async function fetchImageAsBase64(rawUrl, taskId) {
   if (!rawUrl) return null;
   const cleanUrl = normalizeLocusUrl(rawUrl, taskId);
   if (!cleanUrl) return null;
+
+  if (clientBase64Cache.has(cleanUrl)) {
+    return clientBase64Cache.get(cleanUrl);
+  }
 
   try {
     const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(cleanUrl)}`;
@@ -184,7 +192,15 @@ export async function fetchImageAsBase64(rawUrl, taskId) {
     }
 
     const blob = await response.blob();
-    return await compressAndResizeBlob(blob, 1024, 0.82);
+    const base64 = await compressAndResizeBlob(blob, 1024, 0.82);
+    if (base64) {
+      if (clientBase64Cache.size >= MAX_BASE64_CACHE_ITEMS) {
+        const oldest = clientBase64Cache.keys().next().value;
+        clientBase64Cache.delete(oldest);
+      }
+      clientBase64Cache.set(cleanUrl, base64);
+    }
+    return base64;
   } catch (err) {
     console.warn('Error downloading image for Gemini:', err.message);
     return null;

@@ -302,6 +302,10 @@ ${criteriaSchemaExample}
 }`;
 }
 
+// In-memory client cache to prevent redundant image downloads and reduce Vercel Fast Origin Transfer
+const clientMultiAiBase64Cache = new Map();
+const MAX_MULTI_AI_CACHE_ITEMS = 600;
+
 /**
  * Downloads and prepares photos into raw base64 buffers
  */
@@ -316,12 +320,28 @@ export async function downloadAllPhotos(task) {
       return { key, exists: false, base64Obj: null };
     }
     const cleanUrl = normalizeLocusUrl(rawUrl, taskId);
+    if (!cleanUrl) {
+      return { key, exists: false, base64Obj: null };
+    }
+
+    if (clientMultiAiBase64Cache.has(cleanUrl)) {
+      const cached = clientMultiAiBase64Cache.get(cleanUrl);
+      return { key, exists: Boolean(cached), base64Obj: cached };
+    }
+
     try {
       const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(cleanUrl)}`;
       const res = await fetchWithTimeout(proxyUrl, {}, 12000);
       if (!res.ok) return { key, exists: false, base64Obj: null };
       const blob = await res.blob();
       const base64Obj = await compressAndResizeBlob(blob, 1024, 0.82);
+      if (base64Obj) {
+        if (clientMultiAiBase64Cache.size >= MAX_MULTI_AI_CACHE_ITEMS) {
+          const oldest = clientMultiAiBase64Cache.keys().next().value;
+          clientMultiAiBase64Cache.delete(oldest);
+        }
+        clientMultiAiBase64Cache.set(cleanUrl, base64Obj);
+      }
       return { key, exists: Boolean(base64Obj), base64Obj };
     } catch (_) {
       return { key, exists: false, base64Obj: null };
