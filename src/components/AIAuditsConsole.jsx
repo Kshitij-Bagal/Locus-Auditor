@@ -60,7 +60,10 @@ import {
   getProviderFailoverEnabled,
   saveProviderFailoverEnabled,
   testAnyProviderApiKey,
-  auditTaskMultiProvider
+  auditTaskMultiProvider,
+  isFlashOrLiteModel,
+  isProModel,
+  getProEscalationModel
 } from '../utils/multiAiAuditHelper.js';
 import { tasksApi, settingsApi } from '../api/client.js';
 import { INITIAL_CENTRAL_RULES } from '../data/centralRules.js';
@@ -720,7 +723,7 @@ export default function AIAuditsConsole({
     setCurrentProgress({ step: 'INITIALIZING', message: `Starting AI inspection with ${prov.name} for Task #${taskToAudit.taskId || taskToAudit.id}...` });
 
     try {
-      const result = await auditTaskMultiProvider({
+      let result = await auditTaskMultiProvider({
         task: taskToAudit,
         providerId: activeProvider,
         apiKey,
@@ -731,6 +734,55 @@ export default function AIAuditsConsole({
         onProgress: (prog) => setCurrentProgress(prog),
         enableProviderFailover: allowFailover
       });
+
+      // SYSTEMATIC ESCALATION: If audited in flash/flash-light version and error margin > ±15%, pass to pro model
+      const currentModelName = selectedModel || prov.defaultModel;
+      const isFlashTier = isFlashOrLiteModel(currentModelName);
+      const errorMarginVal = Number(result?.errorMargin) || 0;
+
+      if (isFlashTier && errorMarginVal > 15) {
+        const proModel = getProEscalationModel(activeProvider);
+        console.info(`[Pro Escalation] Flash model (${currentModelName}) returned error margin ±${errorMarginVal}% (> ±15%). Escalating Task #${taskToAudit.taskId || taskToAudit.id} to Pro model (${proModel})...`);
+        
+        setCurrentProgress({
+          step: 'PRO_ESCALATION',
+          message: `Uncertainty detected (±${errorMarginVal}% error margin > ±15%). Escalating to ${proModel} at 2 RPM for clinical precision...`
+        });
+
+        // 2 RPM pacing buffer before executing Pro model
+        await new Promise(r => setTimeout(r, 1500));
+
+        try {
+          const proResult = await auditTaskMultiProvider({
+            task: taskToAudit,
+            providerId: activeProvider,
+            apiKey,
+            modelId: proModel,
+            rules: activeRules,
+            strictAntiFalsePositive,
+            customDirectives,
+            onProgress: (prog) => setCurrentProgress({
+              ...prog,
+              message: `[Pro Escalation Re-Audit] ${prog.message || ''}`
+            }),
+            enableProviderFailover: allowFailover
+          });
+
+          if (proResult && proResult.verdict) {
+            proResult.auditorName = `${proModel} (${activeProvider.toUpperCase()} PRO • Escalated from Flash ±${errorMarginVal}%)`;
+            proResult.escalatedFromFlash = true;
+            proResult.originalFlashErrorMargin = errorMarginVal;
+            result = proResult;
+          }
+        } catch (proErr) {
+          const proErrMsg = String(proErr?.message || proErr || '').toLowerCase();
+          if (proErrMsg.includes('429') || proErrMsg.includes('523') || proErrMsg.includes('rate limit') || proErrMsg.includes('too many requests')) {
+            console.warn(`[Pro Escalation] Pro model hit 429/523 rate limit or origin unreachable. Retaining original flash verdict without alert.`);
+          } else {
+            console.warn(`[Pro Escalation] Pro re-audit error, falling back to flash:`, proErr.message);
+          }
+        }
+      }
 
       setActiveAuditResult({
         taskId: taskToAudit.id || taskToAudit.taskId,
@@ -859,6 +911,25 @@ export default function AIAuditsConsole({
       return result;
     } catch (err) {
       console.error('AI Audit Failed:', err);
+      const errMsg = String(err?.message || err || '').toLowerCase();
+      const isRateLimitOrOriginError = 
+        errMsg.includes('429') || 
+        errMsg.includes('523') || 
+        errMsg.includes('too many requests') || 
+        errMsg.includes('rate limit') || 
+        errMsg.includes('resource_exhausted') ||
+        errMsg.includes('origin is unreachable') ||
+        errMsg.includes('origin unreachable');
+
+      if (isRateLimitOrOriginError) {
+        console.warn(`[Auto-Skip] HTTP 429/523 rate limit or origin unreachable detected on Task #${taskToAudit.taskId || taskToAudit.id}. Silently skipping without notification.`);
+        setCurrentProgress({
+          step: 'SKIPPED',
+          message: `Task #${taskToAudit.taskId || taskToAudit.id} skipped (429/523 rate limit/origin busy). Moving directly to next task...`
+        });
+        return { skipped: true, reason: 'HTTP_429_OR_523' };
+      }
+
       alert(`AI Audit Failed: ${err.message}`);
       return null;
     } finally {
@@ -1063,17 +1134,25 @@ export default function AIAuditsConsole({
       // Update UI selection immediately so hero card displays current task being audited
       setSelectedTaskId(t.id || t.taskId);
 
-      // 1. Strict 13 RPM Rate Limiting Guard (Sliding 60-Second Window)
+      // 1. Dynamic RPM Rate Limiter: Pro model = 2 RPM, Flash/Lite = <15 RPM (13 RPM), with fixed 0.5s jitter
+      const currentModel = selectedModel || prov.defaultModel;
+      const isPro = isProModel(currentModel);
+      const targetRpm = isPro ? 2 : 13;
+      const baseDelayMs = isPro ? 29500 : 4120;
+      const FIXED_JITTER_MS = 500; // Fixed 0.5s jitter as requested (random jitter removed)
+
+      // Strict Sliding 60-Second Window Rate Limiting Guard
       const now = Date.now();
       recentRequestTimesRef.current = recentRequestTimesRef.current.filter(ts => now - ts < 60000);
-      if (recentRequestTimesRef.current.length >= 13) {
+      if (recentRequestTimesRef.current.length >= targetRpm) {
         const oldest = recentRequestTimesRef.current[0];
         const waitMs = Math.max(1000, 60000 - (now - oldest) + 500); // Wait until window clears + 500ms safety buffer
         setBatchPaceStatus(prev => ({
           ...prev,
           currentIdx: i + 1,
           totalCount: total,
-          statusText: `13 RPM Safety Guard: 13 requests sent in last 60s. Pausing ${Math.ceil(waitMs / 1000)}s to protect API quota...`
+          jitterSeconds: '0.5',
+          statusText: `${isPro ? '2 RPM Pro' : '<15 RPM Flash'} Guard: ${recentRequestTimesRef.current.length} requests in last 60s. Pausing ${Math.ceil(waitMs / 1000)}s to protect quota...`
         }));
         await new Promise(r => setTimeout(r, waitMs));
         if (isBatchCancelledRef.current) break;
@@ -1088,22 +1167,31 @@ export default function AIAuditsConsole({
         currentIdx: i + 1,
         totalCount: total,
         rpm: currentRpm,
-        statusText: `Auditing Task #${t.taskId || t.id} (${i + 1}/${total})...`
+        jitterSeconds: '0.5',
+        statusText: `Auditing Task #${t.taskId || t.id} (${i + 1}/${total}) [${isPro ? '2 RPM Pro' : '<15 RPM Flash'}]...`
       }));
 
       // Execute AI Audit on task
-      await runAiAuditOnTask(t, autoCommitToDb);
+      const auditResult = await runAiAuditOnTask(t, autoCommitToDb);
+
+      // Direct Silent Skip for HTTP 429 & 523 without stopping or alerting
+      if (auditResult && auditResult.skipped) {
+        setBatchPaceStatus(prev => ({
+          ...prev,
+          statusText: `Silently skipped Task #${t.taskId || t.id} (HTTP 429/523). Moving directly to next task...`
+        }));
+        continue;
+      }
+
       processed++;
 
       if (i < total - 1 && !isBatchCancelledRef.current) {
-        // 2. Base throttle + 1.0s to 1.5s random jitter
-        // Base delay 4620ms ensures ~13 RPM (60000 / 13 = 4615ms)
-        const jitterMs = 1000 + Math.floor(Math.random() * 500); // 1000ms - 1500ms
-        const totalDelay = 4620 + jitterMs;
+        // Base delay + fixed 0.5s jitter (ensures 2 RPM for Pro, <15 RPM for Flash)
+        const totalDelay = baseDelayMs + FIXED_JITTER_MS;
         setBatchPaceStatus(prev => ({
           ...prev,
-          jitterSeconds: (jitterMs / 1000).toFixed(1),
-          statusText: `Pacing: ${(jitterMs / 1000).toFixed(1)}s jitter (maintaining ${currentRpm} RPM)...`
+          jitterSeconds: '0.5',
+          statusText: `Pacing: 0.5s fixed jitter (maintaining ${isPro ? '2 RPM' : '<15 RPM'})...`
         }));
         await new Promise(r => setTimeout(r, totalDelay));
       }
@@ -2454,7 +2542,7 @@ export default function AIAuditsConsole({
                 onClick={() => runContinuousAutoAudit()}
                 disabled={isAuditing || allocatedQueueTasks.length === 0}
                 className="px-4 py-2.5 rounded-xl text-xs font-black bg-gradient-to-r from-sky-600 via-indigo-600 to-purple-600 hover:from-sky-500 hover:to-purple-500 disabled:opacity-50 text-white shadow-xl shadow-indigo-950/50 flex items-center gap-2 transition-all cursor-pointer"
-                title="Continuously audit all tasks allocated to your seat under strict 13 RPM rate limit with 1.0-1.5s jitter"
+                title="Continuously audit all tasks allocated to your seat (2 RPM for Pro, <15 RPM for Flash/Lite with fixed 0.5s jitter, auto-escalating ±15% error margin to Pro)"
               >
                 <Zap className="w-4 h-4 text-amber-300" />
                 <span>Start Auto-Audit (All {allocatedQueueTasks.length} Assigned)</span>
@@ -2527,10 +2615,10 @@ export default function AIAuditsConsole({
               </div>
               <div className="flex items-center gap-2 font-mono text-[11px] flex-wrap">
                 <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-emerald-400 font-bold">
-                  ⚡ Pace: {batchPaceStatus.rpm} / 13 max RPM
+                  ⚡ Pace: {batchPaceStatus.rpm} / {isProModel(selectedModel || prov.defaultModel) ? '2 max' : '<15'} RPM
                 </span>
                 <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-amber-300">
-                  🎲 Jitter: {batchPaceStatus.jitterSeconds}s
+                  ⏱️ Fixed Jitter: {batchPaceStatus.jitterSeconds}s
                 </span>
                 <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-slate-300">
                   Worker {teamWorkerIndex + 1} of {teamWorkerCount}

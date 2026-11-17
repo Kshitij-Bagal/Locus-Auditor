@@ -38,11 +38,13 @@ export const SUPPORTED_PROVIDERS = [
     modelStorageKey: 'locus_gemini_active_model',
     defaultModel: 'gemini-3.8-flash',
     defaultModels: [
-      { id: 'gemini-3.8-flash', label: '⭐ gemini-3.8-flash (Recommended • 15 RPM • 1M Tokens)' },
-      { id: 'gemini-3.7-flash', label: '⚡ gemini-3.7-flash (Fast Flash • 15 RPM)' },
-      { id: 'gemini-3.6-flash', label: '⚡ gemini-3.6-flash (Fast Flash • 15 RPM)' },
-      { id: 'gemini-3.5-flash', label: '⚡ gemini-3.5-flash (Fast Flash • 15 RPM)' },
-      { id: 'gemini-3.1-flash-lite', label: '⚡ gemini-3.1-flash-lite (Ultra Lightweight)' }
+      { id: 'gemini-3.8-flash', label: '⭐ gemini-3.8-flash (Recommended Flash • <15 RPM • 1M Tokens)' },
+      { id: 'gemini-3.7-flash', label: '⚡ gemini-3.7-flash (Fast Flash • <15 RPM)' },
+      { id: 'gemini-3.6-flash', label: '⚡ gemini-3.6-flash (Fast Flash • <15 RPM)' },
+      { id: 'gemini-3.5-flash', label: '⚡ gemini-3.5-flash (Fast Flash • <15 RPM)' },
+      { id: 'gemini-3.1-flash-lite', label: '⚡ gemini-3.1-flash-lite (Ultra Lightweight • <15 RPM)' },
+      { id: 'gemini-2.5-pro', label: '🧠 gemini-2.5-pro (High Precision Pro • 2 RPM)' },
+      { id: 'gemini-1.5-pro', label: '🔬 gemini-1.5-pro (Deep Clinical Reasoning • 2 RPM)' }
     ]
   },
   {
@@ -204,6 +206,56 @@ export function saveProviderModel(providerId, model) {
     } else {
       localStorage.removeItem(prov.modelStorageKey);
     }
+  }
+}
+
+/**
+ * Detects whether a model is in the Flash / Flash-Lite / Mini / Haiku speed tier.
+ */
+export function isFlashOrLiteModel(modelId = '') {
+  const m = String(modelId || '').toLowerCase();
+  return (
+    m.includes('flash') ||
+    m.includes('lite') ||
+    m.includes('mini') ||
+    m.includes('haiku') ||
+    m.includes('11b') ||
+    m.includes('nano')
+  );
+}
+
+/**
+ * Detects whether a model is in the Pro / Flagship reasoning tier.
+ */
+export function isProModel(modelId = '') {
+  const m = String(modelId || '').toLowerCase();
+  return (
+    m.includes('pro') ||
+    m.includes('sonnet') ||
+    m.includes('opus') ||
+    m.includes('90b') ||
+    (m.includes('gpt-4o') && !m.includes('mini')) ||
+    m.includes('gpt-4.5')
+  );
+}
+
+/**
+ * Resolves the designated Pro escalation model for a given provider.
+ */
+export function getProEscalationModel(providerId = 'gemini') {
+  switch (providerId) {
+    case 'gemini':
+      return 'gemini-2.5-pro';
+    case 'openai':
+      return 'gpt-4o';
+    case 'anthropic':
+      return 'claude-3-5-sonnet-20241022';
+    case 'groq':
+      return 'llama-3.2-90b-vision-preview';
+    case 'openrouter':
+      return 'google/gemini-2.5-pro';
+    default:
+      return 'gemini-2.5-pro';
   }
 }
 
